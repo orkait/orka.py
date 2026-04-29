@@ -1,0 +1,22 @@
+The capital of France is
+Once upon a time, there was a small village
+The Pythagorean theorem states that
+def fibonacci(n):
+if n <= 1:
+return n
+A linked list is a linear data structure where
+The mitochondria is the powerhouse of the
+She walked into the room and noticed that
+Climate change refers to long-term shifts in
+The internet connects billions of devices through
+Photosynthesis converts sunlight into chemical energy in
+In a democracy, citizens have the right to
+The largest planet in our solar system is
+Machine learning models learn patterns from
+Beethoven composed his ninth symphony in
+The human brain contains approximately
+Quantum mechanics describes the behavior of particles at
+import numpy as np
+arr = np.zeros((3, 4))
+The French Revolution began in
+World War II ended in

@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+results/
+*.orka/
+*.safetensors
+.orka_progress
+.orka_progress.tmp
+.claude/
