@@ -29,6 +29,7 @@ def verify_artifact(out_dir: Path) -> dict:
     reconstructed_l2_sq = 0.0
     dot = 0.0
     max_mse_delta = 0.0
+    verified_passthrough = 0
     worst_tensors = []
 
     tensors_list = manifest.get("tensors", [])
@@ -68,6 +69,23 @@ def verify_artifact(out_dir: Path) -> dict:
             }
         )
 
+    passthrough_path = out_dir / "passthrough.safetensors"
+    if passthrough_path.exists():
+        source = Path(manifest["source"])
+        source_tensors = source_tensors or {name: tensor for name, tensor in _load_tensors(source)}
+        passthrough_tensors = {name: tensor for name, tensor in _load_tensors(passthrough_path)}
+        for name, tensor in passthrough_tensors.items():
+            if name not in source_tensors:
+                raise KeyError(f"source passthrough tensor missing during verification: {name}")
+            original = _flatten_float_values(source_tensors[name])
+            reconstructed = _flatten_float_values(tensor)
+            if len(original) != len(reconstructed):
+                raise ValueError(f"passthrough value count mismatch for {name}")
+            for src, rec in zip(original, reconstructed):
+                if src != rec:
+                    raise ValueError(f"passthrough tensor mismatch for {name}")
+            verified_passthrough += 1
+
     worst_tensors.sort(key=lambda item: item["mse"], reverse=True)
     aggregate_metrics = _quality_from_totals(
         value_count=weighted_values,
@@ -89,6 +107,6 @@ def verify_artifact(out_dir: Path) -> dict:
         "relative_rmse": aggregate_metrics["relative_rmse"],
         "cosine_similarity": aggregate_metrics["cosine_similarity"],
         "max_mse_delta": max_mse_delta,
+        "verified_passthrough_tensors": verified_passthrough,
         "worst_tensors": worst_tensors[:10],
     }
-

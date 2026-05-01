@@ -25,9 +25,15 @@ def report_artifact(out_dir: Path) -> dict:
         + int((t.get("outliers") or {}).get("values_bytes", 0))
         for t in tensors
     )
+    total_salient_bytes = sum(
+        int((t.get("salient") or {}).get("indices_bytes", 0))
+        + int((t.get("salient") or {}).get("weights_bytes", 0))
+        for t in tensors
+    )
     total_outlier_count = sum(
         int((t.get("outliers") or {}).get("count", 0)) for t in tensors
     )
+    total_passthrough_bytes = 0
     original_fp16_bytes = 0
     weighted_error = 0.0
     weighted_values = 0
@@ -61,6 +67,18 @@ def report_artifact(out_dir: Path) -> dict:
         dot += float(tensor.get("dot", 0.0))
 
     artifact_bytes = _dir_size(out_dir)
+    passthrough_path = out_dir / "passthrough.safetensors"
+    if passthrough_path.exists():
+        total_passthrough_bytes = passthrough_path.stat().st_size
+        try:
+            from orka._checkpoint import _load_tensors
+
+            for _name, tensor in _load_tensors(passthrough_path):
+                shape = [int(x) for x in getattr(tensor, "shape", [])]
+                if shape:
+                    original_fp16_bytes += _product(shape) * 2
+        except Exception:
+            pass
     worst_tensors = sorted(
         (
             {
@@ -102,7 +120,9 @@ def report_artifact(out_dir: Path) -> dict:
         "total_codebook_bytes": total_codebook_bytes,
         "total_scale_bytes": total_scale_bytes,
         "total_outlier_bytes": total_outlier_bytes,
+        "total_salient_bytes": total_salient_bytes,
         "total_outlier_count": total_outlier_count,
+        "total_passthrough_bytes": total_passthrough_bytes,
         "artifact_bytes": artifact_bytes,
         "original_fp16_bytes": original_fp16_bytes,
         "compression_ratio_fp16_to_artifact": compression_ratio,
