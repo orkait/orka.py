@@ -14,6 +14,7 @@ from orka.cli.commands import (
     cmd_inspect,
     cmd_kaggle_pack,
     cmd_pack,
+    cmd_pulse_check,
     cmd_reconstruct,
     cmd_report,
     cmd_sweep,
@@ -343,6 +344,34 @@ def build_parser() -> argparse.ArgumentParser:
     eval_cmd.add_argument("--max-gpu-mem-gb", type=float, default=None,
                           help="strict cap on per-process GPU memory (GB).")
     eval_cmd.set_defaults(func=cmd_eval)
+
+    pulse_check_cmd = sub.add_parser(
+        "pulse-check", help="fast logit-based eval (KL Divergence & Top-1 Agreement)"
+    )
+    pulse_check_cmd.add_argument("artifact")
+    pulse_check_cmd.add_argument(
+        "--prompts", required=True, help="text file with one prompt per non-empty line"
+    )
+    pulse_check_cmd.add_argument("--out", required=True)
+    pulse_check_cmd.add_argument(
+        "--model-dir", default=None, help="override Hugging Face model directory"
+    )
+    pulse_check_cmd.add_argument("--max-prompts", type=int, default=None)
+    pulse_check_cmd.add_argument("--max-length", type=int, default=512)
+    pulse_check_cmd.add_argument("--device", default="cpu")
+    pulse_check_cmd.add_argument("--reconstructed-model-dir", default=None)
+    pulse_check_cmd.add_argument(
+        "--allow-download",
+        action="store_true",
+        help="allow transformers to download missing files",
+    )
+    pulse_check_cmd.add_argument("--max-system-ram-gb", type=float, default=None,
+                                 help="strict cap on total system RAM usage (GB).")
+    pulse_check_cmd.add_argument("--max-cpu-threads", type=int, default=None,
+                                 help="cap CPU threads (torch + OMP/MKL + affinity).")
+    pulse_check_cmd.add_argument("--max-gpu-mem-gb", type=float, default=None,
+                                 help="strict cap on per-process GPU memory (GB).")
+    pulse_check_cmd.set_defaults(func=cmd_pulse_check)
 
     eval_sweep_cmd = sub.add_parser(
         "eval-sweep", help="evaluate every artifact recorded in a sweep JSON"

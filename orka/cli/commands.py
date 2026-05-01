@@ -18,7 +18,7 @@ from orka._runtime import (
 from orka._util import _human_bytes, _parse_params
 from orka.activations import _load_awq_activations
 from orka.deploy.kaggle import cmd_kaggle_pack
-from orka.eval import eval_artifact, eval_sweep
+from orka.eval import eval_artifact, eval_sweep, pulse_check_artifact
 from orka.pipeline.pack import pack_checkpoint
 from orka.quant import (
     _resolve_quant_stages,
@@ -242,6 +242,44 @@ def cmd_eval(args: argparse.Namespace) -> int:
                 "original_perplexity": result["original_perplexity"],
                 "orka_perplexity": result["orka_perplexity"],
                 "perplexity_ratio": result["perplexity_ratio"],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_pulse_check(args: argparse.Namespace) -> int:
+    _apply_gpu_memory_cap("torch", args.device, getattr(args, "max_gpu_mem_gb", None))
+    _apply_system_ram_cap(getattr(args, "max_system_ram_gb", None))
+    _apply_cpu_cap(getattr(args, "max_cpu_threads", None))
+    try:
+        result = pulse_check_artifact(
+            artifact_dir=Path(args.artifact),
+            prompts_path=Path(args.prompts),
+            out_path=Path(args.out),
+            model_dir=Path(args.model_dir) if args.model_dir else None,
+            max_prompts=args.max_prompts,
+            max_length=args.max_length,
+            device=args.device,
+            reconstructed_model_dir=Path(args.reconstructed_model_dir)
+            if args.reconstructed_model_dir
+            else None,
+            local_files_only=not args.allow_download,
+        )
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}, indent=2), file=os.sys.stderr)
+        return 1
+    finally:
+        _stop_ram_monitor()
+    print(
+        json.dumps(
+            {
+                "out": args.out,
+                "artifact": result["artifact"],
+                "kl_divergence": result["kl_divergence"],
+                "top1_agreement": result["top1_agreement"],
+                "total_tokens": result["total_tokens"],
             },
             indent=2,
         )

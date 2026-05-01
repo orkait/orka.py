@@ -175,3 +175,130 @@ def _combine_eval_losses(
         )
     return rows
 
+
+def _hf_pulse_check(
+    original_model_dir: Path,
+    reconstructed_model_dir: Path,
+    prompts: Sequence[str],
+    max_length: int,
+    device: str,
+    local_files_only: bool,
+) -> dict:
+    if max_length < 2:
+        raise ValueError("max_length must be at least 2")
+    torch, AutoModelForCausalLM, AutoTokenizer = _load_hf_eval_dependencies()
+    import torch.nn.functional as F
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(original_model_dir),
+        local_files_only=local_files_only,
+    )
+
+    # 1. Run Original Model
+    model = AutoModelForCausalLM.from_pretrained(
+        str(original_model_dir),
+        local_files_only=local_files_only,
+    )
+    model.to(device)
+    model.eval()
+
+    orig_logits = []
+    try:
+        with torch.no_grad():
+            for prompt in prompts:
+                encoded = tokenizer(
+                    prompt,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=max_length,
+                )
+                input_ids = encoded["input_ids"]
+                if int(input_ids.shape[-1]) < 2:
+                    orig_logits.append(None)
+                    continue
+                model_inputs = {
+                    key: value.to(device)
+                    for key, value in encoded.items()
+                    if key in {"input_ids", "attention_mask"}
+                }
+                outputs = model(**model_inputs)
+                orig_logits.append(outputs.logits.detach().cpu())
+    finally:
+        try:
+            model.to("cpu")
+        except Exception:
+            pass
+        del model
+        if device != "cpu":
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    # 2. Run Reconstructed Model
+    model = AutoModelForCausalLM.from_pretrained(
+        str(reconstructed_model_dir),
+        local_files_only=local_files_only,
+    )
+    model.to(device)
+    model.eval()
+
+    total_kl = 0.0
+    total_tokens = 0
+    top1_matches = 0
+
+    try:
+        with torch.no_grad():
+            for i, prompt in enumerate(prompts):
+                orig_l = orig_logits[i]
+                if orig_l is None:
+                    continue
+                encoded = tokenizer(
+                    prompt,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=max_length,
+                )
+                model_inputs = {
+                    key: value.to(device)
+                    for key, value in encoded.items()
+                    if key in {"input_ids", "attention_mask"}
+                }
+                outputs = model(**model_inputs)
+                orka_l = outputs.logits.detach().cpu()
+
+                # Compare distributions (KL Divergence)
+                p = F.log_softmax(orka_l, dim=-1)
+                q = F.softmax(orig_l, dim=-1)
+                kl = F.kl_div(p, q, reduction="batchmean", log_target=False).item()
+
+                # Compare Top-1 Agreement
+                orig_top1 = orig_l.argmax(dim=-1)
+                orka_top1 = orka_l.argmax(dim=-1)
+                matches = (orig_top1 == orka_top1).sum().item()
+                tokens = orig_top1.numel()
+
+                total_kl += kl * tokens
+                top1_matches += matches
+                total_tokens += tokens
+    finally:
+        try:
+            model.to("cpu")
+        except Exception:
+            pass
+        del model, tokenizer
+        if device != "cpu":
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    if total_tokens == 0:
+        raise ValueError("pulse check prompts produced no scored tokens")
+
+    return {
+        "kl_divergence": total_kl / total_tokens,
+        "top1_agreement": top1_matches / total_tokens,
+        "total_tokens": total_tokens,
+    }
+
