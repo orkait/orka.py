@@ -32,22 +32,11 @@ def _index_bit_spec(index_bits: int) -> tuple[int, str, str]:
 
 
 def _write_indices(path: Path, indices: Sequence[int], index_bits: int) -> None:
+    import numpy as np
     ceiling, np_dtype, struct_fmt = _index_bit_spec(index_bits)
     if _is_torch_tensor(indices):
-        indices = indices.detach().cpu().tolist()
-    if hasattr(indices, "astype") and hasattr(indices, "tobytes"):
-        try:
-            import numpy as np
-        except Exception as exc:
-            raise RuntimeError("NumPy index writing requires numpy") from exc
-        path.write_bytes(np.asarray(indices, dtype=np_dtype).tobytes())
-        return
-    if ceiling == 8:
-        path.write_bytes(bytes(int(i) & 0xFF for i in indices))
-        return
-    with path.open("wb") as f:
-        for index in indices:
-            f.write(struct.pack(struct_fmt, int(index)))
+        indices = indices.detach().cpu().numpy()
+    path.write_bytes(np.asarray(indices, dtype=np_dtype).tobytes())
 
 
 def _write_codebook(path: Path, codebook: Sequence[Sequence[float]]) -> None:
@@ -61,20 +50,11 @@ def _write_codebook(path: Path, codebook: Sequence[Sequence[float]]) -> None:
 
 
 def _write_f32_vector(path: Path, values) -> None:
+    import numpy as np
     path.parent.mkdir(parents=True, exist_ok=True)
     if _is_torch_tensor(values):
-        values = values.detach().cpu().tolist()
-    if hasattr(values, "astype") and hasattr(values, "tobytes"):
-        try:
-            import numpy as np
-        except Exception as exc:
-            raise RuntimeError("NumPy scale writing requires numpy") from exc
-        path.write_bytes(np.asarray(values, dtype="<f4").tobytes())
-        return
-
-    with path.open("wb") as f:
-        for value in values:
-            f.write(struct.pack("<f", float(value)))
+        values = values.detach().cpu().numpy()
+    path.write_bytes(np.asarray(values, dtype="<f4").tobytes())
 
 
 def _read_f32_vector(path: Path, expected_count: int) -> list[float]:
@@ -86,18 +66,6 @@ def _read_f32_vector(path: Path, expected_count: int) -> list[float]:
         )
     return [value[0] for value in struct.iter_unpack("<f", data)]
 
-
-def _read_codebook(
-    path: Path, codebook_size: int, group_size: int
-) -> list[list[float]]:
-    data = path.read_bytes()
-    expected = codebook_size * group_size * 4
-    if len(data) != expected:
-        raise ValueError(
-            f"codebook size mismatch for {path}: expected {expected}, got {len(data)}"
-        )
-    floats = [value[0] for value in struct.iter_unpack("<f", data)]
-    return [floats[i : i + group_size] for i in range(0, len(floats), group_size)]
 
 
 def _read_indices(path: Path, index_bits: int, expected_count: int) -> list[int]:

@@ -61,42 +61,7 @@ def quality_metrics_from_flat(
 ) -> dict:
     if len(source) != len(reconstructed):
         raise ValueError("source and reconstructed values must have the same length")
-
-    try:
-        import numpy as np
-        use_numpy = True
-    except ImportError:
-        use_numpy = False
-
-    if use_numpy:
-        return _quality_metrics_for_numpy_flat(source, reconstructed)
-
-    sse = 0.0
-    abs_error_sum = 0.0
-    max_abs_error = 0.0
-    source_l2_sq = 0.0
-    reconstructed_l2_sq = 0.0
-    dot = 0.0
-
-    for src, rec in zip(source, reconstructed):
-        err = float(src) - float(rec)
-        abs_err = abs(err)
-        sse += err * err
-        abs_error_sum += abs_err
-        max_abs_error = max(max_abs_error, abs_err)
-        source_l2_sq += float(src) * float(src)
-        reconstructed_l2_sq += float(rec) * float(rec)
-        dot += float(src) * float(rec)
-
-    return _quality_from_totals(
-        value_count=len(source),
-        sse=sse,
-        abs_error_sum=abs_error_sum,
-        max_abs_error=max_abs_error,
-        source_l2_sq=source_l2_sq,
-        reconstructed_l2_sq=reconstructed_l2_sq,
-        dot=dot,
-    )
+    return _quality_metrics_for_numpy_flat(source, reconstructed)
 
 
 def _quality_metrics_for_numpy_flat(

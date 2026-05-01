@@ -8,10 +8,10 @@ from typing import Sequence
 
 from orka._format import (
     _index_bit_spec,
-    _read_codebook,
     _read_f32_vector,
     _read_indices,
     _read_outliers,
+    _read_salient,
 )
 from orka.transforms.normalize import (
     _apply_block_max_scales,
@@ -39,35 +39,13 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict) -> list[float]:
             }
         ]
 
-    try:
-        import numpy as np
-        use_numpy = True
-    except ImportError:
-        use_numpy = False
-
-    if use_numpy:
-        decoded_np = np.zeros(index_count * group_size, dtype=np.float32)
-        for stage in stages:
-            cb = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, group_size)
-            idxs = np.asarray(_read_indices(out_dir / stage["indices"], int(stage["index_bits"]), index_count), dtype=np.int64)
-            decoded_np += cb[idxs].reshape(-1)
-        decoded = decoded_np[: int(tensor_meta["packed_values"])].tolist()
-    else:
-        decoded = [0.0] * (index_count * group_size)
-        for stage in stages:
-            cb = _read_codebook(
-                out_dir / stage["codebook"], int(stage["codebook_size"]), group_size
-            )
-            idxs = _read_indices(
-                out_dir / stage["indices"], int(stage["index_bits"]), index_count
-            )
-            offset = 0
-            for index in idxs:
-                row = cb[index]
-                for j in range(group_size):
-                    decoded[offset + j] += row[j]
-                offset += group_size
-        decoded = decoded[: int(tensor_meta["packed_values"])]
+    import numpy as np
+    decoded_np = np.zeros(index_count * group_size, dtype=np.float32)
+    for stage in stages:
+        cb = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, group_size)
+        idxs = np.asarray(_read_indices(out_dir / stage["indices"], int(stage["index_bits"]), index_count), dtype=np.int64)
+        decoded_np += cb[idxs].reshape(-1)
+    decoded = decoded_np[: int(tensor_meta["packed_values"])].tolist()
     outl = tensor_meta.get("outliers")
     if outl:
         positions, values = _read_outliers(
@@ -108,12 +86,11 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict) -> list[float]:
 
     salient = tensor_meta.get("salient")
     if salient:
-        s_idx = np.fromfile(str(out_dir / salient["indices"]), dtype="<u4")
-        s_val = np.fromfile(str(out_dir / salient["weights"]), dtype="<f4")
-        
+        s_idx, s_val = _read_salient(out_dir / salient["indices"], out_dir / salient["weights"])
         # SLRQ: re-inject salient weights AFTER scaling to avoid double-scaling.
+        block_size = int(tensor_meta.get("block_scale_size", 16))
         for b_idx, (local_idx, weight) in enumerate(zip(s_idx, s_val)):
-            flat_idx = b_idx * int(tensor_meta.get("block_scale_size", 16)) + int(local_idx)
+            flat_idx = b_idx * block_size + int(local_idx)
             if flat_idx < len(decoded):
                 decoded[flat_idx] = float(weight)
 

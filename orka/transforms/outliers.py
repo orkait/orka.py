@@ -35,15 +35,4 @@ def _extract_outliers(vectors, outlier_frac: float, packed_values: int):
         values = flat[positions].astype(np.float32)
         flat[positions] = 0
         return positions, values, flat.reshape(vectors.shape)
-    flat = []
-    for row in vectors:
-        flat.extend(float(v) for v in row)
-    pairs = [(abs(flat[i]), i) for i in range(n)]
-    pairs.sort(reverse=True)
-    positions = [p for _, p in pairs[:k]]
-    values = [flat[p] for p in positions]
-    for p in positions:
-        flat[p] = 0.0
-    g = len(vectors[0])
-    new_vectors = [flat[i * g : (i + 1) * g] for i in range(len(vectors))]
-    return positions, values, new_vectors
+    raise TypeError(f"unsupported tensor type for outlier extraction: {type(vectors)}")
