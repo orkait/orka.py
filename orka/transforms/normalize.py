@@ -20,10 +20,9 @@ def _normalize_tensor_awq_block_max_torch(tensor, X, alpha, block_size, device):
     shape = [int(x) for x in arr.shape]
     rows = arr.reshape(shape[0], -1)
     if X_t.shape[1] != rows.shape[1]:
-        norm_tensor, block_scales, src_flat = _normalize_tensor_block_max_torch(
-            tensor, block_size, device
+        raise RuntimeError(
+            f"awq-block-max calibration shape {tuple(X_t.shape)} mismatches tensor cols {rows.shape[1]}"
         )
-        return norm_tensor, block_scales, src_flat, None
 
     act_mag = X_t.abs().mean(dim=0).clamp(min=1e-6)
     s = act_mag**alpha
