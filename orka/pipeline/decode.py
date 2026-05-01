@@ -88,7 +88,7 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict) -> list[float]:
     if salient:
         s_idx, s_val = _read_salient(out_dir / salient["indices"], out_dir / salient["weights"])
         # SLRQ: re-inject salient weights AFTER scaling to avoid double-scaling.
-        block_size = int(tensor_meta.get("block_scale_size", 16))
+        block_size = int(tensor_meta.get("block_scale_size") or 32)
         for b_idx, (local_idx, weight) in enumerate(zip(s_idx, s_val)):
             flat_idx = b_idx * block_size + int(local_idx)
             if flat_idx < len(decoded):
@@ -192,7 +192,7 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
         s_val = torch.from_numpy(s_val_np).to(device)
         
         # SLRQ: re-inject salient weights AFTER scaling to avoid double-scaling.
-        block_size = int(tm.get("block_scale_size", 16))
+        block_size = int(tm.get("block_scale_size") or 32)
         b_count = len(s_idx)
         b_indices = torch.arange(b_count, device=device)
         flat_indices = b_indices * block_size + s_idx

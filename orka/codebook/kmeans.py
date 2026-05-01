@@ -15,90 +15,97 @@ from orka._tensor import _is_numpy_array, _is_torch_tensor, _torch_float32_matri
 def _kmeans_pp_init_torch(
     rows, k: int, seed: int | None = None, oversample_factor: float = 2.0
 ):
+    """Scalable K-Means++ (k-means||) init, memory-bounded.
+
+    Memory bound: ``per_round_candidates`` capped at ``min(oversample_factor * k, n // 5)``
+    so the (batch x candidates) distance matrix never blows past ~256 MB.
+    Total accumulated candidates capped at ``5 * k`` regardless of round count.
+    """
     import torch
 
     n = int(rows.shape[0])
-    d = int(rows.shape[1])
     if k >= n:
         return rows.clone()
     gen = torch.Generator(device=rows.device)
     if seed is not None:
         gen.manual_seed(int(seed) & ((1 << 63) - 1))
 
-    # K-Means|| (Scalable K-Means++)
     first = int(torch.randint(n, (1,), generator=gen, device=rows.device).item())
-    centroids = [rows[first]]
     min_d2 = torch.sum((rows - rows[first]) ** 2, dim=1)
+    candidate_chunks: list = [rows[first].unsqueeze(0)]
+    total_candidates = 1
+    candidate_cap = 5 * k  # absolute upper bound across all rounds
 
-    # We sample ~ l points per step. l = oversample_factor * k
-    # We do this log(n) times, but usually a small constant like 5 is enough
-    for _ in range(5):
-        if len(centroids) >= k:
+    rounds = 5
+    per_round_cap = max(1, min(int(oversample_factor * k), n // 5))
+    for _ in range(rounds):
+        if total_candidates >= candidate_cap:
             break
         sum_d2 = min_d2.sum().item()
         if sum_d2 == 0:
             break
         probs = min_d2 / sum_d2
-        # Sample l points
-        l = int(oversample_factor * k)
         rand_vals = torch.rand(n, generator=gen, device=rows.device)
-        chosen = torch.where(rand_vals < probs * l)[0]
-
+        chosen = torch.where(rand_vals < probs * per_round_cap)[0]
         if chosen.numel() == 0:
             break
+        # Cap candidates this round to avoid distance-matrix blow-up.
+        if int(chosen.numel()) > per_round_cap:
+            chosen = chosen[:per_round_cap]
 
-        new_centers = rows[chosen]
-        for c in new_centers:
-            centroids.append(c)
-            
-        # Update min_d2 efficiently using GEMM
-        # Pre-calculate squared norms for new centers
+        new_centers = rows[chosen].contiguous()
+        candidate_chunks.append(new_centers)
+        total_candidates += int(new_centers.shape[0])
+
+        # Update min_d2 with GEMM-form distance, chunking by ~256 MB matrix budget.
         c_norm_sq = torch.sum(new_centers * new_centers, dim=1, keepdim=True).T
-        
-        batch_size = max(1024, (1 << 28) // max(int(new_centers.shape[0]), 1))
+        c_count = int(new_centers.shape[0])
+        # 256 MB / (4 bytes * c_count) rows per chunk
+        batch_size = max(256, min(65536, (1 << 28) // (4 * max(c_count, 1))))
         for i in range(0, n, batch_size):
             batch_rows = rows[i : i + batch_size]
             r_norm_sq = torch.sum(batch_rows * batch_rows, dim=1, keepdim=True)
-            
             dists = torch.addmm(
                 (r_norm_sq + c_norm_sq),
                 batch_rows,
                 new_centers.T,
                 alpha=-2.0,
-                beta=1.0
+                beta=1.0,
             )
-            
             min_d2[i : i + batch_size] = torch.minimum(
                 min_d2[i : i + batch_size], dists.min(dim=1)[0]
             )
-        del dists, batch_rows, new_centers
+            del dists, batch_rows, r_norm_sq
+        del new_centers, c_norm_sq
 
-
-    centroids = torch.stack(centroids)
+    centroids = torch.cat(candidate_chunks, dim=0)
     if centroids.shape[0] > k:
-        # If we oversampled, run K-Means++ on the sampled set to reduce to k
+        # Reduce oversampled candidates to exactly k via classic K-Means++ on the subset.
         subset = centroids
-        final_centers = [subset[0]]
+        sub_n = int(subset.shape[0])
+        final_idx = torch.empty(k, dtype=torch.long, device=rows.device)
+        final_idx[0] = 0
         sub_d2 = torch.sum((subset - subset[0]) ** 2, dim=1)
-        for _ in range(1, k):
+        for j in range(1, k):
             sum_d2 = sub_d2.sum().item()
             if sum_d2 == 0:
-                break
+                final_idx[j] = j % sub_n
+                continue
             probs = sub_d2 / sum_d2
             cumprobs = torch.cumsum(probs, dim=0)
             r = torch.rand(1, generator=gen, device=rows.device).item()
             chosen_idx = int(torch.searchsorted(cumprobs, r).item())
-            chosen_idx = min(chosen_idx, subset.shape[0] - 1)
-            final_centers.append(subset[chosen_idx])
+            chosen_idx = min(chosen_idx, sub_n - 1)
+            final_idx[j] = chosen_idx
             d2 = torch.sum((subset - subset[chosen_idx]) ** 2, dim=1)
             sub_d2 = torch.minimum(sub_d2, d2)
-        centroids = torch.stack(final_centers)
+        centroids = subset.index_select(0, final_idx)
 
-    # Pad if we have less than k
-    while centroids.shape[0] < k:
-        centroids = torch.cat(
-            [centroids, rows[torch.randint(n, (1,), generator=gen, device=rows.device)]]
-        )
+    # Pad if undersampled (possible when sum_d2 hit zero early).
+    if centroids.shape[0] < k:
+        deficit = k - int(centroids.shape[0])
+        extra_idx = torch.randint(n, (deficit,), generator=gen, device=rows.device)
+        centroids = torch.cat([centroids, rows.index_select(0, extra_idx)], dim=0)
 
     return centroids[:k]
 
