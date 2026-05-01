@@ -3,7 +3,7 @@ set -e
 
 echo "Starting Small Test Run (smollm2-135m, per-tensor, EM-AQ)..."
 
-.venv/bin/python3 orka.py pack \
+.venv/bin/python3 -m orka pack \
   /mnt/storage/codespace/code/orkait/graphstore/graphstore/models/orka-smollm2-135m/model.safetensors \
   --out results/test-joint-opt.orka \
   --sensitivity-map results/sensitivity_map_wikitext.json \
@@ -21,6 +21,6 @@ echo "Starting Small Test Run (smollm2-135m, per-tensor, EM-AQ)..."
 
 echo "Pack complete. Verifying artifact (Testing Vectorized Decode)..."
 
-.venv/bin/python3 orka.py verify results/test-joint-opt.orka
+.venv/bin/python3 -m orka verify results/test-joint-opt.orka
 
 echo "Test complete successfully."

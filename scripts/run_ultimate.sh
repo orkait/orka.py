@@ -1,7 +1,7 @@
 #!/bin/bash
 echo "Starting SOTA Pack..." > /tmp/orka-ultimate.log
 
-.venv/bin/python3 orka.py pack \
+.venv/bin/python3 -m orka pack \
   /mnt/storage/codespace/code/orkait/graphstore/graphstore/models/orka-smollm2-135m/model.safetensors \
   --out results/smollm2-135m-ultimate.orka \
   --sensitivity-map results/sensitivity_map_wikitext.json \
@@ -20,7 +20,7 @@ echo "Starting SOTA Pack..." > /tmp/orka-ultimate.log
 
 echo "Pack complete. Starting Eval..." >> /tmp/orka-ultimate.log
 
-.venv/bin/python3 orka.py eval \
+.venv/bin/python3 -m orka eval \
   results/smollm2-135m-ultimate.orka \
   --prompts wiki_prompts.txt \
   --out results/eval-ultimate.json \
