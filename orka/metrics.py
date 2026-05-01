@@ -41,6 +41,13 @@ def _quality_from_totals(
     else:
         cosine = 1.0 if source_l2_sq == 0 and reconstructed_l2_sq == 0 else 0.0
 
+    if sse > 0 and source_l2_sq > 0:
+        sqnr = 10.0 * math.log10(source_l2_sq / sse)
+    elif sse == 0 and source_l2_sq > 0:
+        sqnr = float("inf")
+    else:
+        sqnr = 0.0
+
     return {
         "value_count": value_count,
         "sse": sse,
@@ -53,6 +60,7 @@ def _quality_from_totals(
         "dot": dot,
         "relative_rmse": relative_rmse,
         "cosine_similarity": cosine,
+        "sqnr": sqnr,
     }
 
 
