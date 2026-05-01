@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Sequence
 
 from orka._tensor import _numpy_float32_array, _torch_f32
+from orka._util import _product
 
 
 def _normalize_tensor_awq_block_max_torch(tensor, X, alpha, block_size, device):

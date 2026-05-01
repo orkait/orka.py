@@ -251,6 +251,15 @@ def pack_checkpoint(
                         block_scale_size, backend, resolved_device, awq_fallbacks,
                     )
 
+                # Capture pre-rotation flat when rotation is on but normalization didn't set it.
+                # _stage_quality_metrics needs source_flat to compare un-rotated decode output.
+                if source_flat is None and rotation != "none":
+                    if backend == "torch":
+                        _, _arr = _torch_f32(tensor, resolved_device)
+                        source_flat = _arr.reshape(-1).detach().cpu()
+                    else:
+                        source_flat = _numpy_float32_array(tensor).reshape(-1)
+
                 tensor_seed = None
                 if rotation == "orthogonal":
                     tensor, tensor_seed = _rotate_tensor_to_2d(
@@ -621,7 +630,7 @@ def pack_checkpoint(
 
                     # When k >= sample_vectors the codebook already memorizes the sample;
                     # joint refinement gives near-zero quality gain but dominates runtime.
-                    if k >= sample_vectors:
+                    if sample_vectors is not None and k >= sample_vectors:
                         continue
 
                     # O(1) Residual Update: target = orig - (full_sum - current_stage_dec)

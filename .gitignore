@@ -12,3 +12,4 @@ results/
 .gemini/
 *.egg-info/
 .pytest_cache/
+docs/plans/**/*
