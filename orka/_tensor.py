@@ -152,12 +152,7 @@ def _sample_vector_rows(vectors, sample_vectors: int | None):
         positions = np.linspace(0, len(vectors) - 1, sample_vectors, dtype=np.int64)
         return vectors[positions]
 
-    if sample_vectors == 1:
-        return [vectors[len(vectors) // 2]]
-    last = len(vectors) - 1
-    return [
-        vectors[round(i * last / (sample_vectors - 1))] for i in range(sample_vectors)
-    ]
+    raise TypeError(f"unsupported tensor type for vector sampling: {type(vectors)}")
 
 
 def _concat_vector_parts(parts: Sequence[object]):
@@ -176,10 +171,7 @@ def _concat_vector_parts(parts: Sequence[object]):
             raise RuntimeError("NumPy vector concatenation requires numpy") from exc
         return np.concatenate(parts, axis=0)
 
-    out = []
-    for part in parts:
-        out.extend(part)
-    return out
+    raise TypeError(f"unsupported tensor type for concatenation: {type(parts[0])}")
 
 def _decode_to_vectors_format(
     vectors_template, codebook, indices, backend: str, device: str
@@ -203,7 +195,7 @@ def _decode_to_vectors_format(
         cb = np.asarray(codebook, dtype=np.float32)
         idx = np.asarray(indices, dtype=np.int64)
         return cb[idx]
-    return [list(codebook[int(i)]) for i in indices]
+    raise TypeError(f"unsupported vectors_template type: {type(vectors_template)}")
 
 
 def _vectors_subtract(a, b):
@@ -225,5 +217,5 @@ def _vectors_subtract(a, b):
         import numpy as np
 
         return np.asarray(a, dtype=np.float32) - np.asarray(b, dtype=np.float32)
-    return [[float(x) - float(y) for x, y in zip(ra, rb)] for ra, rb in zip(a, b)]
+    raise TypeError(f"unsupported types for vector subtract: {type(a)}, {type(b)}")
 
