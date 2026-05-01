@@ -106,6 +106,7 @@ def verify_artifact(out_dir: Path) -> dict:
         "max_abs_error": aggregate_metrics["max_abs_error"],
         "relative_rmse": aggregate_metrics["relative_rmse"],
         "cosine_similarity": aggregate_metrics["cosine_similarity"],
+        "sqnr": aggregate_metrics["sqnr"],
         "max_mse_delta": max_mse_delta,
         "verified_passthrough_tensors": verified_passthrough,
         "worst_tensors": worst_tensors[:10],
