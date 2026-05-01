@@ -3,7 +3,7 @@ echo "Starting Qwen 0.5B Compress Pipeline..." > /tmp/orka-qwen.log
 
 
 echo "2. Packing Model (AWQ-Block-Max, RVQ-16-8, K-Means||, EM-AQ)..." >> /tmp/orka-qwen.log
-.venv/bin/python3 orka.py pack \
+.venv/bin/python3 -m orka pack \
   /tmp/qwen-0.5b/model.safetensors \
   --out results/qwen-0.5b-ultimate.orka \
   --sensitivity-map results/qwen_sensitivity_map.json \
@@ -20,7 +20,7 @@ echo "2. Packing Model (AWQ-Block-Max, RVQ-16-8, K-Means||, EM-AQ)..." >> /tmp/o
   --iterations 4 >> /tmp/orka-qwen.log 2>&1
 
 echo "3. Evaluating Model..." >> /tmp/orka-qwen.log
-.venv/bin/python3 orka.py eval \
+.venv/bin/python3 -m orka eval \
   results/qwen-0.5b-ultimate.orka \
   --prompts wiki_prompts.txt \
   --out results/eval-qwen-ultimate.json \

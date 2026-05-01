@@ -9,3 +9,7 @@ results/
 .orka_progress
 .orka_progress.tmp
 .claude/
+.gemini/
+*.egg-info/
+.pytest_cache/
+docs/plans/**/*

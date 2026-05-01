@@ -8,7 +8,7 @@ echo "Starting FULL Model Quantization: SmollM2-135M"
 echo "Strategy: RVQ-16-8, AWQ-Block-Max, Orthogonal Rotation, Joint EM-AQ"
 
 # Run the optimized pack
-time .venv/bin/python3 orka.py pack \
+time .venv/bin/python3 -m orka pack \
   "$MODEL_PATH" \
   --out "$OUT_DIR" \
   --sensitivity-map results/sensitivity_map_wikitext.json \
@@ -25,4 +25,4 @@ time .venv/bin/python3 orka.py pack \
 
 echo "Quantization Complete. Running Verify..."
 
-time .venv/bin/python3 orka.py verify "$OUT_DIR"
+time .venv/bin/python3 -m orka verify "$OUT_DIR"
