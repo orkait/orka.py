@@ -8,7 +8,13 @@ import os
 from dataclasses import asdict
 from pathlib import Path
 
-from orka._runtime import _apply_gpu_memory_cap, _wrap_capped_oom
+from orka._runtime import (
+    _apply_cpu_cap,
+    _apply_gpu_memory_cap,
+    _apply_system_ram_cap,
+    _stop_ram_monitor,
+    _wrap_capped_oom,
+)
 from orka._util import _human_bytes, _parse_params
 from orka.activations import _load_awq_activations
 from orka.deploy.kaggle import cmd_kaggle_pack
@@ -52,62 +58,67 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
 def cmd_pack(args: argparse.Namespace) -> int:
     _apply_gpu_memory_cap(args.backend, args.device, args.max_gpu_mem_gb)
-    awq_activations = _load_awq_activations(args)
+    _apply_system_ram_cap(args.max_system_ram_gb)
+    _apply_cpu_cap(args.max_cpu_threads)
+    try:
+        awq_activations = _load_awq_activations(args)
 
-    if is_rvq_mixed_spec(args.quant_mode):
-        family_map = rvq_mixed_family_stages()
-        sizes = [family_map["other"][0]]
-        codebook_mode = "per-tensor"
-    else:
-        family_map = None
-        sizes = _resolve_quant_stages(
-            args.quant_mode, args.codebook_sizes, args.codebook_size
+        if is_rvq_mixed_spec(args.quant_mode):
+            family_map = rvq_mixed_family_stages()
+            sizes = [family_map["other"][0]]
+            codebook_mode = "per-tensor"
+        else:
+            family_map = None
+            sizes = _resolve_quant_stages(
+                args.quant_mode, args.codebook_sizes, args.codebook_size
+            )
+            codebook_mode = args.codebook_mode
+        smap = None
+        if getattr(args, "sensitivity_map", None):
+            with open(args.sensitivity_map, "r") as f:
+                smap = json.load(f)
+        manifest = _wrap_capped_oom(
+            args.max_gpu_mem_gb,
+            pack_checkpoint,
+            source=Path(args.source),
+            out_dir=Path(args.out),
+            group_size=args.group_size,
+            codebook_size=sizes[0],
+            iterations=args.iterations,
+            max_values_per_tensor=args.max_values_per_tensor,
+            codebook_mode=codebook_mode,
+            sample_vectors=args.sample_vectors,
+            backend=args.backend,
+            normalization=args.normalization,
+            device=args.device,
+            codebook_sizes=sizes if family_map is None else None,
+            family_stages_map=family_map,
+            outlier_frac=args.outlier_frac,
+            rotation=args.rotation,
+            rotation_seed=args.rotation_seed,
+            awq_activations=awq_activations,
+            awq_alpha=args.awq_alpha,
+            max_tensors=args.max_tensors,
+            sensitivity_map=smap,
+            progress_file=Path(args.progress_file) if args.progress_file else None,
+            codebook_cache_dir=Path(args.codebook_cache).expanduser()
+            if args.codebook_cache
+            else None,
+            block_scale_size=args.block_scale_size,
         )
-        codebook_mode = args.codebook_mode
-    smap = None
-    if getattr(args, "sensitivity_map", None):
-        with open(args.sensitivity_map, "r") as f:
-            smap = json.load(f)
-    manifest = _wrap_capped_oom(
-        args.max_gpu_mem_gb,
-        pack_checkpoint,
-        source=Path(args.source),
-        out_dir=Path(args.out),
-        group_size=args.group_size,
-        codebook_size=sizes[0],
-        iterations=args.iterations,
-        max_values_per_tensor=args.max_values_per_tensor,
-        codebook_mode=codebook_mode,
-        sample_vectors=args.sample_vectors,
-        backend=args.backend,
-        normalization=args.normalization,
-        device=args.device,
-        codebook_sizes=sizes if family_map is None else None,
-        family_stages_map=family_map,
-        outlier_frac=args.outlier_frac,
-        rotation=args.rotation,
-        rotation_seed=args.rotation_seed,
-        awq_activations=awq_activations,
-        awq_alpha=args.awq_alpha,
-        max_tensors=args.max_tensors,
-        sensitivity_map=smap,
-        progress_file=Path(args.progress_file) if args.progress_file else None,
-        codebook_cache_dir=Path(args.codebook_cache).expanduser()
-        if args.codebook_cache
-        else None,
-        block_scale_size=args.block_scale_size,
-    )
-    print(
-        json.dumps(
-            {
-                "out": args.out,
-                "tensor_count": manifest["tensor_count"],
-                "total_index_bytes": manifest["total_index_bytes"],
-            },
-            indent=2,
+        print(
+            json.dumps(
+                {
+                    "out": args.out,
+                    "tensor_count": manifest["tensor_count"],
+                    "total_index_bytes": manifest["total_index_bytes"],
+                },
+                indent=2,
+            )
         )
-    )
-    return 0
+        return 0
+    finally:
+        _stop_ram_monitor()
 
 
 def cmd_report(args: argparse.Namespace) -> int:
@@ -137,57 +148,62 @@ def cmd_reconstruct(args: argparse.Namespace) -> int:
 
 def cmd_sweep(args: argparse.Namespace) -> int:
     _apply_gpu_memory_cap(args.backend, args.device, args.max_gpu_mem_gb)
-    awq_activations = _load_awq_activations(args)
+    _apply_system_ram_cap(args.max_system_ram_gb)
+    _apply_cpu_cap(args.max_cpu_threads)
+    try:
+        awq_activations = _load_awq_activations(args)
 
-    cb_sizes = list(args.codebook_sizes) if args.codebook_sizes else []
-    qmodes = list(args.quant_modes) if args.quant_modes else []
-    if not cb_sizes and not qmodes:
-        cb_sizes = [256]
+        cb_sizes = list(args.codebook_sizes) if args.codebook_sizes else []
+        qmodes = list(args.quant_modes) if args.quant_modes else []
+        if not cb_sizes and not qmodes:
+            cb_sizes = [256]
 
-    smap = None
-    if getattr(args, "sensitivity_map", None):
-        with open(args.sensitivity_map, "r") as f:
-            smap = json.load(f)
+        smap = None
+        if getattr(args, "sensitivity_map", None):
+            with open(args.sensitivity_map, "r") as f:
+                smap = json.load(f)
 
-    result = _wrap_capped_oom(
-        args.max_gpu_mem_gb,
-        sweep_checkpoint,
-        outlier_frac=args.outlier_frac,
-        rotation=args.rotation,
-        rotation_seed=args.rotation_seed,
-        source=Path(args.source),
-        out_path=Path(args.out),
-        group_sizes=args.group_sizes,
-        codebook_sizes=cb_sizes,
-        codebook_modes=args.codebook_modes,
-        normalizations=args.normalizations,
-        iterations=args.iterations,
-        max_values_per_tensor=args.max_values_per_tensor,
-        sample_vectors=args.sample_vectors,
-        backend=args.backend,
-        device=args.device,
-        verify_runs=args.verify,
-        quant_modes=qmodes,
-        awq_activations=awq_activations,
-        awq_alpha=args.awq_alpha,
-        awq_alphas=args.awq_alphas,
-        max_tensors=args.max_tensors,
-        sensitivity_map=smap,
-        progress_file=Path(args.progress_file) if args.progress_file else None,
-    )
-    print(
-        json.dumps(
-            {
-                "out": result["out"],
-                "artifact_root": result["artifact_root"],
-                "run_count": result["run_count"],
-                "best_by_relative_rmse": result["best_by_relative_rmse"],
-                "best_by_cosine_per_mb": result["best_by_cosine_per_mb"],
-            },
-            indent=2,
+        result = _wrap_capped_oom(
+            args.max_gpu_mem_gb,
+            sweep_checkpoint,
+            outlier_frac=args.outlier_frac,
+            rotation=args.rotation,
+            rotation_seed=args.rotation_seed,
+            source=Path(args.source),
+            out_path=Path(args.out),
+            group_sizes=args.group_sizes,
+            codebook_sizes=cb_sizes,
+            codebook_modes=args.codebook_modes,
+            normalizations=args.normalizations,
+            iterations=args.iterations,
+            max_values_per_tensor=args.max_values_per_tensor,
+            sample_vectors=args.sample_vectors,
+            backend=args.backend,
+            device=args.device,
+            verify_runs=args.verify,
+            quant_modes=qmodes,
+            awq_activations=awq_activations,
+            awq_alpha=args.awq_alpha,
+            awq_alphas=args.awq_alphas,
+            max_tensors=args.max_tensors,
+            sensitivity_map=smap,
+            progress_file=Path(args.progress_file) if args.progress_file else None,
         )
-    )
-    return 0
+        print(
+            json.dumps(
+                {
+                    "out": result["out"],
+                    "artifact_root": result["artifact_root"],
+                    "run_count": result["run_count"],
+                    "best_by_relative_rmse": result["best_by_relative_rmse"],
+                    "best_by_cosine_per_mb": result["best_by_cosine_per_mb"],
+                },
+                indent=2,
+            )
+        )
+        return 0
+    finally:
+        _stop_ram_monitor()
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
