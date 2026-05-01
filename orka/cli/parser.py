@@ -102,6 +102,18 @@ def build_parser() -> argparse.ArgumentParser:
             help="strict cap on per-process GPU memory (GB)",
         )
         p.add_argument(
+            "--max-system-ram-gb",
+            type=float,
+            default=None,
+            help="strict cap on total system RAM usage (GB). If exceeded, the process terminates safely.",
+        )
+        p.add_argument(
+            "--max-cpu-threads",
+            type=int,
+            default=None,
+            help="limit the number of CPU threads used by torch/numpy.",
+        )
+        p.add_argument(
             "--outlier-frac",
             type=float,
             default=0.0,
@@ -251,6 +263,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="strict cap on per-process GPU memory (GB)",
+    )
+    sweep.add_argument(
+        "--max-system-ram-gb",
+        type=float,
+        default=None,
+        help="strict cap on total system RAM usage (GB). If exceeded, the process terminates safely.",
+    )
+    sweep.add_argument(
+        "--max-cpu-threads",
+        type=int,
+        default=None,
+        help="limit the number of CPU threads used by torch/numpy.",
     )
     sweep.add_argument(
         "--progress-file", help="file to write real-time progress status"

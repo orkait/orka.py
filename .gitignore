@@ -13,3 +13,5 @@ results/
 *.egg-info/
 .pytest_cache/
 docs/plans/**/*
+.orka_progress*
+test_model.json
