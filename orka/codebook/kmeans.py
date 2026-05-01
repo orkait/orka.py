@@ -110,32 +110,85 @@ def _kmeans_pp_init_torch(
     return centroids[:k]
 
 
-def _kmeans_pp_init_numpy(rows, k: int, seed: int | None = None):
+def _kmeans_parallel_init_numpy(rows, k: int, seed: int | None = None, oversample_factor: float = 2.0):
+    """Scalable K-Means++ (k-means||) init for numpy.
+
+    Same algorithm as the torch version: 5 rounds of proportional oversampling,
+    candidate cap at 5*k, GEMM-based distance update, classic K-Means++ reduction
+    on the candidate subset. O(n * rounds) distance work instead of O(n * k).
+    """
     import numpy as np
 
     n, d = rows.shape
     if k >= n:
         return rows.copy()
-    centroids = np.empty((k, d), dtype=np.float32)
+
     rng = (
         np.random.default_rng(int(seed) & 0xFFFFFFFFFFFFFFFF)
         if seed is not None
         else np.random.default_rng()
     )
-    centroids[0] = rows[rng.integers(n)]
-    min_d2 = np.full(n, np.inf, dtype=np.float64)
-    for i in range(1, k):
-        diff = rows - centroids[i - 1]
-        d2 = np.sum(diff * diff, axis=1, dtype=np.float64)
-        np.minimum(min_d2, d2, out=min_d2)
-        total = float(min_d2.sum())
-        if not math.isfinite(total) or total <= 0:
-            idx = int(rng.integers(n))
-        else:
-            probs = min_d2 / total
-            idx = int(rng.choice(n, p=probs))
-        centroids[i] = rows[idx]
-    return centroids
+
+    first = int(rng.integers(n))
+    min_d2 = np.sum((rows - rows[first]) ** 2, axis=1, dtype=np.float64)
+    candidate_chunks = [rows[[first]]]
+    total_candidates = 1
+    candidate_cap = 5 * k
+
+    rounds = 5
+    per_round_cap = max(1, min(int(oversample_factor * k), n // 5))
+
+    for _ in range(rounds):
+        if total_candidates >= candidate_cap:
+            break
+        sum_d2 = float(min_d2.sum())
+        if not math.isfinite(sum_d2) or sum_d2 <= 0:
+            break
+        probs = min_d2 / sum_d2
+        rand_vals = rng.random(n)
+        chosen = np.where(rand_vals < probs * per_round_cap)[0]
+        if len(chosen) == 0:
+            break
+        if len(chosen) > per_round_cap:
+            chosen = chosen[:per_round_cap]
+
+        new_centers = rows[chosen]
+        candidate_chunks.append(new_centers)
+        total_candidates += len(new_centers)
+
+        c_norm_sq = np.sum(new_centers * new_centers, axis=1, dtype=np.float64)
+        chunk_size = max(256, min(65536, (1 << 28) // (4 * max(len(chosen), 1))))
+        for start in range(0, n, chunk_size):
+            end = min(start + chunk_size, n)
+            batch = rows[start:end].astype(np.float64)
+            r_norm_sq = np.sum(batch * batch, axis=1)
+            dists = r_norm_sq[:, None] + c_norm_sq[None, :] - 2.0 * (batch @ new_centers.T.astype(np.float64))
+            np.minimum(min_d2[start:end], dists.min(axis=1), out=min_d2[start:end])
+
+    centroids = np.concatenate(candidate_chunks, axis=0)
+
+    if len(centroids) > k:
+        sub_n = len(centroids)
+        final_indices = [0]
+        sub_d2 = np.sum((centroids - centroids[0]) ** 2, axis=1, dtype=np.float64)
+        for j in range(1, k):
+            sum_d2 = float(sub_d2.sum())
+            if not math.isfinite(sum_d2) or sum_d2 <= 0:
+                final_indices.append(j % sub_n)
+                continue
+            probs = sub_d2 / sum_d2
+            chosen_idx = int(rng.choice(sub_n, p=probs))
+            final_indices.append(chosen_idx)
+            d2 = np.sum((centroids - centroids[chosen_idx]) ** 2, axis=1, dtype=np.float64)
+            np.minimum(sub_d2, d2, out=sub_d2)
+        centroids = centroids[final_indices]
+
+    if len(centroids) < k:
+        deficit = k - len(centroids)
+        extra_idx = rng.integers(n, size=deficit)
+        centroids = np.concatenate([centroids, rows[extra_idx]], axis=0)
+
+    return centroids[:k].astype(np.float32).copy()
 
 def _numpy_assign(vectors, codebook, chunk_size: int = 65536):
     import numpy as np
@@ -249,7 +302,7 @@ def _learn_codebook_numpy(
     elif k == 1:
         codebook = rows[[n // 2]].copy()
     else:
-        codebook = _kmeans_pp_init_numpy(rows, k, seed=seed)
+        codebook = _kmeans_parallel_init_numpy(rows, k, seed=seed)
 
     for _ in range(effective_iters):
         _check_ram_cap()

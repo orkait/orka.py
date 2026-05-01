@@ -6,7 +6,7 @@ from orka.codebook.cache import (
     _codebook_cache_save,
 )
 from orka.codebook.kmeans import (
-    _kmeans_pp_init_numpy,
+    _kmeans_parallel_init_numpy,
     _kmeans_pp_init_torch,
     _learn_codebook_numpy,
     _learn_codebook_torch,
