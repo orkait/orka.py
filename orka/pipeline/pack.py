@@ -27,6 +27,7 @@ from orka._runtime import (
     _BG_WRITER,
     _maybe_fallback_cuda_to_cpu,
     _resolve_torch_device,
+    _check_ram_cap,
 )
 from orka._tensor import (
     _concat_vector_parts,
@@ -324,6 +325,7 @@ def _run_em_aq_refinement(
         for stage_i in range(n_stages):
             _report_progress(progress_file, f"    Refining stage {stage_i + 1}/{n_stages}...")
             for c in candidates:
+                _check_ram_cap()
                 if _is_skipped(c):
                     continue
                 k = c["stages_meta"][stage_i]["codebook_size"]
@@ -504,6 +506,7 @@ def pack_checkpoint(
     def _prefetch_worker():
         try:
             for i, (name, tensor) in enumerate(_load_tensors(source)):
+                _check_ram_cap()
                 if max_tensors is not None and prefetch_queue.qsize() + len(candidates) >= max_tensors:
                     break
                 shape = _tensor_shape(tensor)
@@ -713,6 +716,7 @@ def pack_checkpoint(
                 stage_codebooks[key] = (cb, cb_path)
 
         for i, c in enumerate(candidates):
+            _check_ram_cap()
             base_name = c["name"].replace(".weight", "")
             if base_name in skipped_tensors or c["name"] in skipped_tensors:
                 continue

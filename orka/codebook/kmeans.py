@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-from orka._runtime import _resolve_torch_device
+from orka._runtime import _resolve_torch_device, _check_ram_cap
 from orka._tensor import _is_numpy_array, _is_torch_tensor, _torch_float32_matrix
 
 
@@ -252,6 +252,7 @@ def _learn_codebook_numpy(
         codebook = _kmeans_pp_init_numpy(rows, k, seed=seed)
 
     for _ in range(effective_iters):
+        _check_ram_cap()
         indices, _ = _numpy_assign(rows, codebook)
         sums = np.zeros_like(codebook)
         counts = np.bincount(indices, minlength=k).astype(np.float32)
@@ -301,6 +302,7 @@ def _learn_codebook_torch(
         counts = torch.zeros(k, dtype=torch.float32, device=rows.device)
 
         for _ in range(effective_iters):
+            _check_ram_cap()
             if vector_weights is not None:
                 W = torch.as_tensor(
                     vector_weights, dtype=torch.float32, device=rows.device
