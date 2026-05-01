@@ -3,7 +3,7 @@ set -e
 
 echo "Starting Native SLRQ Test (smollm2-135m, slrq-block, vq-4)..."
 
-.venv/bin/python3 orka.py pack \
+.venv/bin/python3 -m orka pack \
   /mnt/storage/codespace/code/orkait/graphstore/graphstore/models/orka-smollm2-135m/model.safetensors \
   --out results/test-native-slrq.orka \
   --normalization slrq-block \
@@ -18,10 +18,10 @@ echo "Starting Native SLRQ Test (smollm2-135m, slrq-block, vq-4)..."
   --iterations 2
 
 echo "Pack complete. Verifying artifact..."
-.venv/bin/python3 orka.py verify results/test-native-slrq.orka
+.venv/bin/python3 -m orka verify results/test-native-slrq.orka
 
 echo "Evaluating artifact (fast eval)..."
-.venv/bin/python3 orka.py eval \
+.venv/bin/python3 -m orka eval \
   results/test-native-slrq.orka \
   --prompts wiki_prompts.txt \
   --out results/eval-native-slrq.json \

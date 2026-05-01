@@ -3,7 +3,7 @@ set -e
 
 echo "Starting Baseline Test (smollm2-135m, block-max, vq-4)..."
 
-.venv/bin/python3 orka.py pack \
+.venv/bin/python3 -m orka pack \
   /mnt/storage/codespace/code/orkait/graphstore/graphstore/models/orka-smollm2-135m/model.safetensors \
   --out results/test-baseline.orka \
   --normalization block-max \
@@ -18,10 +18,10 @@ echo "Starting Baseline Test (smollm2-135m, block-max, vq-4)..."
   --iterations 2
 
 echo "Pack complete. Verifying artifact..."
-.venv/bin/python3 orka.py verify results/test-baseline.orka
+.venv/bin/python3 -m orka verify results/test-baseline.orka
 
 echo "Evaluating artifact (fast eval)..."
-.venv/bin/python3 orka.py eval \
+.venv/bin/python3 -m orka eval \
   results/test-baseline.orka \
   --prompts wiki_prompts.txt \
   --out results/eval-baseline.json \

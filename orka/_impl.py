@@ -5208,9 +5208,12 @@ def build_parser() -> argparse.ArgumentParser:
     eval_sweep_cmd.set_defaults(func=cmd_eval_sweep)
 
     def _run_tests(_args):
-        from orka_test import run_selftests
+        import unittest
 
-        return run_selftests()
+        loader = unittest.defaultTestLoader
+        suite = loader.discover("tests", top_level_dir=".")
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        return 0 if result.wasSuccessful() else 1
 
     slrq = sub.add_parser("slrq-eval", help="Test SLRQ hypothesis directly on a HuggingFace model in memory")
     slrq.add_argument("--model-id", required=True, help="HF model ID or path")
@@ -5225,7 +5228,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-if __name__ == "__main__":
+def main() -> int:
+    """Programmatic entry point. Auto-bootstraps Kaggle config when invoked
+    on Kaggle with no CLI args, otherwise just parses argv and dispatches."""
     import sys as _sys
 
     if Path("/kaggle/working").exists():
@@ -5375,4 +5380,8 @@ if __name__ == "__main__":
                 _sys.argv += ["--upload-repo", cfg["upload_repo"]]
 
     cli_args = build_parser().parse_args()
-    raise SystemExit(cli_args.func(cli_args))
+    return int(cli_args.func(cli_args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
