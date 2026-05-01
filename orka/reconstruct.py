@@ -147,6 +147,7 @@ def reconstruct_artifact(
     if output_format == "json":
         _write_json_reconstruction(out_dir, output_path, manifest, tensors)
     else:
+        tensors = _complete_decoded_tensor_map(out_dir, manifest)
         _write_safetensors_reconstruction(output_path, tensors)
 
     return {

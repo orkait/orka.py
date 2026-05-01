@@ -93,6 +93,7 @@ def _normalize_tensor_slrq_block_torch(tensor, block_size: int, device):
     import torch
 
     _, arr = _torch_f32(tensor, device)
+    source_flat = arr.reshape(-1).detach().cpu().clone()
     flat = arr.reshape(-1)
     n = int(flat.shape[0])
     pad = (-n) % block_size
@@ -120,7 +121,7 @@ def _normalize_tensor_slrq_block_torch(tensor, block_size: int, device):
         safe.detach().cpu(),
         salient_weights.detach().cpu(),
         salient_indices.detach().cpu(),
-        arr.reshape(-1).detach().cpu(),
+        source_flat,
     )
 
 
@@ -128,6 +129,7 @@ def _normalize_tensor_slrq_block_numpy(tensor, block_size: int):
     import numpy as np
 
     arr = _numpy_float32_array(tensor)
+    source_flat = arr.reshape(-1).copy()
     flat = arr.reshape(-1)
     n = int(flat.shape[0])
     pad = (-n) % block_size
@@ -155,7 +157,7 @@ def _normalize_tensor_slrq_block_numpy(tensor, block_size: int):
         safe,
         salient_weights,
         salient_indices,
-        arr.reshape(-1),
+        source_flat,
     )
 
 
@@ -276,4 +278,3 @@ def _apply_col_l2_scales_numpy(flat, shape, scales):
     if col_scales.shape[0] != cols:
         raise ValueError("col scale count does not match tensor cols")
     return (arr * col_scales[None, :]).reshape(-1)
-

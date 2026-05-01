@@ -218,7 +218,7 @@ def _build_tensor_manifest_entry(
         "outliers": outlier_meta,
         "salient": salient_meta,
         "rotation_seed": c.get("rotation_seed"),
-        "rotation": rotation if c.get("rotation_seed") is not None else "none",
+        "rotation": c.get("rotation", "none"),
     }
 
 
@@ -535,7 +535,7 @@ def pack_checkpoint(
 
                 # Capture pre-rotation flat when rotation is on but normalization didn't set it.
                 # _stage_quality_metrics needs source_flat to compare un-rotated decode output.
-                if source_flat is None and rotation != "none":
+                if source_flat is None and (rotation != "none" or outlier_frac > 0):
                     if backend == "torch":
                         _, _arr = _torch_f32(tensor, resolved_device)
                         source_flat = _arr.reshape(-1).detach().cpu()
@@ -543,10 +543,12 @@ def pack_checkpoint(
                         source_flat = _numpy_float32_array(tensor).reshape(-1)
 
                 tensor_seed = None
-                if rotation == "orthogonal":
+                tensor_rotation = "none"
+                if rotation in {"orthogonal", "hadamard"}:
                     tensor, tensor_seed = _rotate_tensor_to_2d(
                         tensor, name, rotation, rotation_seed, backend, resolved_device
                     )
+                    tensor_rotation = rotation
 
                 if backend == "torch":
                     packed_values, padded_values, vectors = _torch_vectors_from_tensor(
@@ -570,6 +572,7 @@ def pack_checkpoint(
                     "salient_weights": salient_weights, "salient_indices": salient_indices,
                     "normalization": normalization, "block_scale_size": block_scale_size if normalization in ("block-max", "awq-block-max", "slrq-block") else None,
                     "family": classify_tensor_family(name), "rotation_seed": tensor_seed,
+                    "rotation": tensor_rotation,
                     "vector_weights": vw, "stages_data": {},
                 })
         except BaseException as exc:
@@ -914,4 +917,3 @@ def pack_checkpoint(
         progress_file=progress_file,
     )
     return manifest
-
