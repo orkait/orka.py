@@ -1,13 +1,19 @@
-"""Tensor checkpoint loading and on-disk I/O for indices, codebooks, scales."""
+"""Orka artifact format I/O. Single source of truth for on-disk layout.
+
+Manifest version + sidecar I/O for: indices, codebooks, scales, outliers,
+salient (SLRQ), and FP16 passthrough tensors.
+"""
 
 from __future__ import annotations
 
-import json
 import struct
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
-from orka.core import _is_torch_tensor
+from orka._tensor import _is_torch_tensor
+
+
+ORKA_VERSION = 1
 
 
 _INDEX_BIT_SPECS = (
@@ -23,6 +29,7 @@ def _index_bit_spec(index_bits: int) -> tuple[int, str, str]:
         if index_bits <= ceiling:
             return ceiling, np_dtype, struct_fmt
     raise ValueError(f"index_bits above 64 are not supported: got {index_bits}")
+
 
 def _write_indices(path: Path, indices: Sequence[int], index_bits: int) -> None:
     ceiling, np_dtype, struct_fmt = _index_bit_spec(index_bits)
@@ -111,134 +118,6 @@ def _read_indices(path: Path, index_bits: int, expected_count: int) -> list[int]
         )
     return indices
 
-def _load_tensors(path: Path) -> Iterable[tuple[str, object]]:
-    suffix = path.suffix.lower()
-    if suffix == ".json":
-        with path.open() as f:
-            loaded = json.load(f)
-        tensors = loaded.get("tensors", loaded) if isinstance(loaded, dict) else loaded
-        if not isinstance(tensors, dict):
-            raise ValueError("JSON input must be an object or contain a tensors object")
-        for name, tensor in tensors.items():
-            yield name, tensor
-        return
-
-    if suffix == ".safetensors":
-        try:
-            from safetensors import safe_open
-        except Exception as exc:
-            raise RuntimeError(
-                "safetensors input requires the safetensors package"
-            ) from exc
-        try:
-            import torch  # noqa: F401
-        except Exception:
-            framework = "np"
-        else:
-            framework = "pt"
-        with safe_open(str(path), framework=framework) as handle:
-            for name in handle.keys():
-                try:
-                    yield name, handle.get_tensor(name)
-                except TypeError as exc:
-                    if framework == "np":
-                        raise RuntimeError(
-                            f"safetensors tensor {name} uses a dtype that requires torch loading"
-                        ) from exc
-                    raise
-        return
-
-    if suffix in {".pt", ".pth", ".bin"}:
-        try:
-            import torch
-        except Exception as exc:
-            raise RuntimeError("PyTorch checkpoint input requires torch") from exc
-        loaded = torch.load(path, map_location="cpu")
-        state = loaded.get("state_dict", loaded) if isinstance(loaded, dict) else loaded
-        if not isinstance(state, dict):
-            raise ValueError(
-                "checkpoint must load to a tensor dictionary or contain state_dict"
-            )
-        for name, tensor in state.items():
-            yield name, tensor
-        return
-
-    raise ValueError(f"unsupported input format: {path.suffix}")
-
-def _infer_shape(value: object) -> list[int]:
-    if isinstance(value, (list, tuple)):
-        if not value:
-            return [0]
-        first = _infer_shape(value[0])
-        for item in value[1:]:
-            if _infer_shape(item) != first:
-                raise ValueError(
-                    "nested JSON tensor values must have a rectangular shape"
-                )
-        return [len(value)] + first
-    return []
-
-
-def _flatten_nested(value: object) -> list[float]:
-    if isinstance(value, (list, tuple)):
-        out: list[float] = []
-        for item in value:
-            out.extend(_flatten_nested(item))
-        return out
-    return [float(value)]
-
-
-def _flatten_float_values(tensor: object, limit: int | None = None) -> list[float]:
-    if hasattr(tensor, "detach"):
-        flat = tensor.detach().float().cpu().reshape(-1)
-        if limit is not None:
-            flat = flat[:limit]
-        return [float(x) for x in flat.tolist()]
-
-    if hasattr(tensor, "reshape") and hasattr(tensor, "tolist"):
-        flat = tensor.reshape(-1)
-        if hasattr(flat, "astype"):
-            flat = flat.astype("float32")
-        values = [float(x) for x in flat.tolist()]
-        return values[:limit] if limit is not None else values
-
-    if isinstance(tensor, (list, tuple)):
-        values = _flatten_nested(tensor)
-        return values[:limit] if limit is not None else values
-
-    raise TypeError("expected a tensor-like object")
-
-
-def _numpy_float32_array(tensor: object):
-    try:
-        import numpy as np
-    except Exception as exc:
-        raise RuntimeError("NumPy backend requires numpy") from exc
-
-    if hasattr(tensor, "detach"):
-        return tensor.detach().float().cpu().numpy().astype(np.float32, copy=False)
-    return np.asarray(tensor, dtype=np.float32)
-
-def _tensor_shape(tensor: object) -> list[int]:
-    shape = getattr(tensor, "shape", None)
-    if shape is not None:
-        return [int(x) for x in shape]
-    return _infer_shape(tensor) if isinstance(tensor, (list, tuple)) else []
-
-
-def _tensor_numel(tensor: object) -> int:
-    if hasattr(tensor, "numel"):
-        return int(tensor.numel())
-    size = getattr(tensor, "size", None)
-    if isinstance(size, int):
-        return size
-    if isinstance(tensor, (list, tuple)):
-        shape = _infer_shape(tensor)
-        total = 1
-        for dim in shape:
-            total *= dim
-        return total
-    return 0
 
 def _write_passthrough_tensors(path: Path, tensors: dict) -> None:
     """Save non-quantized tensors (1D norms, sensitivity-skipped 2D) preserving original dtype."""
@@ -266,3 +145,55 @@ def _write_passthrough_tensors(path: Path, tensors: dict) -> None:
         save_file(arrays, str(path))
     except Exception as exc:
         raise RuntimeError(f"failed to write passthrough tensors (numpy): {exc}") from exc
+
+_FP16_MAX = 65504.0
+
+
+def _write_outliers(idx_path: Path, val_path: Path, positions, values) -> None:
+    try:
+        import numpy as np
+    except Exception as exc:
+        raise RuntimeError("outlier writing requires numpy") from exc
+    idx_path.parent.mkdir(parents=True, exist_ok=True)
+    val_arr = np.asarray(values, dtype=np.float32)
+    over = np.abs(val_arr) > _FP16_MAX
+    if bool(over.any()):
+        n_over = int(over.sum())
+        max_abs = float(np.max(np.abs(val_arr)))
+        print(
+            f"WARN: {n_over} outlier value(s) exceed fp16 range ({max_abs:.1f} > {_FP16_MAX}); "
+            f"will be clipped to ±inf at {val_path.name}",
+            file=os.sys.stderr,
+        )
+    np.asarray(positions, dtype="<u4").tofile(str(idx_path))
+    val_arr.astype("<f2").tofile(str(val_path))
+
+
+def _read_outliers(idx_path: Path, val_path: Path) -> tuple[list[int], list[float]]:
+    try:
+        import numpy as np
+    except Exception as exc:
+        raise RuntimeError("outlier reading requires numpy") from exc
+    positions = np.fromfile(str(idx_path), dtype="<u4")
+    values = np.fromfile(str(val_path), dtype="<f2").astype(np.float32)
+    if len(positions) != len(values):
+        raise ValueError(f"outlier count mismatch: {len(positions)} != {len(values)}")
+    return positions.tolist(), values.tolist()
+
+
+
+
+def _write_salient(idx_path: Path, val_path: Path, salient_indices, salient_weights) -> None:
+    """Write SLRQ salient sidecars: per-block index (uint32) + value (float32)."""
+    sw = salient_weights.numpy() if hasattr(salient_weights, "numpy") else salient_weights
+    si = salient_indices.numpy() if hasattr(salient_indices, "numpy") else salient_indices
+    sw.astype("<f4").tofile(str(val_path))
+    si.astype("<u4").tofile(str(idx_path))
+
+
+def _read_salient(idx_path: Path, val_path: Path):
+    """Read SLRQ salient sidecars. Returns (indices ndarray uint32, values ndarray float32)."""
+    import numpy as np
+    s_idx = np.fromfile(str(idx_path), dtype="<u4")
+    s_val = np.fromfile(str(val_path), dtype="<f4")
+    return s_idx, s_val

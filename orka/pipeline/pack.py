@@ -1,7 +1,8 @@
-"""Checkpoint packing: prefetch -> normalize -> rotate -> outlier-extract ->
-RVQ stages -> joint EM-AQ refinement -> manifest write.
+"""``pack_checkpoint``: source -> normalize -> rotate -> outliers -> RVQ stages
+-> joint EM-AQ -> manifest write.
 
-Public entry: ``pack_checkpoint``. Inspect helper: ``inspect_checkpoint``.
+Currently a single ~700 LOC orchestrator. Splitting into named phases is a
+follow-up; would not change semantics.
 """
 
 from __future__ import annotations
@@ -13,47 +14,52 @@ import threading
 from pathlib import Path
 from typing import Sequence
 
-from orka.core import (
+from orka._format import (
     ORKA_VERSION,
-    _BG_WRITER,
-    _derive_seed,
-    _index_bits_for_size,
-    _is_numpy_array,
-    _is_torch_tensor,
-    _maybe_fallback_cuda_to_cpu,
-    _report_progress,
-    _resolve_torch_device,
-    _safe_tensor_name,
-    _source_signature,
-)
-from orka.io_format import (
-    _load_tensors,
-    _numpy_float32_array,
-    _tensor_numel,
-    _tensor_shape,
     _write_codebook,
     _write_f32_vector,
     _write_indices,
+    _write_outliers,
     _write_passthrough_tensors,
+    _write_salient,
 )
-from orka.kmeans import (
+from orka._runtime import (
+    _BG_WRITER,
+    _maybe_fallback_cuda_to_cpu,
+    _resolve_torch_device,
+)
+from orka._tensor import (
+    _concat_vector_parts,
+    _decode_to_vectors_format,
+    _is_numpy_array,
+    _is_torch_tensor,
+    _numpy_float32_array,
+    _sample_vector_rows,
+    _tensor_shape,
+    _torch_f32,
+    _vectors_subtract,
+)
+from orka._util import (
+    _derive_seed,
+    _index_bits_for_size,
+    _report_progress,
+    _safe_tensor_name,
+    _source_signature,
+)
+from orka._checkpoint import _load_tensors
+from orka.codebook import (
     _codebook_cache_key,
     _codebook_cache_load,
     _codebook_cache_save,
-    _concat_vector_parts,
-    _decode_to_vectors_format,
-    _sample_vector_rows,
-    _vectors_subtract,
     learn_codebook_auto,
     quantize_vectors_auto,
 )
 from orka.metrics import _stage_quality_metrics
-from orka.quant_spec import classify_tensor_family
+from orka.quant import classify_tensor_family
 from orka.transforms import (
     _apply_normalization,
     _extract_outliers,
     _rotate_tensor_to_2d,
-    _write_outliers,
 )
 
 
@@ -72,35 +78,6 @@ def _numpy_vectors_from_tensor(tensor: object, group_size: int, limit: int | Non
     return original_len, int(flat.shape[0]), flat.reshape(-1, group_size)
 
 
-def _numpy_vectors_from_tensor_row_l2(
-    tensor: object, group_size: int, limit: int | None
-):
-    if limit is not None:
-        raise ValueError("row-l2 normalization does not support max_values_per_tensor")
-    try:
-        import numpy as np
-    except Exception as exc:
-        raise RuntimeError("NumPy backend requires numpy") from exc
-    arr = _numpy_float32_array(tensor)
-    shape = [int(x) for x in arr.shape]
-    rows = arr.reshape(shape[0], -1)
-    scales = np.linalg.norm(rows, axis=1).astype(np.float32)
-    safe_scales = np.where(scales == 0, 1.0, scales).astype(np.float32)
-    normalized = rows / safe_scales[:, None]
-    flat = normalized.reshape(-1)
-    original_len = int(flat.shape[0])
-    remainder = original_len % group_size
-    if remainder:
-        flat = np.pad(flat, (0, group_size - remainder), mode="constant")
-    return (
-        original_len,
-        int(flat.shape[0]),
-        flat.reshape(-1, group_size),
-        scales,
-        arr.reshape(-1),
-    )
-
-
 def _torch_vectors_from_tensor(
     tensor: object, group_size: int, limit: int | None, device: str
 ):
@@ -116,54 +93,6 @@ def _torch_vectors_from_tensor(
         flat = torch.nn.functional.pad(flat, (0, group_size - remainder))
     return original_len, int(flat.shape[0]), flat.reshape(-1, group_size)
 
-
-def _torch_vectors_from_tensor_row_l2(
-    tensor: object, group_size: int, limit: int | None, device: str
-):
-    if limit is not None:
-        raise ValueError("row-l2 normalization does not support max_values_per_tensor")
-    import torch
-
-    _, arr = _torch_f32(tensor, device)
-    rows = arr.reshape(arr.shape[0], -1)
-    scales = torch.linalg.vector_norm(rows, ord=2, dim=1).to(dtype=torch.float32)
-    safe = torch.where(scales == 0, torch.ones_like(scales), scales)
-    flat = (rows / safe[:, None]).reshape(-1)
-    original_len = int(flat.shape[0])
-    remainder = original_len % group_size
-    if remainder:
-        flat = torch.nn.functional.pad(flat, (0, group_size - remainder))
-    return (
-        original_len,
-        int(flat.shape[0]),
-        flat.reshape(-1, group_size),
-        scales.detach().cpu(),
-        arr.reshape(-1).detach().cpu(),
-    )
-
-def inspect_checkpoint(path: Path) -> dict:
-    tensors = []
-    total_params = 0
-    for name, tensor in _load_tensors(path):
-        numel = _tensor_numel(tensor)
-        shape = _tensor_shape(tensor)
-        if numel <= 0:
-            continue
-        total_params += numel
-        tensors.append(
-            {
-                "name": name,
-                "shape": shape,
-                "numel": numel,
-                "candidate": len(shape) >= 2,
-            }
-        )
-    return {
-        "source": str(path),
-        "tensor_count": len(tensors),
-        "total_params": total_params,
-        "tensors": tensors,
-    }
 
 def pack_checkpoint(
     source: Path,
@@ -872,3 +801,4 @@ def pack_checkpoint(
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
     return manifest
+

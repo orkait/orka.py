@@ -1,54 +1,15 @@
-"""K-means codebook learning, nearest-centroid assignment, codebook caching, and
-vector helpers used by the RVQ pipeline.
+"""K-means: scalable ++ init (k-means||) + Lloyd iterations + nearest-centroid assign.
+
+Backends: numpy (CPU) and torch (CPU/CUDA, GEMM-based distance).
 """
 
 from __future__ import annotations
 
-import hashlib
 import math
-from pathlib import Path
 from typing import Sequence
 
-from orka.core import _is_numpy_array, _is_torch_tensor
+from orka._tensor import _is_numpy_array, _is_torch_tensor, _torch_float32_matrix
 
-
-def _codebook_cache_key(parts: Sequence[object]) -> str:
-    import hashlib
-
-    payload = "|".join(str(p) for p in parts).encode("utf-8")
-    return hashlib.blake2b(payload, digest_size=16).hexdigest()
-
-def _codebook_cache_load(cache_dir: Path | None, key: str):
-    if cache_dir is None:
-        return None
-    path = cache_dir / f"{key}.npy"
-    if not path.exists():
-        return None
-    try:
-        import numpy as np
-
-        return np.load(str(path), allow_pickle=False)
-    except Exception:
-        return None
-
-
-def _codebook_cache_save(cache_dir: Path | None, key: str, codebook) -> None:
-    if cache_dir is None:
-        return
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / f"{key}.npy"
-    import numpy as np
-
-    if _is_torch_tensor(codebook):
-        cb_np = codebook.detach().cpu().to(dtype=__import__("torch").float32).numpy()
-    elif _is_numpy_array(codebook):
-        cb_np = np.asarray(codebook, dtype=np.float32)
-    else:
-        cb_np = np.asarray([list(row) for row in codebook], dtype=np.float32)
-    tmp = path.with_suffix(".npy.tmp")
-    with open(tmp, "wb") as f:
-        np.save(f, cb_np, allow_pickle=False)
-    tmp.replace(path)
 
 def _kmeans_pp_init_torch(
     rows, k: int, seed: int | None = None, oversample_factor: float = 2.0
@@ -168,43 +129,6 @@ def _kmeans_pp_init_numpy(rows, k: int, seed: int | None = None):
         centroids[i] = rows[idx]
     return centroids
 
-def _sample_vector_rows(vectors, sample_vectors: int | None):
-    if sample_vectors is None or sample_vectors <= 0 or sample_vectors >= len(vectors):
-        return vectors
-    if _is_torch_tensor(vectors):
-        try:
-            import torch
-        except Exception as exc:
-            raise RuntimeError("torch vector sampling requires torch") from exc
-        positions = (
-            torch.linspace(
-                0,
-                len(vectors) - 1,
-                steps=sample_vectors,
-                device=vectors.device,
-                dtype=torch.float64,
-            )
-            .round()
-            .to(dtype=torch.long)
-            .clamp_(max=len(vectors) - 1)
-        )
-        return vectors.index_select(0, positions)
-    if hasattr(vectors, "shape") and hasattr(vectors, "__getitem__"):
-        try:
-            import numpy as np
-        except Exception as exc:
-            raise RuntimeError("NumPy vector sampling requires numpy") from exc
-        positions = np.linspace(0, len(vectors) - 1, sample_vectors, dtype=np.int64)
-        return vectors[positions]
-
-    if sample_vectors == 1:
-        return [vectors[len(vectors) // 2]]
-    last = len(vectors) - 1
-    return [
-        vectors[round(i * last / (sample_vectors - 1))] for i in range(sample_vectors)
-    ]
-
-
 def _numpy_assign(vectors, codebook, chunk_size: int = 65536):
     import numpy as np
 
@@ -231,22 +155,6 @@ def _numpy_assign(vectors, codebook, chunk_size: int = 65536):
         total += float(dists[np.arange(chosen.shape[0]), chosen].sum())
 
     return indices, total / (rows.shape[0] * width)
-
-
-def _torch_float32_matrix(values, device: str):
-    try:
-        import torch
-    except Exception as exc:
-        raise RuntimeError("torch backend requires torch") from exc
-
-    resolved = _resolve_torch_device(device)
-    if _is_torch_tensor(values):
-        rows = values.detach().to(device=resolved, dtype=torch.float32)
-    else:
-        rows = torch.as_tensor(values, dtype=torch.float32, device=resolved)
-    if rows.ndim != 2:
-        raise ValueError("torch VQ expects a 2D vector matrix")
-    return rows.contiguous()
 
 
 def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536):
@@ -447,100 +355,3 @@ def quantize_vectors_auto(vectors, codebook, backend: str, device: str = "cpu"):
     if not _is_numpy_array(vectors):
         raise RuntimeError("NumPy backend requires NumPy array tensors")
     return _numpy_assign(vectors, codebook)
-
-def _concat_vector_parts(parts: Sequence[object]):
-    if not parts:
-        raise ValueError("cannot concatenate empty vector group")
-    if _is_torch_tensor(parts[0]):
-        try:
-            import torch
-        except Exception as exc:
-            raise RuntimeError("torch vector concatenation requires torch") from exc
-        return torch.cat(list(parts), dim=0)
-    if _is_numpy_array(parts[0]):
-        try:
-            import numpy as np
-        except Exception as exc:
-            raise RuntimeError("NumPy vector concatenation requires numpy") from exc
-        return np.concatenate(parts, axis=0)
-
-    out = []
-    for part in parts:
-        out.extend(part)
-    return out
-
-def _decode_to_vectors_format(
-    vectors_template, codebook, indices, backend: str, device: str
-):
-    if _is_torch_tensor(vectors_template):
-        try:
-            import torch
-        except Exception as exc:
-            raise RuntimeError("torch decode requires torch") from exc
-        cb = _torch_float32_matrix(codebook, str(vectors_template.device))
-        if _is_torch_tensor(indices):
-            idx = indices.detach().to(device=cb.device, dtype=torch.long)
-        else:
-            idx = torch.as_tensor(indices, dtype=torch.long, device=cb.device)
-        return cb[idx]
-    if _is_numpy_array(vectors_template):
-        try:
-            import numpy as np
-        except Exception as exc:
-            raise RuntimeError("NumPy decode requires numpy") from exc
-        cb = np.asarray(codebook, dtype=np.float32)
-        idx = np.asarray(indices, dtype=np.int64)
-        return cb[idx]
-    return [list(codebook[int(i)]) for i in indices]
-
-
-def _vectors_subtract(a, b):
-    if _is_torch_tensor(a) or _is_torch_tensor(b):
-        try:
-            import torch
-        except Exception as exc:
-            raise RuntimeError("torch subtract requires torch") from exc
-        ta = a if _is_torch_tensor(a) else torch.as_tensor(a, dtype=torch.float32)
-        tb = (
-            b
-            if _is_torch_tensor(b)
-            else torch.as_tensor(b, dtype=torch.float32, device=ta.device)
-        )
-        if tb.device != ta.device:
-            tb = tb.to(ta.device)
-        return ta - tb
-    if _is_numpy_array(a) or _is_numpy_array(b):
-        import numpy as np
-
-        return np.asarray(a, dtype=np.float32) - np.asarray(b, dtype=np.float32)
-    return [[float(x) - float(y) for x, y in zip(ra, rb)] for ra, rb in zip(a, b)]
-
-
-def _decode_vectors_to_flat(vectors, codebook, indices, backend: str):
-    if backend == "torch":
-        centroids = _torch_float32_matrix(codebook, "auto")
-        try:
-            import torch
-        except Exception as exc:
-            raise RuntimeError("torch decode requires torch") from exc
-        assigned = (
-            indices.detach().to(device=centroids.device, dtype=torch.long)
-            if _is_torch_tensor(indices)
-            else torch.as_tensor(indices, dtype=torch.long, device=centroids.device)
-        )
-        return centroids[assigned].reshape(-1).detach().cpu()
-    if backend in {"auto", "numpy"} and _is_numpy_array(vectors):
-        try:
-            import numpy as np
-        except Exception as exc:
-            raise RuntimeError("NumPy decode requires numpy") from exc
-        centroids = np.asarray(codebook, dtype=np.float32)
-        assigned = np.asarray(indices, dtype=np.int64)
-        return centroids[assigned].reshape(-1)
-    if backend == "numpy":
-        raise RuntimeError("NumPy backend requires NumPy array tensors")
-
-    decoded = []
-    for index in indices:
-        decoded.extend(float(v) for v in codebook[int(index)])
-    return decoded

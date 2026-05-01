@@ -1,4 +1,4 @@
-"""Pack/report matrix sweeps over (group_size, codebook, mode, normalization)."""
+"""sweep_checkpoint: cartesian over (g, k, mode, normalization) -> JSON summary."""
 
 from __future__ import annotations
 
@@ -7,22 +7,18 @@ import shutil
 from pathlib import Path
 from typing import Sequence
 
-from orka.core import (
-    ORKA_VERSION,
-    _human_bytes,
-    _index_bits_for_size,
-    _require_non_empty,
-    _resolve_torch_device,
-    _safe_tensor_name,
-)
-from orka.decode import report_artifact, verify_artifact
-from orka.pack import pack_checkpoint
-from orka.quant_spec import (
+from orka._format import ORKA_VERSION
+from orka._runtime import _resolve_torch_device
+from orka._util import _human_bytes, _require_non_empty, _safe_tensor_name, _best_run, _index_bits_for_size
+from orka.pipeline.pack import pack_checkpoint
+from orka.quant import (
     is_rvq_mixed_spec,
     parse_quant_spec,
     quant_spec_from_sizes,
     rvq_mixed_family_stages,
 )
+from orka.report import report_artifact
+from orka.verify import verify_artifact
 
 
 def _sweep_artifact_root(out_path: Path) -> Path:
@@ -68,11 +64,6 @@ def _cosine_per_mb(report: dict) -> float:
         return 0.0
     return float(report["cosine_similarity"]) / artifact_mb
 
-
-def _best_run(runs: Sequence[dict], key: str, reverse: bool) -> dict | None:
-    if not runs:
-        return None
-    return dict(sorted(runs, key=lambda run: float(run[key]), reverse=reverse)[0])
 
 
 def _sweep_run_summary(

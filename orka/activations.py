@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 from typing import Sequence
+
+from orka.eval.prompts import _read_prompt_file
 
 
 def _collect_activations_hf(
@@ -62,7 +65,6 @@ def _collect_activations_hf(
 
 import argparse
 
-from orka.core import _read_prompt_file
 
 
 def _load_awq_activations(args: argparse.Namespace):

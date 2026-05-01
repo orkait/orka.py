@@ -1,4 +1,4 @@
-"""Kaggle pack pipeline: download from HF, pack on Kaggle, optionally upload back."""
+"""Kaggle pack pipeline: download from HF, pack, optionally upload back."""
 
 from __future__ import annotations
 
@@ -10,16 +10,17 @@ import tempfile
 import time
 from pathlib import Path
 
+from orka._runtime import _apply_gpu_memory_cap
+from orka._util import _human_bytes
 from orka.activations import _load_awq_activations
-from orka.core import _apply_gpu_memory_cap, _human_bytes
-from orka.decode import report_artifact
 from orka.eval import eval_artifact
-from orka.pack import pack_checkpoint
-from orka.quant_spec import (
+from orka.pipeline.pack import pack_checkpoint
+from orka.quant import (
     _resolve_quant_stages,
     is_rvq_mixed_spec,
     rvq_mixed_family_stages,
 )
+from orka.report import report_artifact
 
 
 def _load_hf_token() -> str | None:
@@ -283,3 +284,133 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
     finally:
         if src_dir.exists():
             shutil.rmtree(str(src_dir), ignore_errors=True)
+
+
+_KAGGLE_CONFIG = {
+    "repo_id":         "Qwen/Qwen3-0.6B",
+    "upload_repo":     None,
+    "quant_mode":      "rvq-16-8-8",
+    "codebook_mode":   "per-tensor",
+    "normalization":   "awq-block-max",
+    "rotation":        "orthogonal",
+    "rotation_seed":   42,
+    "backend":         "torch",
+    "device":          "cuda",
+    "max_gpu_mem_gb":  14.0,
+    "sample_vectors":  1000000,
+    "iterations":      12,
+    "outlier_frac":    0.001,
+    "group_size":      8,
+    "codebook_size":   256,
+    "awq_calibration": True,
+    "awq_alpha":       0.5,
+    "calibration_max_prompts": 128,
+    "calibration_max_length":  512,
+    "skip_sensitive":  True,
+    "run_eval":        True,
+    "eval_max_prompts": 64,
+    "eval_max_length":  256,
+}
+
+
+_FALLBACK_PROMPTS = [
+    "The history of artificial intelligence began in antiquity.",
+    "Quantum mechanics describes physical properties of nature.",
+    "Climate change refers to long-term shifts in temperatures.",
+    "Machine learning algorithms build a model from data.",
+    "The theory of relativity is a theory of gravitation.",
+    "Photosynthesis is the process by which green plants synthesize foods.",
+    "DNA carries genetic instructions for the development of organisms.",
+    "Black holes are regions of spacetime where gravity is strong.",
+    "Neural networks are inspired by biological neural networks.",
+    "Cellular respiration converts biochemical energy from nutrients.",
+    "The water cycle describes movement of water on Earth.",
+    "Stars are luminous spheres of plasma held together by gravity.",
+    "Programming languages produce various kinds of output.",
+    "Mathematics is the abstract science of number, quantity, and space.",
+    "The Milky Way galaxy contains our Solar System.",
+    "Vaccines stimulate the immune system to combat pathogens.",
+]
+
+
+def bootstrap_argv(argv: list) -> None:
+    """Inject kaggle-pack args from _KAGGLE_CONFIG when invoked on Kaggle with no args.
+
+    Mutates argv in place. No-op if argv already has subcommand.
+    """
+    if len(argv) != 1:
+        return
+    print("Kaggle: building args from _KAGGLE_CONFIG", flush=True)
+    cfg = _KAGGLE_CONFIG
+
+    calib_path = Path("/tmp/orka_calib_prompts.txt")
+    if cfg.get("awq_calibration") or cfg.get("run_eval"):
+        try:
+            from datasets import load_dataset
+            print("Kaggle: loading Wikitext-2-raw test split ...", flush=True)
+            ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
+            samples = []
+            target = max(int(cfg.get("calibration_max_prompts", 128)),
+                         int(cfg.get("eval_max_prompts", 64))) + 32
+            for row in ds:
+                text = (row.get("text") or "").strip()
+                if len(text) >= 200:
+                    samples.append(text)
+                    if len(samples) >= target:
+                        break
+            if not samples:
+                raise RuntimeError("no usable Wikitext samples")
+            calib_path.write_text("\n".join(samples))
+            print(f"Kaggle: wrote {len(samples)} Wikitext samples to {calib_path}", flush=True)
+        except Exception as exc:
+            print(f"Kaggle: Wikitext fetch failed ({exc}); falling back to inline prompts", flush=True)
+            calib_path.write_text("\n".join(_FALLBACK_PROMPTS))
+
+    smap_path = Path("/tmp/orka_sensitivity_map.json")
+    if cfg.get("skip_sensitive"):
+        smap_path.write_text(json.dumps({
+            "base_loss": 0.0,
+            "layers": [
+                {"layer": "lm_head", "loss_delta": 999.0, "sensitivity": "high"},
+                {"layer": "model.embed_tokens", "loss_delta": 999.0, "sensitivity": "high"},
+            ],
+        }))
+        print(f"Kaggle: wrote sensitivity stub to {smap_path}", flush=True)
+
+    argv += [
+        "kaggle-pack",
+        "--repo-id",        cfg["repo_id"],
+        "--quant-mode",     cfg["quant_mode"],
+        "--codebook-mode",  cfg["codebook_mode"],
+        "--normalization",  cfg["normalization"],
+        "--rotation",       cfg["rotation"],
+        "--backend",        cfg["backend"],
+        "--device",         cfg["device"],
+        *(["--max-gpu-mem-gb", str(cfg["max_gpu_mem_gb"])] if cfg.get("max_gpu_mem_gb") is not None else []),
+        *(["--rotation-seed", str(cfg["rotation_seed"])] if cfg.get("rotation_seed") is not None else []),
+        "--sample-vectors", str(cfg["sample_vectors"]),
+        "--iterations",     str(cfg["iterations"]),
+        "--outlier-frac",   str(cfg["outlier_frac"]),
+        "--group-size",     str(cfg["group_size"]),
+        "--codebook-size",  str(cfg["codebook_size"]),
+    ]
+    if cfg.get("awq_calibration"):
+        argv += [
+            "--awq-calibration", str(calib_path),
+            "--awq-alpha",       str(cfg["awq_alpha"]),
+            "--calibration-max-prompts", str(cfg.get("calibration_max_prompts", 32)),
+            "--calibration-max-length",  str(cfg.get("calibration_max_length", 256)),
+        ]
+    if cfg.get("skip_sensitive"):
+        argv += ["--sensitivity-map", str(smap_path)]
+    if cfg.get("run_eval"):
+        if not calib_path.exists():
+            calib_path.write_text("\n".join(_FALLBACK_PROMPTS))
+        argv += [
+            "--run-eval",
+            "--eval-prompts",     str(calib_path),
+            "--eval-max-prompts", str(cfg["eval_max_prompts"]),
+            "--eval-max-length",  str(cfg["eval_max_length"]),
+        ]
+    if cfg.get("upload_repo"):
+        argv += ["--upload-repo", cfg["upload_repo"]]

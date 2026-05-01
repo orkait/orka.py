@@ -9,17 +9,16 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-from orka.core import _is_numpy_array, _is_torch_tensor
-from orka.kmeans import _torch_float32_matrix
-from orka.transforms import (
+from orka._tensor import _is_numpy_array, _is_torch_tensor
+from orka.transforms.normalize import (
     _apply_block_max_scales,
     _apply_block_max_scales_numpy,
     _apply_col_l2_scales,
     _apply_col_l2_scales_numpy,
     _apply_row_l2_scales,
     _apply_row_l2_scales_numpy,
-    _unrotate_flat,
 )
+from orka.transforms.rotate import _unrotate_flat
 
 
 def _quality_from_totals(
@@ -93,103 +92,6 @@ def quality_metrics_from_flat(
 
     return _quality_from_totals(
         value_count=len(source),
-        sse=sse,
-        abs_error_sum=abs_error_sum,
-        max_abs_error=max_abs_error,
-        source_l2_sq=source_l2_sq,
-        reconstructed_l2_sq=reconstructed_l2_sq,
-        dot=dot,
-    )
-
-
-def _quality_metrics_for_torch_vectors(
-    vectors, codebook, indices, device: str, chunk_size: int = 65536
-) -> dict:
-    try:
-        import torch
-    except Exception as exc:
-        raise RuntimeError("torch backend requires torch") from exc
-
-    rows = _torch_float32_matrix(vectors, device)
-    centroids = _torch_float32_matrix(codebook, device)
-    assigned = (
-        indices.detach().to(device=rows.device, dtype=torch.long)
-        if _is_torch_tensor(indices)
-        else torch.as_tensor(indices, dtype=torch.long, device=rows.device)
-    )
-
-    sse = 0.0
-    abs_error_sum = 0.0
-    max_abs_error = 0.0
-    source_l2_sq = 0.0
-    reconstructed_l2_sq = 0.0
-    dot = 0.0
-
-    with torch.no_grad():
-        for start in range(0, int(rows.shape[0]), chunk_size):
-            end = min(start + chunk_size, int(rows.shape[0]))
-            source = rows[start:end]
-            reconstructed = centroids[assigned[start:end]]
-            diff = source - reconstructed
-            abs_diff = diff.abs()
-            sse += float((diff * diff).sum().detach().cpu().item())
-            abs_error_sum += float(abs_diff.sum().detach().cpu().item())
-            max_abs_error = max(
-                max_abs_error,
-                float(abs_diff.max().detach().cpu().item())
-                if abs_diff.numel()
-                else 0.0,
-            )
-            source_l2_sq += float((source * source).sum().detach().cpu().item())
-            reconstructed_l2_sq += float(
-                (reconstructed * reconstructed).sum().detach().cpu().item()
-            )
-            dot += float((source * reconstructed).sum().detach().cpu().item())
-
-    return _quality_from_totals(
-        value_count=int(rows.numel()),
-        sse=sse,
-        abs_error_sum=abs_error_sum,
-        max_abs_error=max_abs_error,
-        source_l2_sq=source_l2_sq,
-        reconstructed_l2_sq=reconstructed_l2_sq,
-        dot=dot,
-    )
-
-
-def _quality_metrics_for_numpy_vectors(
-    vectors, codebook, indices, chunk_size: int = 65536
-) -> dict:
-    import numpy as np
-
-    rows = np.asarray(vectors, dtype=np.float32)
-    centroids = np.asarray(codebook, dtype=np.float32)
-    assigned = np.asarray(indices, dtype=np.int64)
-
-    sse = 0.0
-    abs_error_sum = 0.0
-    max_abs_error = 0.0
-    source_l2_sq = 0.0
-    reconstructed_l2_sq = 0.0
-    dot = 0.0
-
-    for start in range(0, rows.shape[0], chunk_size):
-        end = min(start + chunk_size, rows.shape[0])
-        source = rows[start:end]
-        reconstructed = centroids[assigned[start:end]]
-        diff = source - reconstructed
-        abs_diff = np.abs(diff)
-        sse += float(np.sum(diff * diff))
-        abs_error_sum += float(np.sum(abs_diff))
-        max_abs_error = max(
-            max_abs_error, float(np.max(abs_diff)) if abs_diff.size else 0.0
-        )
-        source_l2_sq += float(np.sum(source * source))
-        reconstructed_l2_sq += float(np.sum(reconstructed * reconstructed))
-        dot += float(np.sum(source * reconstructed))
-
-    return _quality_from_totals(
-        value_count=int(rows.size),
         sse=sse,
         abs_error_sum=abs_error_sum,
         max_abs_error=max_abs_error,

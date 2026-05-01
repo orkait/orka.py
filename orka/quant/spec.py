@@ -1,35 +1,65 @@
-"""Quantization spec parsing (vq-/rvq-/rvq-mixed) and tensor family classification."""
+"""Quantization spec: vq-/rvq-/rvq-mixed parsing + RVQ-mixed family bits +
+PayloadEstimate / estimate_payload (artifact size from params + group + codebook).
+"""
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from typing import Sequence
 
-from orka.core import _index_bits_for_size
+from orka._util import _index_bits_for_size
 
 
-def classify_tensor_family(name: str) -> str:
-    lowered = name.lower()
-    if any(marker in lowered for marker in ("embed", "embedding", "wte", "wpe")):
-        return "embedding"
-    if any(
-        marker in lowered
-        for marker in (".mlp.", "mlp", "gate_proj", "up_proj", "down_proj", "c_fc")
-    ):
-        return "mlp"
-    if any(
-        marker in lowered
-        for marker in (
-            "attn",
-            "attention",
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "c_attn",
-        )
-    ):
-        return "attention"
-    return "other"
+@dataclass(frozen=True)
+class PayloadEstimate:
+    params: int
+    group_size: int
+    codebook_size: int
+    index_bits: int
+    vector_count: int
+    index_bytes: int
+    scale_block_vectors: int
+    scale_bytes: int
+    bits_per_weight: float
+    total_payload_bytes: int
+
+
+def estimate_payload(
+    params: int,
+    group_size: int,
+    codebook_size: int,
+    scale_block_vectors: int = 64,
+    scale_bits: int = 0,
+) -> PayloadEstimate:
+    if params <= 0:
+        raise ValueError("params must be positive")
+    if group_size <= 0:
+        raise ValueError("group_size must be positive")
+    if codebook_size <= 1:
+        raise ValueError("codebook_size must be greater than 1")
+    if scale_block_vectors <= 0:
+        raise ValueError("scale_block_vectors must be positive")
+    if scale_bits < 0:
+        raise ValueError("scale_bits must be non-negative")
+
+    index_bits = math.ceil(math.log2(codebook_size))
+    vector_count = math.ceil(params / group_size)
+    index_bytes = math.ceil(vector_count * index_bits / 8)
+    scale_count = math.ceil(vector_count / scale_block_vectors)
+    scale_bytes = math.ceil(scale_count * scale_bits / 8)
+    return PayloadEstimate(
+        params=params,
+        group_size=group_size,
+        codebook_size=codebook_size,
+        index_bits=index_bits,
+        vector_count=vector_count,
+        index_bytes=index_bytes,
+        scale_block_vectors=scale_block_vectors,
+        scale_bytes=scale_bytes,
+        bits_per_weight=(index_bytes + scale_bytes) * 8 / params,
+        total_payload_bytes=index_bytes + scale_bytes,
+    )
 
 QUANT_SPEC_MAX_PER_STAGE_BITS = 64
 QUANT_SPEC_MAX_TOTAL_BITS = 64
