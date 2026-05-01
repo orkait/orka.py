@@ -156,13 +156,16 @@ def _kmeans_parallel_init_numpy(rows, k: int, seed: int | None = None, oversampl
         candidate_chunks.append(new_centers)
         total_candidates += len(new_centers)
 
-        c_norm_sq = np.sum(new_centers * new_centers, axis=1, dtype=np.float64)
-        chunk_size = max(256, min(65536, (1 << 28) // (4 * max(len(chosen), 1))))
+        # Budget: keep distance matrix ≤ 64 MB (float32).
+        c_norm_sq = np.sum(new_centers * new_centers, axis=1, dtype=np.float32)
+        nc = max(len(chosen), 1)
+        chunk_size = max(64, min(65536, (1 << 26) // (4 * nc)))
         for start in range(0, n, chunk_size):
             end = min(start + chunk_size, n)
-            batch = rows[start:end].astype(np.float64)
-            r_norm_sq = np.sum(batch * batch, axis=1)
-            dists = r_norm_sq[:, None] + c_norm_sq[None, :] - 2.0 * (batch @ new_centers.T.astype(np.float64))
+            batch = rows[start:end]
+            r_norm_sq = np.sum(batch * batch, axis=1, dtype=np.float32)
+            dists = (r_norm_sq[:, None] + c_norm_sq[None, :]
+                     - 2.0 * (batch @ new_centers.T)).astype(np.float32)
             np.minimum(min_d2[start:end], dists.min(axis=1), out=min_d2[start:end])
 
     centroids = np.concatenate(candidate_chunks, axis=0)
@@ -198,19 +201,18 @@ def _numpy_assign(vectors, codebook, chunk_size: int = 65536):
     indices = np.empty(rows.shape[0], dtype=np.int64)
     total = 0.0
     width = rows.shape[1]
-    
-    # ||a - b||^2 = ||a||^2 + ||b||^2 - 2<a, b>
-    c_norm_sq = np.sum(centroids * centroids, axis=1)
+    k = len(centroids)
 
-    for start in range(0, rows.shape[0], chunk_size):
-        end = min(start + chunk_size, rows.shape[0])
+    # Adaptive chunk: keep distance matrix ≤ 64 MB (float32, 4 bytes/elem).
+    effective_chunk = max(64, min(chunk_size, (1 << 26) // max(k, 1)))
+
+    c_norm_sq = np.sum(centroids * centroids, axis=1, dtype=np.float32)
+
+    for start in range(0, rows.shape[0], effective_chunk):
+        end = min(start + effective_chunk, rows.shape[0])
         chunk = rows[start:end]
-        r_norm_sq = np.sum(chunk * chunk, axis=1)
-        
-        # GEMM for the cross term
-        # dists = r_norm_sq[:, None] + c_norm_sq[None, :] - 2 * (chunk @ centroids.T)
-        dists = r_norm_sq[:, None] + c_norm_sq[None, :] - 2 * np.dot(chunk, centroids.T)
-        
+        r_norm_sq = np.sum(chunk * chunk, axis=1, dtype=np.float32)
+        dists = r_norm_sq[:, None] + c_norm_sq[None, :] - 2.0 * np.dot(chunk, centroids.T)
         chosen = np.argmin(dists, axis=1)
         indices[start:end] = chosen
         total += float(dists[np.arange(chosen.shape[0]), chosen].sum())
