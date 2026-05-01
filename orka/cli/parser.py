@@ -111,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--max-cpu-threads",
             type=int,
             default=None,
-            help="limit the number of CPU threads used by torch/numpy.",
+            help="cap CPU threads (torch + OMP/MKL/OPENBLAS env + sched_setaffinity).",
         )
         p.add_argument(
             "--outlier-frac",
@@ -274,7 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-cpu-threads",
         type=int,
         default=None,
-        help="limit the number of CPU threads used by torch/numpy.",
+        help="cap CPU threads (torch + OMP/MKL/OPENBLAS env + sched_setaffinity).",
     )
     sweep.add_argument(
         "--progress-file", help="file to write real-time progress status"
@@ -336,6 +336,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow transformers to download missing files",
     )
+    eval_cmd.add_argument("--max-system-ram-gb", type=float, default=None,
+                          help="strict cap on total system RAM usage (GB).")
+    eval_cmd.add_argument("--max-cpu-threads", type=int, default=None,
+                          help="cap CPU threads (torch + OMP/MKL + affinity).")
+    eval_cmd.add_argument("--max-gpu-mem-gb", type=float, default=None,
+                          help="strict cap on per-process GPU memory (GB).")
     eval_cmd.set_defaults(func=cmd_eval)
 
     eval_sweep_cmd = sub.add_parser(
@@ -368,6 +374,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow transformers to download missing files",
     )
+    eval_sweep_cmd.add_argument("--max-system-ram-gb", type=float, default=None,
+                                help="strict cap on total system RAM usage (GB).")
+    eval_sweep_cmd.add_argument("--max-cpu-threads", type=int, default=None,
+                                help="cap CPU threads (torch + OMP/MKL + affinity).")
+    eval_sweep_cmd.add_argument("--max-gpu-mem-gb", type=float, default=None,
+                                help="strict cap on per-process GPU memory (GB).")
     eval_sweep_cmd.set_defaults(func=cmd_eval_sweep)
 
     def _run_tests(_args):

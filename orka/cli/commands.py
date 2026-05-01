@@ -207,6 +207,9 @@ def cmd_sweep(args: argparse.Namespace) -> int:
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
+    _apply_gpu_memory_cap("torch", args.device, getattr(args, "max_gpu_mem_gb", None))
+    _apply_system_ram_cap(getattr(args, "max_system_ram_gb", None))
+    _apply_cpu_cap(getattr(args, "max_cpu_threads", None))
     try:
         result = eval_artifact(
             artifact_dir=Path(args.artifact),
@@ -224,6 +227,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(json.dumps({"error": str(exc)}, indent=2), file=os.sys.stderr)
         return 1
+    finally:
+        _stop_ram_monitor()
     print(
         json.dumps(
             {
@@ -245,6 +250,9 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
 
 def cmd_eval_sweep(args: argparse.Namespace) -> int:
+    _apply_gpu_memory_cap("torch", args.device, getattr(args, "max_gpu_mem_gb", None))
+    _apply_system_ram_cap(getattr(args, "max_system_ram_gb", None))
+    _apply_cpu_cap(getattr(args, "max_cpu_threads", None))
     try:
         result = eval_sweep(
             sweep_path=Path(args.sweep),
@@ -265,6 +273,8 @@ def cmd_eval_sweep(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(json.dumps({"error": str(exc)}, indent=2), file=os.sys.stderr)
         return 1
+    finally:
+        _stop_ram_monitor()
     print(
         json.dumps(
             {
