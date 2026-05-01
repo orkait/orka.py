@@ -204,6 +204,7 @@ def _build_tensor_manifest_entry(
         "dot": metrics["dot"],
         "relative_rmse": metrics["relative_rmse"],
         "cosine_similarity": metrics["cosine_similarity"],
+        "sqnr": metrics["sqnr"],
         "indices": str(last_idx_path.relative_to(out_dir)),
         "codebook": c["stages_meta"][0]["codebook"],
         "codebook_family": c["family"],
