@@ -73,6 +73,7 @@ def _require_non_empty(name: str, values: Sequence[object]) -> None:
 def _safe_exp(value: float) -> float:
     if value > 700:
         return float("inf")
+    return math.exp(value)
 def _parse_params(value: str) -> int:
     text = value.strip().lower().replace("_", "")
     suffixes = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}

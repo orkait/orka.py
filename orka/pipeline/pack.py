@@ -332,6 +332,10 @@ def _run_em_aq_refinement(
                 # When k >= sample budget, the codebook already memorizes the sample;
                 # joint refinement adds runtime for ~zero quality gain.
                 if sample_vectors is not None and k >= sample_vectors:
+                    _report_progress(
+                        progress_file,
+                        f"    Skipping EM-AQ for {c['name']} stage {stage_i} (k={k} >= sample_vectors={sample_vectors})",
+                    )
                     continue
 
                 sd = c["stages_data"][stage_i]
@@ -505,9 +509,10 @@ def pack_checkpoint(
 
     def _prefetch_worker():
         try:
-            for i, (name, tensor) in enumerate(_load_tensors(source)):
+            tensors_emitted = 0
+            for name, tensor in _load_tensors(source):
                 _check_ram_cap()
-                if max_tensors is not None and prefetch_queue.qsize() + len(candidates) >= max_tensors:
+                if max_tensors is not None and tensors_emitted >= max_tensors:
                     break
                 shape = _tensor_shape(tensor)
                 if len(shape) < 2:
@@ -575,6 +580,7 @@ def pack_checkpoint(
                     "rotation": tensor_rotation,
                     "vector_weights": vw, "stages_data": {},
                 })
+                tensors_emitted += 1
         except BaseException as exc:
             _prefetch_exc.append(exc)
         finally:
