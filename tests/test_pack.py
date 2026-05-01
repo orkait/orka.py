@@ -5,7 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from orka import inspect_checkpoint, pack_checkpoint, verify_artifact
+from orka import (
+    inspect_checkpoint,
+    pack_checkpoint,
+    reconstruct_artifact,
+    report_artifact,
+    verify_artifact,
+)
 
 
 class InspectPackTests(unittest.TestCase):
@@ -110,6 +116,198 @@ class InspectPackTests(unittest.TestCase):
             self.assertEqual(manifest["device"], "cpu")
             self.assertEqual(manifest["tensor_count"], 1)
             self.assertEqual(verify["verified_tensors"], 1)
+
+    def test_outlier_only_metrics_without_normalization_or_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "outliers.json"
+            out = root / "outliers.orka"
+            source.write_text(
+                json.dumps(
+                    {
+                        "tensors": {
+                            "linear.weight": [
+                                [1.0, 2.0, 3.0, 50.0],
+                                [-1.0, -2.0, -3.0, -50.0],
+                            ],
+                        }
+                    }
+                )
+            )
+
+            manifest = pack_checkpoint(
+                source=source,
+                out_dir=out,
+                group_size=2,
+                codebook_size=2,
+                iterations=1,
+                backend="numpy",
+                outlier_frac=0.25,
+            )
+            verify = verify_artifact(out)
+
+            self.assertEqual(manifest["tensor_count"], 1)
+            self.assertEqual(verify["verified_tensors"], 1)
+
+    def test_slrq_manifest_metrics_match_verify_metrics(self) -> None:
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "slrq_metrics.json"
+            out = root / "slrq_metrics.orka"
+            data = np.array([1.0] * 16, dtype=np.float32).reshape(2, 8)
+            data[0, 5] = 100.0
+            source.write_text(json.dumps({"tensors": {"linear.weight": data.tolist()}}))
+
+            manifest = pack_checkpoint(
+                source=source,
+                out_dir=out,
+                group_size=8,
+                codebook_size=2,
+                iterations=1,
+                backend="numpy",
+                normalization="slrq-block",
+                block_scale_size=8,
+            )
+            verify = verify_artifact(out)
+            tensor = manifest["tensors"][0]
+            worst = verify["worst_tensors"][0]
+
+            self.assertAlmostEqual(tensor["mse"], worst["mse"], places=6)
+            self.assertAlmostEqual(
+                tensor["cosine_similarity"], worst["cosine_similarity"], places=6
+            )
+
+    def test_hadamard_manifest_metrics_match_verify_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "hadamard_metrics.json"
+            out = root / "hadamard_metrics.orka"
+            source.write_text(
+                json.dumps(
+                    {
+                        "tensors": {
+                            "linear.weight": [
+                                [1.0, 2.0, 3.0, 4.0],
+                                [-1.0, -2.0, -3.0, -4.0],
+                            ]
+                        }
+                    }
+                )
+            )
+
+            manifest = pack_checkpoint(
+                source=source,
+                out_dir=out,
+                group_size=4,
+                codebook_size=2,
+                iterations=1,
+                backend="numpy",
+                rotation="hadamard",
+            )
+            verify = verify_artifact(out)
+            tensor = manifest["tensors"][0]
+            worst = verify["worst_tensors"][0]
+
+            self.assertEqual(tensor["rotation"], "hadamard")
+            self.assertAlmostEqual(tensor["mse"], worst["mse"], places=6)
+            self.assertAlmostEqual(
+                tensor["cosine_similarity"], worst["cosine_similarity"], places=6
+            )
+
+    def test_report_includes_slrq_salient_bytes(self) -> None:
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "slrq_report.json"
+            out = root / "slrq_report.orka"
+            data = np.array([1.0] * 16, dtype=np.float32).reshape(2, 8)
+            data[0, 3] = 100.0
+            source.write_text(json.dumps({"tensors": {"linear.weight": data.tolist()}}))
+
+            pack_checkpoint(
+                source=source,
+                out_dir=out,
+                group_size=8,
+                codebook_size=2,
+                iterations=1,
+                backend="numpy",
+                normalization="slrq-block",
+                block_scale_size=8,
+            )
+            report = report_artifact(out)
+
+            self.assertGreater(report["total_salient_bytes"], 0)
+
+    def test_verify_counts_passthrough_tensors(self) -> None:
+        try:
+            import safetensors  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"optional safetensors dependency missing: {exc}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "passthrough_verify.json"
+            out = root / "passthrough_verify.orka"
+            source.write_text(
+                json.dumps(
+                    {
+                        "tensors": {
+                            "linear.weight": [[1.0, 0.0], [0.5, -0.5]],
+                            "linear.bias": [1.0, 2.0],
+                        }
+                    }
+                )
+            )
+
+            pack_checkpoint(
+                source=source,
+                out_dir=out,
+                group_size=2,
+                codebook_size=2,
+                iterations=1,
+                backend="numpy",
+            )
+            verify = verify_artifact(out)
+
+            self.assertEqual(verify["verified_tensors"], 1)
+            self.assertEqual(verify["verified_passthrough_tensors"], 1)
+
+    def test_reconstruct_safetensors_includes_passthrough_tensors(self) -> None:
+        try:
+            import safetensors  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"optional safetensors dependency missing: {exc}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "reconstruct.json"
+            out = root / "reconstruct.orka"
+            recon = root / "reconstructed.safetensors"
+            source.write_text(
+                json.dumps(
+                    {
+                        "tensors": {
+                            "linear.weight": [[1.0, 0.0], [0.5, -0.5]],
+                            "linear.bias": [1.0, 2.0],
+                        }
+                    }
+                )
+            )
+
+            pack_checkpoint(
+                source=source,
+                out_dir=out,
+                group_size=2,
+                codebook_size=2,
+                iterations=1,
+                backend="numpy",
+            )
+            result = reconstruct_artifact(out, recon, output_format="safetensors")
+
+            self.assertEqual(result["tensor_count"], 2)
 
 
 if __name__ == "__main__":

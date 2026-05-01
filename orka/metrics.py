@@ -157,8 +157,9 @@ def _stage_quality_metrics(candidate: dict, backend: str) -> dict:
         dot=dot,
     )
     norm = candidate.get("normalization", "none")
+    rotation = candidate.get("rotation", "none")
     rot_seed = candidate.get("rotation_seed")
-    has_rotation = rot_seed is not None
+    has_rotation = rotation in {"orthogonal", "hadamard"}
     outlier_positions = candidate.get("outlier_positions")
     outlier_values = candidate.get("outlier_values")
     has_outliers = outlier_positions is not None and len(outlier_positions) > 0
@@ -189,7 +190,12 @@ def _stage_quality_metrics(candidate: dict, backend: str) -> dict:
     # Un-rotate first (matching decode order: un-rotate → un-normalize).
     if has_rotation:
         flat_decoded = np.asarray(
-            _unrotate_flat(flat_decoded.tolist(), candidate["shape"], "orthogonal", int(rot_seed)),
+            _unrotate_flat(
+                flat_decoded.tolist(),
+                candidate["shape"],
+                rotation,
+                int(rot_seed or 0),
+            ),
             dtype=np.float32,
         )
     if norm == "none":
@@ -218,13 +224,29 @@ def _denorm_metrics_from_flat(candidate: dict, source_flat, decoded_flat) -> dic
     if norm in ("block-max", "slrq-block"):
         block_size = candidate.get("block_scale_size") or 32
         if _is_numpy_array(decoded_flat):
+            import numpy as np
+
             denorm = _apply_block_max_scales_numpy(
                 decoded_flat, candidate["row_scales"], block_size
             )
+            if norm == "slrq-block" and candidate.get("salient_indices") is not None:
+                salient_idx = np.asarray(candidate["salient_indices"], dtype=np.int64)
+                salient_val = np.asarray(candidate["salient_weights"], dtype=np.float32)
+                for b_idx, (local_idx, weight) in enumerate(zip(salient_idx, salient_val)):
+                    flat_idx = b_idx * block_size + int(local_idx)
+                    if flat_idx < denorm.shape[0]:
+                        denorm[flat_idx] = weight
             return _quality_metrics_for_numpy_flat(candidate["source_flat"], denorm)
         denorm = _apply_block_max_scales(
             decoded_flat, candidate["row_scales"], block_size
         )
+        if norm == "slrq-block" and candidate.get("salient_indices") is not None:
+            for b_idx, (local_idx, weight) in enumerate(
+                zip(candidate["salient_indices"], candidate["salient_weights"])
+            ):
+                flat_idx = b_idx * block_size + int(local_idx)
+                if flat_idx < len(denorm):
+                    denorm[flat_idx] = float(weight)
         return quality_metrics_from_flat(candidate["source_flat"], denorm)
     if norm == "awq-block-max":
         block_size = candidate.get("block_scale_size") or 32
