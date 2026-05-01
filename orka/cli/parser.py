@@ -71,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
         p.add_argument(
             "--normalization",
-            choices=["none", "row-l2", "col-l2", "block-max", "awq", "awq-block-max", "slrq-block"],
+            choices=["none", "block-max", "awq", "awq-block-max", "slrq-block"],
             default="none",
         )
         p.add_argument(
@@ -222,9 +222,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sweep.add_argument(
         "--normalizations",
-        choices=["none", "row-l2", "col-l2", "block-max", "awq", "awq-block-max", "slrq-block"],
+        choices=["none", "block-max", "awq", "awq-block-max", "slrq-block"],
         nargs="+",
-        default=["none", "row-l2"],
+        default=["none"],
     )
     sweep.add_argument(
         "--rotation", choices=["none", "orthogonal", "hadamard"], default="none"

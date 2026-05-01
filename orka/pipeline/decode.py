@@ -16,7 +16,6 @@ from orka._format import (
 from orka.transforms.normalize import (
     _apply_block_max_scales,
     _apply_col_l2_scales,
-    _apply_row_l2_scales,
 )
 from orka.transforms.rotate import (
     _fwht_numpy,
@@ -82,12 +81,7 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict) -> list[float]:
         seed = int(tensor_meta.get("rotation_seed") or 0)
         decoded = _unrotate_flat(decoded, tensor_meta["shape"], rotation, seed)
     norm = tensor_meta.get("normalization", "none")
-    if norm == "row-l2":
-        scales = _read_f32_vector(
-            out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"])
-        )
-        decoded = _apply_row_l2_scales(decoded, tensor_meta["shape"], scales)
-    elif norm in ("col-l2", "awq"):
+    if norm == "awq":
         scales = _read_f32_vector(
             out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"])
         )
@@ -203,14 +197,7 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
                 cols = shape[-1]
                 rows = decoded.numel() // cols
                 decoded = (decoded[:rows * cols].reshape(rows, cols) * awq_t[None, :]).reshape(-1)
-    elif norm == "row-l2":
-        scales = np.fromfile(
-            str(out_dir / tm["scales"]), dtype="<f4", count=int(tm["scale_count"])
-        )
-        scales_t = torch.from_numpy(scales).to(device)
-        cols = decoded.numel() // scales_t.numel()
-        decoded = (decoded.reshape(-1, cols) * scales_t[:, None]).reshape(-1)
-    elif norm in ("col-l2", "awq"):
+    elif norm == "awq":
         scales = np.fromfile(
             str(out_dir / tm["scales"]), dtype="<f4", count=int(tm["scale_count"])
         )

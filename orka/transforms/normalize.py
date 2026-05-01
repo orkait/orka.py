@@ -1,4 +1,4 @@
-"""Normalization variants: row-l2, col-l2, block-max, awq, awq-block-max, slrq-block.
+"""Normalization variants: block-max, awq, awq-block-max, slrq-block.
 
 Each mode has numpy + torch implementations side by side. Dispatcher
 ``_apply_normalization`` picks the right one based on backend/availability.
@@ -191,41 +191,6 @@ def _apply_block_max_scales_numpy(flat, scales, block_size: int):
         out = out[:n]
     return out
 
-def _normalize_tensor_row_l2_numpy(tensor):
-    import numpy as np
-
-    arr = _numpy_float32_array(tensor)
-    shape = [int(x) for x in arr.shape]
-    rows = arr.reshape(shape[0], -1)
-    scales = np.linalg.norm(rows, axis=1).astype(np.float32)
-    safe = np.where(scales == 0, 1.0, scales).astype(np.float32)
-    normalized = (rows / safe[:, None]).reshape(arr.shape)
-    return normalized, scales, arr.reshape(-1)
-
-
-def _normalize_tensor_col_l2_numpy(tensor):
-    import numpy as np
-
-    arr = _numpy_float32_array(tensor)
-    shape = [int(x) for x in arr.shape]
-    rows = arr.reshape(shape[0], -1)
-    scales = np.linalg.norm(rows, axis=0).astype(np.float32)
-    safe = np.where(scales == 0, 1.0, scales).astype(np.float32)
-    normalized = (rows / safe[None, :]).reshape(arr.shape)
-    return normalized, scales, arr.reshape(-1)
-
-
-def _normalize_tensor_row_l2_torch(tensor, device):
-    import torch
-
-    _, arr = _torch_f32(tensor, device)
-    rows = arr.reshape(arr.shape[0], -1)
-    scales = torch.linalg.vector_norm(rows, ord=2, dim=1).to(dtype=torch.float32)
-    safe = torch.where(scales == 0, torch.ones_like(scales), scales)
-    normalized = (rows / safe[:, None]).reshape(arr.shape)
-    return normalized, scales.detach().cpu(), arr.reshape(-1).detach().cpu()
-
-
 def _normalize_tensor_awq_torch(tensor, X, alpha, device):
     import torch
 
@@ -234,7 +199,7 @@ def _normalize_tensor_awq_torch(tensor, X, alpha, device):
     shape = [int(x) for x in arr.shape]
     rows = arr.reshape(shape[0], -1)
     if X_t.shape[1] != rows.shape[1]:
-        return _normalize_tensor_col_l2_torch(tensor, device)
+        raise RuntimeError(f"awq calibration shape {tuple(X_t.shape)} mismatches tensor cols {rows.shape[1]}")
     act_mag = X_t.abs().mean(dim=0).clamp(min=1e-6)
     s = act_mag**alpha
     scales = 1.0 / s
@@ -250,24 +215,13 @@ def _normalize_tensor_awq_numpy(tensor, X, alpha):
     shape = [int(x) for x in arr.shape]
     rows = arr.reshape(shape[0], -1)
     if X_arr.shape[1] != rows.shape[1]:
-        return _normalize_tensor_col_l2_numpy(tensor)
+        raise RuntimeError(f"awq calibration shape {tuple(X_arr.shape)} mismatches tensor cols {rows.shape[1]}")
     act_mag = np.mean(np.abs(X_arr), axis=0)
     act_mag = np.maximum(act_mag, 1e-6)
     s = act_mag**alpha
     scales = 1.0 / s
     normalized = (rows / scales[None, :]).reshape(arr.shape)
     return normalized, scales.astype(np.float32), arr.reshape(-1)
-
-
-def _normalize_tensor_col_l2_torch(tensor, device):
-    import torch
-
-    _, arr = _torch_f32(tensor, device)
-    rows = arr.reshape(arr.shape[0], -1)
-    scales = torch.linalg.vector_norm(rows, ord=2, dim=0).to(dtype=torch.float32)
-    safe = torch.where(scales == 0, torch.ones_like(scales), scales)
-    normalized = (rows / safe[None, :]).reshape(arr.shape)
-    return normalized, scales.detach().cpu(), arr.reshape(-1).detach().cpu()
 
 
 def _apply_normalization(
@@ -277,14 +231,6 @@ def _apply_normalization(
     is_torch = backend == "torch"
     has_awq = awq_activations is not None and name in awq_activations
     awq_col_scales = None
-
-    def _row_l2():
-        return (_normalize_tensor_row_l2_torch(tensor, device) if is_torch
-                else _normalize_tensor_row_l2_numpy(tensor))
-
-    def _col_l2():
-        return (_normalize_tensor_col_l2_torch(tensor, device) if is_torch
-                else _normalize_tensor_col_l2_numpy(tensor))
 
     def _block_max():
         return (_normalize_tensor_block_max_torch(tensor, block_scale_size, device) if is_torch
@@ -298,16 +244,11 @@ def _apply_normalization(
     salient_weights = None
     salient_indices = None
 
-    if normalization == "row-l2":
-        tensor, row_scales, source_flat = _row_l2()
-    elif normalization == "col-l2":
-        tensor, row_scales, source_flat = _col_l2()
-    elif normalization == "slrq-block":
+    if normalization == "slrq-block":
         tensor, row_scales, salient_weights, salient_indices, source_flat = _slrq_block()
     elif normalization == "awq":
         if not has_awq:
-            awq_fallbacks.append(name)
-            tensor, row_scales, source_flat = _col_l2()
+            raise RuntimeError(f"awq normalization requires --awq-calibration activations for tensor {name}")
         elif is_torch:
             tensor, row_scales, source_flat = _normalize_tensor_awq_torch(
                 tensor, awq_activations[name], awq_alpha, device)
@@ -318,8 +259,7 @@ def _apply_normalization(
         if not is_torch:
             raise RuntimeError("awq-block-max requires --backend torch")
         if not has_awq:
-            awq_fallbacks.append(name)
-            tensor, row_scales, source_flat = _block_max()
+            raise RuntimeError(f"awq-block-max requires --awq-calibration activations for tensor {name}")
         else:
             tensor, row_scales, source_flat, awq_col_scales = (
                 _normalize_tensor_awq_block_max_torch(
@@ -362,36 +302,3 @@ def _apply_col_l2_scales_numpy(flat, shape, scales):
         raise ValueError("col scale count does not match tensor cols")
     return (arr * col_scales[None, :]).reshape(-1)
 
-def _apply_row_l2_scales(
-    flat: Sequence[float], shape: Sequence[int], scales: Sequence[float]
-) -> list[float]:
-    try:
-        import numpy as np
-        return _apply_row_l2_scales_numpy(flat, shape, scales).tolist()
-    except ImportError:
-        pass
-
-    row_count = int(shape[0])
-    row_width = _product([int(x) for x in shape[1:]])
-    if len(scales) != row_count:
-        raise ValueError("row scale count does not match tensor rows")
-    out = []
-    for row_i in range(row_count):
-        scale = float(scales[row_i])
-        start = row_i * row_width
-        out.extend(float(v) * scale for v in flat[start : start + row_width])
-    return out
-
-
-def _apply_row_l2_scales_numpy(flat, shape: Sequence[int], scales):
-    import numpy as np
-
-    row_count = int(shape[0])
-    row_width = _product([int(x) for x in shape[1:]])
-    values = np.asarray(flat, dtype=np.float32)[: row_count * row_width].reshape(
-        row_count, row_width
-    )
-    row_scales = np.asarray(scales, dtype=np.float32)
-    if row_scales.shape[0] != row_count:
-        raise ValueError("row scale count does not match tensor rows")
-    return (values * row_scales[:, None]).reshape(-1)

@@ -15,8 +15,6 @@ from orka.transforms.normalize import (
     _apply_block_max_scales_numpy,
     _apply_col_l2_scales,
     _apply_col_l2_scales_numpy,
-    _apply_row_l2_scales,
-    _apply_row_l2_scales_numpy,
 )
 from orka.transforms.rotate import _unrotate_flat
 
@@ -242,17 +240,7 @@ def _denorm_metrics_from_flat(candidate: dict, source_flat, decoded_flat) -> dic
             if _is_numpy_array(decoded_flat)
             else quality_metrics_from_flat(source_flat, decoded_flat)
         )
-    if norm == "row-l2":
-        if _is_numpy_array(decoded_flat):
-            denorm = _apply_row_l2_scales_numpy(
-                decoded_flat, candidate["shape"], candidate["row_scales"]
-            )
-            return _quality_metrics_for_numpy_flat(candidate["source_flat"], denorm)
-        denorm = _apply_row_l2_scales(
-            decoded_flat, candidate["shape"], candidate["row_scales"]
-        )
-        return quality_metrics_from_flat(candidate["source_flat"], denorm)
-    if norm in ("col-l2", "awq"):
+    if norm == "awq":
         if _is_numpy_array(decoded_flat):
             denorm = _apply_col_l2_scales_numpy(
                 decoded_flat, candidate["shape"], candidate["row_scales"]

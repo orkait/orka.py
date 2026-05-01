@@ -127,15 +127,13 @@ def pack_checkpoint(
         raise ValueError("backend must be 'auto', 'numpy', or 'torch'")
     if normalization not in {
         "none",
-        "row-l2",
-        "col-l2",
         "block-max",
         "awq",
         "awq-block-max",
         "slrq-block",
     }:
         raise ValueError(
-            "normalization must be 'none', 'row-l2', 'col-l2', 'block-max', 'awq', or 'awq-block-max'"
+            "normalization must be 'none', 'block-max', 'awq', 'awq-block-max', or 'slrq-block'"
         )
     if rotation not in {"none", "orthogonal", "hadamard"}:
         raise ValueError("rotation must be 'none', 'orthogonal', or 'hadamard'")
@@ -242,7 +240,7 @@ def pack_checkpoint(
                 awq_col_scales = None
                 salient_weights = None
                 salient_indices = None
-                if normalization in {"row-l2", "col-l2", "block-max", "awq", "awq-block-max", "slrq-block"}:
+                if normalization in {"block-max", "awq", "awq-block-max", "slrq-block"}:
                     (
                         tensor, row_scales, source_flat, awq_col_scales,
                         salient_weights, salient_indices
@@ -687,12 +685,7 @@ def pack_checkpoint(
         scale_path = None
         scale_bytes = 0
         scale_count = 0
-        if c["normalization"] == "row-l2":
-            scale_path = tensor_dir / f"{safe}.row_l2_scale.f32"
-            _write_f32_vector(scale_path, c["row_scales"])
-            scale_bytes = scale_path.stat().st_size
-            scale_count = len(c["row_scales"])
-        elif c["normalization"] in ("col-l2", "awq"):
+        if c["normalization"] == "awq":
             scale_path = tensor_dir / f"{safe}.col_l2_scale.f32"
             _write_f32_vector(scale_path, c["row_scales"])
             scale_bytes = scale_path.stat().st_size

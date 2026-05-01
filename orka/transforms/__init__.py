@@ -10,8 +10,6 @@ from orka.transforms.normalize import (
     _apply_col_l2_scales,
     _apply_col_l2_scales_numpy,
     _apply_normalization,
-    _apply_row_l2_scales,
-    _apply_row_l2_scales_numpy,
 )
 from orka.transforms.outliers import _extract_outliers
 from orka.transforms.rotate import (
