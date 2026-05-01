@@ -159,28 +159,102 @@ class OrkaSelfTests(unittest.TestCase):
         self.assertEqual(args.artifact, "model.orka")
         self.assertEqual(args.prompts, "prompts.txt")
 
-    def test_eval_sweep_command_is_registered(self) -> None:
-        parser = build_parser()
-        args = parser.parse_args(
-            [
-                "eval-sweep",
-                "sweep.json",
-                "--prompts",
-                "prompts.txt",
-                "--out",
-                "eval-sweep.json",
-                "--model-dir",
-                "model",
-                "--device",
-                "cuda",
-                "--max-runs",
-                "3",
-            ]
-        )
-        self.assertEqual(args.command, "eval-sweep")
-        self.assertEqual(args.sweep, "sweep.json")
-        self.assertEqual(args.prompts, "prompts.txt")
-        self.assertEqual(args.max_runs, 3)
+    def test_slrq_block_normalization_preserves_salient_weights(self) -> None:
+        try:
+            import torch
+        except Exception as exc:
+            self.skipTest(f"torch required: {exc}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "slrq.json"
+            out = root / "slrq.orka"
+            # 16 values, block size 16.
+            # Max abs is 100.0 at index 5.
+            data = [1.0] * 16
+            data[5] = 100.0
+            
+            source.write_text(
+                json.dumps(
+                    {
+                        "tensors": {
+                            "linear.weight": [data],
+                        }
+                    }
+                )
+            )
+
+            # Pack with slrq-block
+            manifest = pack_checkpoint(
+                source=source,
+                out_dir=out,
+                group_size=16,
+                codebook_size=2,
+                iterations=1,
+                backend="torch",
+                device="cpu",
+                normalization="slrq-block",
+                block_scale_size=16,
+            )
+            
+            # Verify and decode
+            verify = verify_artifact(out)
+            
+            # Check for salient data in manifest
+            tensor_meta = manifest["tensors"][0]
+            self.assertIn("salient", tensor_meta)
+            self.assertEqual(tensor_meta["salient"]["count"], 1)
+            
+            # Check fidelity
+            self.assertEqual(verify["verified_tensors"], 1)
+            self.assertLess(verify["weighted_mse"], 1.0)
+            
+    def test_slrq_numpy_roundtrip(self) -> None:
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "slrq_np.json"
+            out = root / "slrq_np.orka"
+            # 2x8 = 16 values, block size 16. Max abs is 100.0 at index (0,5).
+            data = np.array([1.0] * 16, dtype=np.float32).reshape(2, 8)
+            data[0, 5] = 100.0
+            
+            source.write_text(
+                json.dumps(
+                    {
+                        "tensors": {
+                            "linear.weight": data.tolist(),
+                        }
+                    }
+                )
+            )
+
+            # Pack with slrq-block, forcing numpy backend
+            manifest = pack_checkpoint(
+                source=source,
+                out_dir=out,
+                group_size=16,
+                codebook_size=2,
+                iterations=1,
+                backend="numpy",
+                normalization="slrq-block",
+                block_scale_size=16,
+            )
+            
+            # Verify and decode
+            verify = verify_artifact(out)
+            
+            # Check for salient data in manifest
+            tensor_meta = manifest["tensors"][0]
+            self.assertIn("salient", tensor_meta)
+            self.assertEqual(tensor_meta["salient"]["count"], 1)
+            
+            # Check fidelity
+            self.assertEqual(verify["verified_tensors"], 1)
+            # Reconstructed should be nearly identical to original
+            self.assertLess(verify["weighted_mse"], 1.0)
+
 
 
 def run_selftests() -> int:

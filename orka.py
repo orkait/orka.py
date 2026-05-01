@@ -448,6 +448,76 @@ def _normalize_tensor_block_max_numpy(tensor, block_size: int):
     return normalized.reshape(arr.shape), scales, arr.reshape(-1)
 
 
+def _normalize_tensor_slrq_block_torch(tensor, block_size: int, device):
+    import torch
+
+    _, arr = _torch_f32(tensor, device)
+    flat = arr.reshape(-1)
+    n = int(flat.shape[0])
+    pad = (-n) % block_size
+    if pad:
+        flat = torch.nn.functional.pad(flat, (0, pad))
+    blocks = flat.reshape(-1, block_size)
+    
+    # Salient protection
+    abs_blocks = blocks.abs()
+    salient_indices = abs_blocks.argmax(dim=1)
+    row_indices = torch.arange(blocks.shape[0], device=device)
+    salient_weights = blocks[row_indices, salient_indices].clone()
+    
+    blocks[row_indices, salient_indices] = 0.0
+    max_rem = blocks.abs().amax(dim=1)
+    safe = torch.where(max_rem == 0, torch.ones_like(max_rem), max_rem)
+    safe = torch.exp2(torch.ceil(torch.log2(safe)))
+    
+    normalized = (blocks / safe[:, None]).reshape(-1)
+    if pad:
+        normalized = normalized[:n]
+        
+    return (
+        normalized.reshape(arr.shape),
+        safe.detach().cpu(),
+        salient_weights.detach().cpu(),
+        salient_indices.detach().cpu(),
+        arr.reshape(-1).detach().cpu(),
+    )
+
+
+def _normalize_tensor_slrq_block_numpy(tensor, block_size: int):
+    import numpy as np
+
+    arr = _numpy_float32_array(tensor)
+    flat = arr.reshape(-1)
+    n = int(flat.shape[0])
+    pad = (-n) % block_size
+    if pad:
+        flat = np.pad(flat, (0, pad), mode="constant")
+    blocks = flat.reshape(-1, block_size)
+    
+    # Salient protection
+    abs_blocks = np.abs(blocks)
+    salient_indices = np.argmax(abs_blocks, axis=1)
+    row_indices = np.arange(blocks.shape[0])
+    salient_weights = blocks[row_indices, salient_indices].copy()
+    
+    blocks[row_indices, salient_indices] = 0.0
+    max_rem = np.abs(blocks).max(axis=1)
+    safe = np.where(max_rem == 0, 1.0, max_rem).astype(np.float32)
+    safe = np.exp2(np.ceil(np.log2(safe))).astype(np.float32)
+    
+    normalized = (blocks / safe[:, np.newaxis]).reshape(-1)
+    if pad:
+        normalized = normalized[:n]
+        
+    return (
+        normalized.reshape(arr.shape),
+        safe,
+        salient_weights,
+        salient_indices,
+        arr.reshape(-1),
+    )
+
+
 def _apply_block_max_scales(flat, scales, block_size: int):
     out = []
     n = len(flat)
@@ -579,10 +649,20 @@ def _apply_normalization(
         return (_normalize_tensor_block_max_torch(tensor, block_scale_size, device) if is_torch
                 else _normalize_tensor_block_max_numpy(tensor, block_scale_size))
 
+    def _slrq_block():
+        # returns tensor, scales, salient_weights, salient_indices, source_flat
+        return (_normalize_tensor_slrq_block_torch(tensor, block_scale_size, device) if is_torch
+                else _normalize_tensor_slrq_block_numpy(tensor, block_scale_size))
+
+    salient_weights = None
+    salient_indices = None
+
     if normalization == "row-l2":
         tensor, row_scales, source_flat = _row_l2()
     elif normalization == "col-l2":
         tensor, row_scales, source_flat = _col_l2()
+    elif normalization == "slrq-block":
+        tensor, row_scales, salient_weights, salient_indices, source_flat = _slrq_block()
     elif normalization == "awq":
         if not has_awq:
             awq_fallbacks.append(name)
@@ -605,7 +685,7 @@ def _apply_normalization(
                     tensor, awq_activations[name], awq_alpha, block_scale_size, device))
     else:
         tensor, row_scales, source_flat = _block_max()
-    return tensor, row_scales, source_flat, awq_col_scales
+    return tensor, row_scales, source_flat, awq_col_scales, salient_weights, salient_indices
 
 
 def _apply_col_l2_scales(flat, shape, scales):
@@ -2065,6 +2145,7 @@ def pack_checkpoint(
         "block-max",
         "awq",
         "awq-block-max",
+        "slrq-block",
     }:
         raise ValueError(
             "normalization must be 'none', 'row-l2', 'col-l2', 'block-max', 'awq', or 'awq-block-max'"
@@ -2172,8 +2253,13 @@ def pack_checkpoint(
                 row_scales = None
                 source_flat = None
                 awq_col_scales = None
-                if normalization in {"row-l2", "col-l2", "block-max", "awq", "awq-block-max"}:
-                    tensor, row_scales, source_flat, awq_col_scales = _apply_normalization(
+                salient_weights = None
+                salient_indices = None
+                if normalization in {"row-l2", "col-l2", "block-max", "awq", "awq-block-max", "slrq-block"}:
+                    (
+                        tensor, row_scales, source_flat, awq_col_scales,
+                        salient_weights, salient_indices
+                    ) = _apply_normalization(
                         tensor, name, normalization, awq_activations, awq_alpha,
                         block_scale_size, backend, resolved_device, awq_fallbacks,
                     )
@@ -2203,7 +2289,8 @@ def pack_checkpoint(
                     "name": name, "shape": shape, "source_flat": source_flat,
                     "packed_values": packed_values, "padded_values": padded_values,
                     "vectors": vectors, "row_scales": row_scales, "awq_col_scales": awq_col_scales,
-                    "normalization": normalization, "block_scale_size": block_scale_size if normalization in ("block-max", "awq-block-max") else None,
+                    "salient_weights": salient_weights, "salient_indices": salient_indices,
+                    "normalization": normalization, "block_scale_size": block_scale_size if normalization in ("block-max", "awq-block-max", "slrq-block") else None,
                     "family": classify_tensor_family(name), "rotation_seed": tensor_seed,
                     "vector_weights": vw, "stages_data": {},
                 })
@@ -2614,7 +2701,7 @@ def pack_checkpoint(
             _write_f32_vector(scale_path, c["row_scales"])
             scale_bytes = scale_path.stat().st_size
             scale_count = len(c["row_scales"])
-        elif c["normalization"] == "block-max":
+        elif c["normalization"] in ("block-max", "slrq-block"):
             scale_path = tensor_dir / f"{safe}.block_max_scale.f32"
             _write_f32_vector(scale_path, c["row_scales"])
             scale_bytes = scale_path.stat().st_size
@@ -2651,6 +2738,25 @@ def pack_checkpoint(
                 "values": str(out_val_path.relative_to(out_dir)),
                 "positions_bytes": out_idx_path.stat().st_size,
                 "values_bytes": out_val_path.stat().st_size,
+            }
+
+        salient_meta = None
+        if c.get("salient_indices") is not None:
+            s_idx_path = tensor_dir / f"{safe}.salient.idx"
+            s_val_path = tensor_dir / f"{safe}.salient.val"
+            
+            sw = c["salient_weights"].numpy() if hasattr(c["salient_weights"], "numpy") else c["salient_weights"]
+            si = c["salient_indices"].numpy() if hasattr(c["salient_indices"], "numpy") else c["salient_indices"]
+            
+            sw.astype("<f4").tofile(str(s_val_path))
+            si.astype("<u4").tofile(str(s_idx_path))
+            
+            salient_meta = {
+                "count": int(len(sw)),
+                "indices": str(s_idx_path.relative_to(out_dir)),
+                "weights": str(s_val_path.relative_to(out_dir)),
+                "indices_bytes": s_idx_path.stat().st_size,
+                "weights_bytes": s_val_path.stat().st_size,
             }
 
         metrics = c.get("refined_metrics") or _stage_quality_metrics(c, backend)
@@ -2692,10 +2798,11 @@ def pack_checkpoint(
                 "scale_count": scale_count,
                 "scale_bytes": scale_bytes,
                 "block_scale_size": block_scale_size
-                if c["normalization"] in ("block-max", "awq-block-max")
+                if c["normalization"] in ("block-max", "awq-block-max", "slrq-block")
                 else None,
                 "awq_col_scales": awq_col_meta,
                 "outliers": outlier_meta,
+                "salient": salient_meta,
                 "rotation_seed": c.get("rotation_seed"),
                 "rotation": rotation if c.get("rotation_seed") is not None else "none",
             }
@@ -2828,7 +2935,7 @@ def _denorm_metrics_from_flat(candidate: dict, source_flat, decoded_flat) -> dic
             decoded_flat, candidate["shape"], candidate["row_scales"]
         )
         return quality_metrics_from_flat(candidate["source_flat"], denorm)
-    if norm == "block-max":
+    if norm in ("block-max", "slrq-block"):
         block_size = candidate.get("block_scale_size") or 32
         if _is_numpy_array(decoded_flat):
             denorm = _apply_block_max_scales_numpy(
@@ -3049,6 +3156,7 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict) -> list[float]:
         )
         for pos, val in zip(positions, values):
             decoded[int(pos)] = float(val)
+            
     rotation = tensor_meta.get("rotation", "none")
     if rotation in {"orthogonal", "hadamard"}:
         seed = int(tensor_meta.get("rotation_seed") or 0)
@@ -3064,12 +3172,13 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict) -> list[float]:
             out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"])
         )
         decoded = _apply_col_l2_scales(decoded, tensor_meta["shape"], scales)
-    elif norm == "block-max":
+    elif norm in ("block-max", "slrq-block"):
         scales = _read_f32_vector(
             out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"])
         )
         block_size = int(tensor_meta.get("block_scale_size") or 32)
         decoded = _apply_block_max_scales(decoded, scales, block_size)
+
     elif norm == "awq-block-max":
         block_scales = _read_f32_vector(
             out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"])
@@ -3082,6 +3191,18 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict) -> list[float]:
                 out_dir / awq_meta["path"], int(awq_meta["count"])
             )
             decoded = _apply_col_l2_scales(decoded, tensor_meta["shape"], awq_scales)
+
+    salient = tensor_meta.get("salient")
+    if salient:
+        s_idx = np.fromfile(str(out_dir / salient["indices"]), dtype="<u4")
+        s_val = np.fromfile(str(out_dir / salient["weights"]), dtype="<f4")
+        
+        # SLRQ: re-inject salient weights AFTER scaling to avoid double-scaling.
+        for b_idx, (local_idx, weight) in enumerate(zip(s_idx, s_val)):
+            flat_idx = b_idx * int(tensor_meta.get("block_scale_size", 16)) + int(local_idx)
+            if flat_idx < len(decoded):
+                decoded[flat_idx] = float(weight)
+
     return decoded
 
 
@@ -3297,7 +3418,7 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
         decoded = unrotated.reshape(-1)
 
     norm = tm.get("normalization", "none")
-    if norm in ("block-max", "awq-block-max"):
+    if norm in ("block-max", "awq-block-max", "slrq-block"):
         scales = np.fromfile(
             str(out_dir / tm["scales"]), dtype="<f4", count=int(tm["scale_count"])
         )
@@ -3335,6 +3456,24 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
         cols = scales_t.numel()
         rows = decoded.numel() // cols
         decoded = (decoded[:rows * cols].reshape(rows, cols) * scales_t[None, :]).reshape(-1)
+
+    salient = tm.get("salient")
+    if salient:
+        s_idx_np = np.fromfile(str(out_dir / salient["indices"]), dtype="<u4")
+        s_val_np = np.fromfile(str(out_dir / salient["weights"]), dtype="<f4")
+        
+        s_idx = torch.from_numpy(s_idx_np.astype(np.int64)).to(device)
+        s_val = torch.from_numpy(s_val_np).to(device)
+        
+        # SLRQ: re-inject salient weights AFTER scaling to avoid double-scaling.
+        block_size = int(tm.get("block_scale_size", 16))
+        b_count = len(s_idx)
+        b_indices = torch.arange(b_count, device=device)
+        flat_indices = b_indices * block_size + s_idx
+        
+        # Guard against padding
+        mask = flat_indices < decoded.numel()
+        decoded[flat_indices[mask]] = s_val[mask]
 
     return decoded.reshape(shape)
 
@@ -4652,6 +4791,97 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
             shutil.rmtree(str(src_dir), ignore_errors=True)
 
 
+# --- SLRQ EXPERIMENTAL INTEGRATION ---
+def quantize_block_salient_slrq_vectorized(weights, block_size=16, bits_offset=4):
+    import numpy as np
+    w = weights.flatten()
+    pad = (block_size - (len(w) % block_size)) % block_size
+    w_padded = np.concatenate([w, np.zeros(pad)])
+    blocks = w_padded.reshape(-1, block_size)
+    
+    abs_blocks = np.abs(blocks)
+    max_indices = np.argmax(abs_blocks, axis=1)
+    row_indices = np.arange(len(blocks))
+    
+    salient_weights = blocks[row_indices, max_indices].copy()
+    blocks_no_salient = blocks.copy()
+    blocks_no_salient[row_indices, max_indices] = 0.0
+    
+    max_rem = np.max(np.abs(blocks_no_salient), axis=1)
+    anchors = 2**np.ceil(np.log2(max_rem + 1e-9))
+    
+    levels = 2**(bits_offset - 1) - 1
+    quantized = np.round((blocks / anchors[:, np.newaxis]) * levels)
+    recon_blocks = (quantized / levels) * anchors[:, np.newaxis]
+    
+    recon_blocks[row_indices, max_indices] = salient_weights
+    return recon_blocks.flatten()[:len(w)].reshape(weights.shape)
+
+def cmd_slrq_eval(args):
+    try:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+    except ImportError:
+        print("Requires torch and transformers")
+        return 1
+
+    print(f"Loading {args.model_id}...")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_id)
+    model = AutoModelForCausalLM.from_pretrained(args.model_id, torch_dtype=torch.float16, device_map="auto")
+    
+    prompts = [
+        "The history of artificial intelligence began in antiquity.",
+        "Quantum mechanics describes physical properties of nature.",
+        "Climate change refers to long-term shifts in temperatures.",
+        "Machine learning algorithms build a model from data.",
+        "The theory of relativity is a theory of gravitation."
+    ]
+    if args.prompts:
+        from pathlib import Path
+        prompts = [line.strip() for line in Path(args.prompts).read_text().splitlines() if line.strip()][:args.max_prompts]
+        
+    def eval_model(m):
+        m.eval()
+        total_loss = 0
+        total_tokens = 0
+        with torch.no_grad():
+            for prompt in prompts:
+                encoded = tokenizer(prompt, return_tensors="pt").to(m.device)
+                if encoded["input_ids"].shape[-1] < 2: continue
+                outputs = m(**encoded, labels=encoded["input_ids"])
+                tokens = encoded["input_ids"].shape[-1] - 1
+                total_loss += outputs.loss.item() * tokens
+                total_tokens += tokens
+        avg_loss = total_loss / total_tokens if total_tokens else 0
+        import math
+        return math.exp(avg_loss) if avg_loss < 100 else float('inf')
+
+    print("Evaluating Baseline (FP16)...")
+    ppl_base = eval_model(model)
+    print(f"Baseline Perplexity: {ppl_base:.4f}")
+    
+    print(f"Applying Vectorized SLRQ ({args.bits}-bit, block={args.block_size}) to all Linear layers...")
+    import time
+    t0 = time.time()
+    import numpy as np
+    with torch.no_grad():
+        for name, module in model.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                if "lm_head" in name or "embed" in name:
+                    continue
+                print(f"  Quantizing {name}...")
+                w_np = module.weight.detach().cpu().numpy().astype(np.float32)
+                w_recon = quantize_block_salient_slrq_vectorized(w_np, block_size=args.block_size, bits_offset=args.bits)
+                module.weight.copy_(torch.from_numpy(w_recon).to(module.weight.device).to(module.weight.dtype))
+    print(f"Quantization done in {time.time() - t0:.1f}s")
+    
+    print("Evaluating SLRQ...")
+    ppl_slrq = eval_model(model)
+    print(f"SLRQ Perplexity: {ppl_slrq:.4f}")
+    
+    print(f"Perplexity Ratio (SLRQ/Base): {ppl_slrq / ppl_base:.4f}")
+    return 0
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Orka model compiler prototype")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -4702,7 +4932,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
         p.add_argument(
             "--normalization",
-            choices=["none", "row-l2", "col-l2", "block-max", "awq", "awq-block-max"],
+            choices=["none", "row-l2", "col-l2", "block-max", "awq", "awq-block-max", "slrq-block"],
             default="none",
         )
         p.add_argument(
@@ -4853,7 +5083,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sweep.add_argument(
         "--normalizations",
-        choices=["none", "row-l2", "col-l2", "block-max", "awq", "awq-block-max"],
+        choices=["none", "row-l2", "col-l2", "block-max", "awq", "awq-block-max", "slrq-block"],
         nargs="+",
         default=["none", "row-l2"],
     )
@@ -4981,6 +5211,14 @@ def build_parser() -> argparse.ArgumentParser:
         from orka_test import run_selftests
 
         return run_selftests()
+
+    slrq = sub.add_parser("slrq-eval", help="Test SLRQ hypothesis directly on a HuggingFace model in memory")
+    slrq.add_argument("--model-id", required=True, help="HF model ID or path")
+    slrq.add_argument("--prompts", default=None, help="Optional text file of prompts")
+    slrq.add_argument("--max-prompts", type=int, default=16)
+    slrq.add_argument("--block-size", type=int, default=16)
+    slrq.add_argument("--bits", type=int, default=4)
+    slrq.set_defaults(func=cmd_slrq_eval)
 
     selftest = sub.add_parser("selftest", help="run built-in tests")
     selftest.set_defaults(func=_run_tests)
