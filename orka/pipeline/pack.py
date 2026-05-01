@@ -94,6 +94,287 @@ def _torch_vectors_from_tensor(
     return original_len, int(flat.shape[0]), flat.reshape(-1, group_size)
 
 
+def _persist_tensor_sidecars(c: dict, tensor_dir: Path, out_dir: Path) -> tuple:
+    """Write per-tensor scale / awq_col / outlier / salient sidecars.
+
+    Returns (scale_path, scale_bytes, scale_count, awq_col_meta, outlier_meta, salient_meta).
+    """
+    safe = _safe_tensor_name(c["name"])
+    scale_path = None
+    scale_bytes = 0
+    scale_count = 0
+    norm = c["normalization"]
+    if norm == "awq":
+        scale_path = tensor_dir / f"{safe}.col_l2_scale.f32"
+        _write_f32_vector(scale_path, c["row_scales"])
+        scale_bytes = scale_path.stat().st_size
+        scale_count = len(c["row_scales"])
+    elif norm in ("block-max", "slrq-block", "awq-block-max"):
+        scale_path = tensor_dir / f"{safe}.block_max_scale.f32"
+        _write_f32_vector(scale_path, c["row_scales"])
+        scale_bytes = scale_path.stat().st_size
+        scale_count = len(c["row_scales"])
+
+    awq_col_meta = None
+    if norm == "awq-block-max" and c.get("awq_col_scales") is not None:
+        awq_col_path = tensor_dir / f"{safe}.awq_col_scale.f32"
+        _write_f32_vector(awq_col_path, c["awq_col_scales"])
+        awq_col_meta = {
+            "path": str(awq_col_path.relative_to(out_dir)),
+            "count": len(c["awq_col_scales"]),
+            "bytes": awq_col_path.stat().st_size,
+        }
+
+    outlier_meta = None
+    if c.get("outlier_positions") is not None and len(c["outlier_positions"]) > 0:
+        out_idx_path = tensor_dir / f"{safe}.outliers.idx"
+        out_val_path = tensor_dir / f"{safe}.outliers.val"
+        _write_outliers(out_idx_path, out_val_path, c["outlier_positions"], c["outlier_values"])
+        outlier_meta = {
+            "count": int(len(c["outlier_positions"])),
+            "positions": str(out_idx_path.relative_to(out_dir)),
+            "values": str(out_val_path.relative_to(out_dir)),
+            "positions_bytes": out_idx_path.stat().st_size,
+            "values_bytes": out_val_path.stat().st_size,
+        }
+
+    salient_meta = None
+    if c.get("salient_indices") is not None:
+        s_idx_path = tensor_dir / f"{safe}.salient.idx"
+        s_val_path = tensor_dir / f"{safe}.salient.val"
+        _write_salient(s_idx_path, s_val_path, c["salient_indices"], c["salient_weights"])
+        salient_meta = {
+            "count": int(len(c["salient_weights"])),
+            "indices": str(s_idx_path.relative_to(out_dir)),
+            "weights": str(s_val_path.relative_to(out_dir)),
+            "indices_bytes": s_idx_path.stat().st_size,
+            "weights_bytes": s_val_path.stat().st_size,
+        }
+
+    return scale_path, scale_bytes, scale_count, awq_col_meta, outlier_meta, salient_meta
+
+
+def _build_tensor_manifest_entry(
+    c: dict,
+    *,
+    n_stages: int,
+    group_size: int,
+    block_scale_size: int,
+    rotation: str,
+    backend: str,
+    out_dir: Path,
+    tensor_dir: Path,
+    scale_path,
+    scale_bytes: int,
+    scale_count: int,
+    awq_col_meta,
+    outlier_meta,
+    salient_meta,
+) -> dict:
+    """Build the per-tensor manifest dict entry."""
+    safe = _safe_tensor_name(c["name"])
+    metrics = c.get("refined_metrics") or _stage_quality_metrics(c, backend)
+    first = c["stages_meta"][0]
+    last_idx_path = tensor_dir / (
+        f"{safe}.indices" if n_stages == 1 else f"{safe}.s0.indices"
+    )
+    index_bytes_total = sum(s["index_bytes"] for s in c["stages_meta"])
+    return {
+        "name": c["name"],
+        "shape": c["shape"],
+        "packed_values": c["packed_values"],
+        "padded_values": c["padded_values"],
+        "vector_count": len(c["vectors_orig"]),
+        "training_vector_count": first["training_vector_count"],
+        "group_size": group_size,
+        "codebook_size": first["codebook_size"],
+        "index_bits": first["index_bits"],
+        "index_bytes": index_bytes_total,
+        "n_stages": n_stages,
+        "stages": c["stages_meta"],
+        "total_bits_per_vector": sum(s["index_bits"] for s in c["stages_meta"]),
+        "mse": metrics["mse"],
+        "sse": metrics["sse"],
+        "rmse": metrics["rmse"],
+        "mae": metrics["mae"],
+        "max_abs_error": metrics["max_abs_error"],
+        "source_l2_sq": metrics["source_l2_sq"],
+        "reconstructed_l2_sq": metrics["reconstructed_l2_sq"],
+        "dot": metrics["dot"],
+        "relative_rmse": metrics["relative_rmse"],
+        "cosine_similarity": metrics["cosine_similarity"],
+        "indices": str(last_idx_path.relative_to(out_dir)),
+        "codebook": c["stages_meta"][0]["codebook"],
+        "codebook_family": c["family"],
+        "normalization": c["normalization"],
+        "scales": str(scale_path.relative_to(out_dir)) if scale_path else None,
+        "scale_count": scale_count,
+        "scale_bytes": scale_bytes,
+        "block_scale_size": block_scale_size
+        if c["normalization"] in ("block-max", "awq-block-max", "slrq-block")
+        else None,
+        "awq_col_scales": awq_col_meta,
+        "outliers": outlier_meta,
+        "salient": salient_meta,
+        "rotation_seed": c.get("rotation_seed"),
+        "rotation": rotation if c.get("rotation_seed") is not None else "none",
+    }
+
+
+def _persist_manifest(
+    *,
+    candidates: list,
+    manifest: dict,
+    out_dir: Path,
+    tensor_dir: Path,
+    skipped_tensors: set,
+    n_stages: int,
+    group_size: int,
+    block_scale_size: int,
+    rotation: str,
+    backend: str,
+    total_index_bytes: int,
+    progress_file: Path | None,
+) -> None:
+    """Write per-tensor sidecars + assemble manifest.json."""
+    _report_progress(progress_file, "--- Writing packed tensors & generating manifest ---")
+    for i, c in enumerate(candidates):
+        base_name = c["name"].replace(".weight", "")
+        if base_name in skipped_tensors or c["name"] in skipped_tensors:
+            continue
+        _report_progress(progress_file, f"  Writing {c['name']} ({i + 1}/{len(candidates)})...")
+        scale_path, scale_bytes, scale_count, awq_col_meta, outlier_meta, salient_meta = (
+            _persist_tensor_sidecars(c, tensor_dir, out_dir)
+        )
+        manifest["tensors"].append(
+            _build_tensor_manifest_entry(
+                c,
+                n_stages=n_stages,
+                group_size=group_size,
+                block_scale_size=block_scale_size,
+                rotation=rotation,
+                backend=backend,
+                out_dir=out_dir,
+                tensor_dir=tensor_dir,
+                scale_path=scale_path,
+                scale_bytes=scale_bytes,
+                scale_count=scale_count,
+                awq_col_meta=awq_col_meta,
+                outlier_meta=outlier_meta,
+                salient_meta=salient_meta,
+            )
+        )
+
+    manifest["total_index_bytes"] = total_index_bytes
+    manifest["tensor_count"] = len(manifest["tensors"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+
+def _offload_to_cpu(t):
+    """Move torch tensor to CPU; passthrough numpy/list."""
+    if _is_torch_tensor(t):
+        return t.detach().cpu()
+    return t
+
+
+def _run_em_aq_refinement(
+    *,
+    candidates: list,
+    n_stages: int,
+    skipped_tensors: set,
+    sample_vectors: int | None,
+    backend: str,
+    resolved_device: str,
+    tensor_dir: Path,
+    progress_file: Path | None,
+) -> None:
+    """Joint-optimized additive quantization (AQLM EM-style) refinement.
+
+    After the greedy stage-by-stage RVQ pass, unfreeze each stage in turn and
+    re-train it against the residual ``orig - (full_sum - this_stage_decoded)``.
+    Codebook + indices are rewritten via ``_BG_WRITER``. ``current_full_sum``
+    is materialized into ``decoded_sum`` for downstream metrics.
+    """
+    _report_progress(progress_file, "--- Starting Joint Optimization (EM-AQ) ---")
+    joint_iterations = 3
+
+    def _is_skipped(c: dict) -> bool:
+        base = c["name"].replace(".weight", "")
+        return base in skipped_tensors or c["name"] in skipped_tensors
+
+    # Materialize the current full reconstruction once per candidate.
+    for c in candidates:
+        if _is_skipped(c):
+            continue
+        full_sum = None
+        for stage_i in range(n_stages):
+            sd = c["stages_data"][stage_i]
+            dec = _decode_to_vectors_format(
+                c["vectors_orig"], sd["cb"], sd["indices"], backend, resolved_device
+            )
+            full_sum = dec if full_sum is None else full_sum + dec
+        c["current_full_sum"] = full_sum
+
+    for joint_iter in range(joint_iterations):
+        _report_progress(
+            progress_file,
+            f"Joint Refinement Pass {joint_iter + 1}/{joint_iterations}",
+        )
+        for stage_i in range(n_stages):
+            _report_progress(progress_file, f"    Refining stage {stage_i + 1}/{n_stages}...")
+            for c in candidates:
+                if _is_skipped(c):
+                    continue
+                k = c["stages_meta"][stage_i]["codebook_size"]
+                # When k >= sample budget, the codebook already memorizes the sample;
+                # joint refinement adds runtime for ~zero quality gain.
+                if sample_vectors is not None and k >= sample_vectors:
+                    continue
+
+                sd = c["stages_data"][stage_i]
+                old_dec = _decode_to_vectors_format(
+                    c["vectors_orig"], sd["cb"], sd["indices"], backend, resolved_device
+                )
+                target = _vectors_subtract(
+                    c["vectors_orig"], (c["current_full_sum"] - old_dec)
+                )
+                training = _sample_vector_rows(target, sample_vectors)
+                vw = c.get("vector_weights")
+
+                cb, _, _ = learn_codebook_auto(
+                    training, min(k, len(training)), 2, backend, resolved_device,
+                    vector_weights=vw, initial_codebook=sd["cb"],
+                )
+                indices, _ = quantize_vectors_auto(target, cb, backend, resolved_device)
+
+                new_dec = _decode_to_vectors_format(
+                    c["vectors_orig"], cb, indices, backend, resolved_device
+                )
+                c["current_full_sum"] = (c["current_full_sum"] - old_dec) + new_dec
+                c["stages_data"][stage_i] = {"cb": cb, "indices": indices}
+
+                safe = _safe_tensor_name(c["name"])
+                cb_path = tensor_dir / f"{safe}.s{stage_i}.codebook.f32"
+                _BG_WRITER.submit(_write_codebook, cb_path, cb)
+                idx_path = tensor_dir / f"{safe}.s{stage_i}.indices"
+                _BG_WRITER.submit(
+                    _write_indices,
+                    idx_path,
+                    indices.cpu() if hasattr(indices, "cpu") else indices,
+                    c["stages_meta"][stage_i]["index_bits"],
+                )
+                c["decoded_sum"] = None
+
+    # Materialize current_full_sum into decoded_sum and refresh metrics.
+    for c in candidates:
+        if "current_full_sum" in c:
+            c["decoded_sum"] = _offload_to_cpu(c["current_full_sum"])
+            del c["current_full_sum"]
+        if not _is_skipped(c):
+            c["refined_metrics"] = _stage_quality_metrics(c, backend)
+
+
 def pack_checkpoint(
     source: Path,
     out_dir: Path,
@@ -591,210 +872,33 @@ def pack_checkpoint(
                 }
             )
 
-    # Joint-Optimized Additive Quantization (AQLM EM-style)
-    # We run the greedy stage-by-stage first, then do a joint refinement pass.
     if n_stages > 1 and codebook_mode == "per-tensor":
-        _report_progress(progress_file, "--- Starting Joint Optimization (EM-AQ) ---")
-        joint_iterations = 3
-        
-        # Pre-calculate full sum once
-        for i, c in enumerate(candidates):
-            base_name = c["name"].replace(".weight", "")
-            if base_name in skipped_tensors or c["name"] in skipped_tensors:
-                continue
-            
-            full_sum = None
-            for stage_i in range(n_stages):
-                sd = c["stages_data"][stage_i]
-                dec = _decode_to_vectors_format(
-                    c["vectors_orig"], sd["cb"], sd["indices"], backend, resolved_device
-                )
-                full_sum = dec if full_sum is None else full_sum + dec
-            c["current_full_sum"] = full_sum
-
-        for joint_iter in range(joint_iterations):
-            _report_progress(
-                progress_file,
-                f"Joint Refinement Pass {joint_iter + 1}/{joint_iterations}",
-            )
-            for stage_i in range(n_stages):
-                _report_progress(progress_file, f"    Refining stage {stage_i + 1}/{n_stages}...")
-                for i, c in enumerate(candidates):
-                    base_name = c["name"].replace(".weight", "")
-                    if base_name in skipped_tensors or c["name"] in skipped_tensors:
-                        continue
-
-                    k = c["stages_meta"][stage_i]["codebook_size"]
-
-                    # When k >= sample_vectors the codebook already memorizes the sample;
-                    # joint refinement gives near-zero quality gain but dominates runtime.
-                    if sample_vectors is not None and k >= sample_vectors:
-                        continue
-
-                    # O(1) Residual Update: target = orig - (full_sum - current_stage_dec)
-                    sd = c["stages_data"][stage_i]
-                    old_dec = _decode_to_vectors_format(
-                        c["vectors_orig"], sd["cb"], sd["indices"], backend, resolved_device
-                    )
-                    
-                    target = _vectors_subtract(c["vectors_orig"], (c["current_full_sum"] - old_dec))
-                    training = _sample_vector_rows(target, sample_vectors)
-                    vw = c.get("vector_weights")
-
-                    cb, _, _ = learn_codebook_auto(
-                        training, min(k, len(training)), 2, backend, resolved_device,
-                        vector_weights=vw, initial_codebook=sd["cb"],
-                    )
-
-                    indices, _ = quantize_vectors_auto(target, cb, backend, resolved_device)
-                    
-                    # Update full sum: subtract old dec, add new dec
-                    new_dec = _decode_to_vectors_format(c["vectors_orig"], cb, indices, backend, resolved_device)
-                    c["current_full_sum"] = (c["current_full_sum"] - old_dec) + new_dec
-                    
-                    # Update cache
-                    c["stages_data"][stage_i] = {"cb": cb, "indices": indices}
-
-                    safe = _safe_tensor_name(c["name"])
-                    cb_path = tensor_dir / f"{safe}.s{stage_i}.codebook.f32"
-                    _BG_WRITER.submit(_write_codebook, cb_path, cb)
-
-                    idx_path = tensor_dir / f"{safe}.s{stage_i}.indices"
-                    _BG_WRITER.submit(_write_indices, idx_path, indices.cpu() if hasattr(indices, "cpu") else indices, c["stages_meta"][stage_i]["index_bits"])
-                    c["decoded_sum"] = None
-
-        # Sync decoded_sum after all passes
-        for c in candidates:
-            if "current_full_sum" in c:
-                c["decoded_sum"] = _offload(c["current_full_sum"])
-                del c["current_full_sum"]
-            
-            # Update metrics in manifest with joint-refined values
-            refined_metrics = _stage_quality_metrics(c, backend)
-            c["refined_metrics"] = refined_metrics
+        _run_em_aq_refinement(
+            candidates=candidates,
+            n_stages=n_stages,
+            skipped_tensors=skipped_tensors,
+            sample_vectors=sample_vectors,
+            backend=backend,
+            resolved_device=resolved_device,
+            tensor_dir=tensor_dir,
+            progress_file=progress_file,
+        )
 
     _BG_WRITER.wait()
 
-    _report_progress(progress_file, "--- Writing packed tensors & generating manifest ---")
-    for i, c in enumerate(candidates):
-        base_name = c["name"].replace(".weight", "")
-        if base_name in skipped_tensors or c["name"] in skipped_tensors:
-            continue
-        _report_progress(progress_file, f"  Writing {c['name']} ({i+1}/{len(candidates)})...")
-        safe = _safe_tensor_name(c["name"])
-        scale_path = None
-        scale_bytes = 0
-        scale_count = 0
-        if c["normalization"] == "awq":
-            scale_path = tensor_dir / f"{safe}.col_l2_scale.f32"
-            _write_f32_vector(scale_path, c["row_scales"])
-            scale_bytes = scale_path.stat().st_size
-            scale_count = len(c["row_scales"])
-        elif c["normalization"] in ("block-max", "slrq-block"):
-            scale_path = tensor_dir / f"{safe}.block_max_scale.f32"
-            _write_f32_vector(scale_path, c["row_scales"])
-            scale_bytes = scale_path.stat().st_size
-            scale_count = len(c["row_scales"])
-        elif c["normalization"] == "awq-block-max":
-            scale_path = tensor_dir / f"{safe}.block_max_scale.f32"
-            _write_f32_vector(scale_path, c["row_scales"])
-            scale_bytes = scale_path.stat().st_size
-            scale_count = len(c["row_scales"])
-
-        awq_col_meta = None
-        if (
-            c["normalization"] == "awq-block-max"
-            and c.get("awq_col_scales") is not None
-        ):
-            awq_col_path = tensor_dir / f"{safe}.awq_col_scale.f32"
-            _write_f32_vector(awq_col_path, c["awq_col_scales"])
-            awq_col_meta = {
-                "path": str(awq_col_path.relative_to(out_dir)),
-                "count": len(c["awq_col_scales"]),
-                "bytes": awq_col_path.stat().st_size,
-            }
-
-        outlier_meta = None
-        if c.get("outlier_positions") is not None and len(c["outlier_positions"]) > 0:
-            out_idx_path = tensor_dir / f"{safe}.outliers.idx"
-            out_val_path = tensor_dir / f"{safe}.outliers.val"
-            _write_outliers(
-                out_idx_path, out_val_path, c["outlier_positions"], c["outlier_values"]
-            )
-            outlier_meta = {
-                "count": int(len(c["outlier_positions"])),
-                "positions": str(out_idx_path.relative_to(out_dir)),
-                "values": str(out_val_path.relative_to(out_dir)),
-                "positions_bytes": out_idx_path.stat().st_size,
-                "values_bytes": out_val_path.stat().st_size,
-            }
-
-        salient_meta = None
-        if c.get("salient_indices") is not None:
-            s_idx_path = tensor_dir / f"{safe}.salient.idx"
-            s_val_path = tensor_dir / f"{safe}.salient.val"
-            _write_salient(s_idx_path, s_val_path, c["salient_indices"], c["salient_weights"])
-            salient_meta = {
-                "count": int(len(c["salient_weights"])),
-                "indices": str(s_idx_path.relative_to(out_dir)),
-                "weights": str(s_val_path.relative_to(out_dir)),
-                "indices_bytes": s_idx_path.stat().st_size,
-                "weights_bytes": s_val_path.stat().st_size,
-            }
-
-        metrics = c.get("refined_metrics") or _stage_quality_metrics(c, backend)
-        first = c["stages_meta"][0]
-        last_idx_path = tensor_dir / (
-            f"{safe}.indices" if n_stages == 1 else f"{safe}.s0.indices"
-        )
-        index_bytes_total = sum(s["index_bytes"] for s in c["stages_meta"])
-        manifest["tensors"].append(
-            {
-                "name": c["name"],
-                "shape": c["shape"],
-                "packed_values": c["packed_values"],
-                "padded_values": c["padded_values"],
-                "vector_count": len(c["vectors_orig"]),
-                "training_vector_count": first["training_vector_count"],
-                "group_size": group_size,
-                "codebook_size": first["codebook_size"],
-                "index_bits": first["index_bits"],
-                "index_bytes": index_bytes_total,
-                "n_stages": n_stages,
-                "stages": c["stages_meta"],
-                "total_bits_per_vector": sum(s["index_bits"] for s in c["stages_meta"]),
-                "mse": metrics["mse"],
-                "sse": metrics["sse"],
-                "rmse": metrics["rmse"],
-                "mae": metrics["mae"],
-                "max_abs_error": metrics["max_abs_error"],
-                "source_l2_sq": metrics["source_l2_sq"],
-                "reconstructed_l2_sq": metrics["reconstructed_l2_sq"],
-                "dot": metrics["dot"],
-                "relative_rmse": metrics["relative_rmse"],
-                "cosine_similarity": metrics["cosine_similarity"],
-                "indices": str(last_idx_path.relative_to(out_dir)),
-                "codebook": c["stages_meta"][0]["codebook"],
-                "codebook_family": c["family"],
-                "normalization": c["normalization"],
-                "scales": str(scale_path.relative_to(out_dir)) if scale_path else None,
-                "scale_count": scale_count,
-                "scale_bytes": scale_bytes,
-                "block_scale_size": block_scale_size
-                if c["normalization"] in ("block-max", "awq-block-max", "slrq-block")
-                else None,
-                "awq_col_scales": awq_col_meta,
-                "outliers": outlier_meta,
-                "salient": salient_meta,
-                "rotation_seed": c.get("rotation_seed"),
-                "rotation": rotation if c.get("rotation_seed") is not None else "none",
-            }
-        )
-
-    manifest["total_index_bytes"] = total_index_bytes
-    manifest["tensor_count"] = len(manifest["tensors"])
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-
+    _persist_manifest(
+        candidates=candidates,
+        manifest=manifest,
+        out_dir=out_dir,
+        tensor_dir=tensor_dir,
+        skipped_tensors=skipped_tensors,
+        n_stages=n_stages,
+        group_size=group_size,
+        block_scale_size=block_scale_size,
+        rotation=rotation,
+        backend=backend,
+        total_index_bytes=total_index_bytes,
+        progress_file=progress_file,
+    )
     return manifest
 
