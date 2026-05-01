@@ -267,10 +267,11 @@ def _hf_pulse_check(
                 outputs = model(**model_inputs)
                 orka_l = outputs.logits.detach().cpu()
 
-                # Compare distributions (KL Divergence)
+                # Per-token KL: sum over vocab at each position, then accumulate.
+                # reduction='sum' gives total KL over all tokens in this prompt.
                 p = F.log_softmax(orka_l, dim=-1)
                 q = F.softmax(orig_l, dim=-1)
-                kl = F.kl_div(p, q, reduction="batchmean", log_target=False).item()
+                kl = F.kl_div(p, q, reduction="sum", log_target=False).item()
 
                 # Compare Top-1 Agreement
                 orig_top1 = orig_l.argmax(dim=-1)
@@ -278,7 +279,7 @@ def _hf_pulse_check(
                 matches = (orig_top1 == orka_top1).sum().item()
                 tokens = orig_top1.numel()
 
-                total_kl += kl * tokens
+                total_kl += kl
                 top1_matches += matches
                 total_tokens += tokens
     finally:
