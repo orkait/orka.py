@@ -13,6 +13,7 @@ from orka._util import _best_run, _require_non_empty, _safe_exp, _safe_tensor_na
 from orka.eval.hf import (
     _combine_eval_losses,
     _hf_prompt_losses,
+    _hf_pulse_check,
     _load_hf_eval_dependencies,
     _prepare_reconstructed_hf_dir,
     _resolve_eval_model_dir,
@@ -108,6 +109,64 @@ def eval_artifact(
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(result, indent=2) + "\n")
 
+        return result
+
+    if reconstructed_model_dir is not None:
+        reconstructed_model_dir.mkdir(parents=True, exist_ok=True)
+        return run_with_reconstructed_dir(reconstructed_model_dir)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        return run_with_reconstructed_dir(Path(tmp) / "reconstructed-model")
+
+
+def pulse_check_artifact(
+    artifact_dir: Path,
+    prompts_path: Path,
+    out_path: Path,
+    model_dir: Path | None = None,
+    max_prompts: int | None = None,
+    max_length: int = 512,
+    device: str = "cpu",
+    reconstructed_model_dir: Path | None = None,
+    local_files_only: bool = True,
+) -> dict:
+    manifest_path = artifact_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"missing Orka manifest: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text())
+    source = Path(manifest["source"])
+    original_model_dir = _resolve_eval_model_dir(source, model_dir)
+    prompts = _read_prompt_file(prompts_path, max_prompts=max_prompts)
+    _load_hf_eval_dependencies()
+
+    def run_with_reconstructed_dir(target_dir: Path) -> dict:
+        prepared = _prepare_reconstructed_hf_dir(
+            artifact_dir, original_model_dir, target_dir, device=device
+        )
+        pulse_metrics = _hf_pulse_check(
+            original_model_dir,
+            target_dir,
+            prompts,
+            max_length=max_length,
+            device=device,
+            local_files_only=local_files_only,
+        )
+        result = {
+            "format": "orka-pulse-check",
+            "version": ORKA_VERSION,
+            "artifact": str(artifact_dir),
+            "source": str(source),
+            "model_dir": str(original_model_dir),
+            "prompts": str(prompts_path),
+            "max_length": max_length,
+            "device": device,
+            "local_files_only": local_files_only,
+            "reconstructed_model_dir": str(target_dir),
+            "prepared": prepared,
+            **pulse_metrics,
+        }
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(result, indent=2) + "\n")
         return result
 
     if reconstructed_model_dir is not None:
