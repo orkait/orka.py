@@ -35,6 +35,7 @@ from orka._runtime import (
     _check_ram_cap,
     _stop_ram_monitor,
 )
+import orka._runtime as _rt
 
 # ── Enforce limits — hard abort if they cannot be applied ────────────────────
 
@@ -61,8 +62,7 @@ def _enforce_and_verify():
     _apply_cpu_cap(CPU_CAP)
 
     # Verify monitor thread started (psutil path only).
-    from orka._runtime import _MONITOR_THREAD
-    if _MONITOR_THREAD is None or not _MONITOR_THREAD.is_alive():
+    if _rt._MONITOR_THREAD is None or not _rt._MONITOR_THREAD.is_alive():
         print("ERROR: RAM monitor thread did not start. Aborting.", file=sys.stderr)
         sys.exit(1)
 
