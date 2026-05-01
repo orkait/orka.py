@@ -733,15 +733,9 @@ def pack_checkpoint(
         if c.get("salient_indices") is not None:
             s_idx_path = tensor_dir / f"{safe}.salient.idx"
             s_val_path = tensor_dir / f"{safe}.salient.val"
-            
-            sw = c["salient_weights"].numpy() if hasattr(c["salient_weights"], "numpy") else c["salient_weights"]
-            si = c["salient_indices"].numpy() if hasattr(c["salient_indices"], "numpy") else c["salient_indices"]
-            
-            sw.astype("<f4").tofile(str(s_val_path))
-            si.astype("<u4").tofile(str(s_idx_path))
-            
+            _write_salient(s_idx_path, s_val_path, c["salient_indices"], c["salient_weights"])
             salient_meta = {
-                "count": int(len(sw)),
+                "count": int(len(c["salient_weights"])),
                 "indices": str(s_idx_path.relative_to(out_dir)),
                 "weights": str(s_val_path.relative_to(out_dir)),
                 "indices_bytes": s_idx_path.stat().st_size,

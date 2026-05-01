@@ -161,15 +161,7 @@ def _normalize_tensor_slrq_block_numpy(tensor, block_size: int):
 
 
 def _apply_block_max_scales(flat, scales, block_size: int):
-    out = []
-    n = len(flat)
-    block_idx = 0
-    for i in range(0, n, block_size):
-        end = min(i + block_size, n)
-        scale = float(scales[block_idx]) if block_idx < len(scales) else 1.0
-        out.extend(float(flat[j]) * scale for j in range(i, end))
-        block_idx += 1
-    return out
+    return _apply_block_max_scales_numpy(flat, scales, block_size).tolist()
 
 
 def _apply_block_max_scales_numpy(flat, scales, block_size: int):
@@ -270,23 +262,7 @@ def _apply_normalization(
 
 
 def _apply_col_l2_scales(flat, shape, scales):
-    try:
-        import numpy as np
-        return _apply_col_l2_scales_numpy(flat, shape, scales).tolist()
-    except ImportError:
-        pass
-
-    rows = int(shape[0])
-    cols = 1
-    for s in shape[1:]:
-        cols *= int(s)
-    if len(scales) != cols:
-        raise ValueError("col scale count does not match tensor cols")
-    out = []
-    for r in range(rows):
-        for c in range(cols):
-            out.append(float(flat[r * cols + c]) * float(scales[c]))
-    return out
+    return _apply_col_l2_scales_numpy(flat, shape, scales).tolist()
 
 
 def _apply_col_l2_scales_numpy(flat, shape, scales):
