@@ -604,7 +604,16 @@ def pack_checkpoint(
     prefetch_thread.join()
 
     if _prefetch_exc:
-        raise RuntimeError(f"prefetch worker failed: {_prefetch_exc[0]}") from _prefetch_exc[0]
+        exc = _prefetch_exc[0]
+        # Preserve the original exception type when it carries semantic meaning
+        # (e.g. SystemRAMExceededError, CappedOutOfMemoryError). Plain wrapping
+        # to RuntimeError loses that signal for callers/CLI.
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise exc
+        from orka._runtime import SystemRAMExceededError, CappedOutOfMemoryError
+        if isinstance(exc, (SystemRAMExceededError, CappedOutOfMemoryError)):
+            raise type(exc)(f"prefetch worker: {exc}") from exc
+        raise RuntimeError(f"prefetch worker failed: {exc}") from exc
     if not candidates:
         raise RuntimeError(
             "prefetch worker produced 0 candidates - no quantizable tensors found "
