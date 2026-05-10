@@ -4,29 +4,42 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# 1. Zip the orka package
-TMP_ZIP="/tmp/orka_src.zip"
-rm -f "$TMP_ZIP"
-(cd "$ROOT_DIR" && zip -r "$TMP_ZIP" orka -x "*.pyc" "__pycache__/*")
+DATASET_SLUG="orka-compiler-core-v2"
+TMP_DS="/tmp/orka_dataset_bundle"
 
-# 2. Base64 encode the zip
-B64_DATA=$(base64 -w 0 "$TMP_ZIP")
+echo "--- Step 1: Versioning Code in Kaggle Dataset ---"
+rm -rf "$TMP_DS"
+mkdir -p "$TMP_DS/orka"
+cp -r "$ROOT_DIR/orka"/* "$TMP_DS/orka/"
 
-# 3. Inject into template
-TMP_DEPLOY="/tmp/orka_kaggle_deploy"
+# Always init metadata to ensure it exists
+kaggle datasets init -p .
+sed -i "s/INSERT_TITLE_HERE/$DATASET_SLUG/g" dataset-metadata.json
+sed -i "s/INSERT_SLUG_HERE/$DATASET_SLUG/g" dataset-metadata.json
+
+if ! kaggle datasets status "superkaiii/$DATASET_SLUG" > /dev/null 2>&1; then
+    echo "Creating new private dataset..."
+    kaggle datasets create -p . --dir-mode zip
+else
+    echo "Updating existing dataset version..."
+    kaggle datasets version -p . -m "Update Orka Core" --dir-mode zip
+fi
+
+echo "--- Step 2: Pushing Kernel ---"
+TMP_DEPLOY="/tmp/orka_kernel_deploy"
 rm -rf "$TMP_DEPLOY"
 mkdir -p "$TMP_DEPLOY"
 
-cp "$ROOT_DIR/orka_entry_template.py" "$TMP_DEPLOY/orka.py"
-sed -i "s|{{ORKA_SOURCE_B64}}|$B64_DATA|g" "$TMP_DEPLOY/orka.py"
+cp "$ROOT_DIR/orka_entry_kaggle.py" "$TMP_DEPLOY/orka.py"
 cp "$SCRIPT_DIR/kernel-metadata.json" "$TMP_DEPLOY/"
 
-# Fix metadata to point to local orka.py
+# Ensure correct data source name in metadata
+sed -i "s|orka-compiler-core|${DATASET_SLUG}|g" "$TMP_DEPLOY/orka.py"
 sed -i 's|../../orka.py|orka.py|g' "$TMP_DEPLOY/kernel-metadata.json"
 
-echo "Pushing self-extracting bundle from $TMP_DEPLOY..."
-kaggle kernels push --path "$TMP_DEPLOY"
+cd "$TMP_DEPLOY"
+kaggle kernels push --path .
 
-KERNEL_ID=$(python3 -c "import json; print(json.load(open('$TMP_DEPLOY/kernel-metadata.json'))['id'])")
+KERNEL_ID=$(python3 -c "import json; print(json.load(open('kernel-metadata.json'))['id'])")
 echo "Pushed: $KERNEL_ID"
 echo "Monitor: kaggle kernels status $KERNEL_ID"
