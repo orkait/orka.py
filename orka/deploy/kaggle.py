@@ -121,6 +121,10 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
         return 1
 
     on_kaggle = Path("/kaggle/working").exists()
+    if on_kaggle:
+        print("Kaggle: upgrading transformers and accelerate ...", flush=True)
+        import subprocess
+        subprocess.run([os.sys.executable, "-m", "pip", "install", "--upgrade", "transformers", "accelerate", "huggingface_hub"], check=True)
 
     if args.out:
         out_dir = Path(args.out)
@@ -182,12 +186,12 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
                 from scipy.stats import rankdata
                 from collections import Counter
                 
-                tok = AutoTokenizer.from_pretrained(src_dir)
+                tok = AutoTokenizer.from_pretrained(src_dir, trust_remote_code=True)
                 with open(calib_path) as f:
                     text = f.read()
                 counts = Counter(tok.encode(text))
                 
-                mod = AutoModelForCausalLM.from_pretrained(src_dir, torch_dtype="auto", device_map="cpu")
+                mod = AutoModelForCausalLM.from_pretrained(src_dir, torch_dtype="auto", device_map="cpu", trust_remote_code=True)
                 emb = mod.get_input_embeddings().weight.detach().numpy()
                 actual_vocab = emb.shape[0]
                 norms = np.linalg.norm(emb, axis=1)

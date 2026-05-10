@@ -103,10 +103,13 @@ def _hf_prompt_losses(
     tokenizer = AutoTokenizer.from_pretrained(
         str(model_dir),
         local_files_only=local_files_only,
+        trust_remote_code=True,
     )
     model = AutoModelForCausalLM.from_pretrained(
         str(model_dir),
         local_files_only=local_files_only,
+        trust_remote_code=True,
+        torch_dtype=torch.float32,
     )
     model.to(device)
     model.eval()
@@ -192,12 +195,15 @@ def _hf_pulse_check(
     tokenizer = AutoTokenizer.from_pretrained(
         str(original_model_dir),
         local_files_only=local_files_only,
+        trust_remote_code=True,
     )
 
     # 1. Run Original Model
     model = AutoModelForCausalLM.from_pretrained(
         str(original_model_dir),
         local_files_only=local_files_only,
+        trust_remote_code=True,
+        torch_dtype=torch.float32,
     )
     model.to(device)
     model.eval()
@@ -239,6 +245,8 @@ def _hf_pulse_check(
     model = AutoModelForCausalLM.from_pretrained(
         str(reconstructed_model_dir),
         local_files_only=local_files_only,
+        trust_remote_code=True,
+        torch_dtype=torch.float32,
     )
     model.to(device)
     model.eval()

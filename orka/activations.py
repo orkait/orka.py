@@ -21,8 +21,8 @@ def _collect_activations_hf(
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except Exception as exc:
         raise RuntimeError("activation calibration requires torch and transformers") from exc
-    tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True)
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(str(model_dir), local_files_only=True, trust_remote_code=True)
     model.to(device)
     model.eval()
     activations: dict[str, list] = {}
