@@ -43,8 +43,11 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict) -> list[float]:
     import numpy as np
     decoded_np = np.zeros(index_count * group_size, dtype=np.float32)
     for stage in stages:
-        cb = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, group_size)
-        idxs = np.asarray(_read_indices(out_dir / stage["indices"], int(stage["index_bits"]), index_count), dtype=np.int64)
+        s_group_size = int(stage.get("group_size", group_size))
+        s_index_count = math.ceil(padded_values / s_group_size)
+        
+        cb = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, s_group_size)
+        idxs = np.asarray(_read_indices(out_dir / stage["indices"], int(stage["index_bits"]), s_index_count), dtype=np.int64)
         decoded_np += cb[idxs].reshape(-1)
     decoded = decoded_np[: int(tensor_meta["packed_values"])].tolist()
     outl = tensor_meta.get("outliers")
@@ -127,7 +130,10 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
 
     decoded = torch.zeros(index_count * group_size, dtype=torch.float32, device=device)
     for stage in stages:
-        cb_np = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, group_size)
+        s_group_size = int(stage.get("group_size", group_size))
+        s_index_count = math.ceil(padded_values / s_group_size)
+
+        cb_np = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, s_group_size)
         idxs_np = np.frombuffer(
             (out_dir / stage["indices"]).read_bytes(),
             dtype=_index_bit_spec(int(stage["index_bits"]))[1],
