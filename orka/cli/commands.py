@@ -58,7 +58,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
 def cmd_pack(args: argparse.Namespace) -> int:
     _apply_gpu_memory_cap(args.backend, args.device, args.max_gpu_mem_gb)
-    _apply_system_ram_cap(args.max_system_ram_gb)
+    _apply_system_ram_cap(args.max_system_ram_gb, getattr(args, "workload_budget_gb", None))
     _apply_cpu_cap(args.max_cpu_threads)
     try:
         awq_activations = _load_awq_activations(args)
@@ -105,6 +105,8 @@ def cmd_pack(args: argparse.Namespace) -> int:
             if args.codebook_cache
             else None,
             block_scale_size=args.block_scale_size,
+            em_aq_passes=getattr(args, "em_aq_passes", 3),
+            slrq_salient=getattr(args, "slrq_salient", True),
         )
         print(
             json.dumps(
@@ -148,7 +150,7 @@ def cmd_reconstruct(args: argparse.Namespace) -> int:
 
 def cmd_sweep(args: argparse.Namespace) -> int:
     _apply_gpu_memory_cap(args.backend, args.device, args.max_gpu_mem_gb)
-    _apply_system_ram_cap(args.max_system_ram_gb)
+    _apply_system_ram_cap(args.max_system_ram_gb, getattr(args, "workload_budget_gb", None))
     _apply_cpu_cap(args.max_cpu_threads)
     try:
         awq_activations = _load_awq_activations(args)
@@ -208,7 +210,10 @@ def cmd_sweep(args: argparse.Namespace) -> int:
 
 def cmd_eval(args: argparse.Namespace) -> int:
     _apply_gpu_memory_cap("torch", args.device, getattr(args, "max_gpu_mem_gb", None))
-    _apply_system_ram_cap(getattr(args, "max_system_ram_gb", None))
+    _apply_system_ram_cap(
+        getattr(args, "max_system_ram_gb", None),
+        getattr(args, "workload_budget_gb", None),
+    )
     _apply_cpu_cap(getattr(args, "max_cpu_threads", None))
     try:
         result = eval_artifact(
@@ -251,7 +256,10 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
 def cmd_pulse_check(args: argparse.Namespace) -> int:
     _apply_gpu_memory_cap("torch", args.device, getattr(args, "max_gpu_mem_gb", None))
-    _apply_system_ram_cap(getattr(args, "max_system_ram_gb", None))
+    _apply_system_ram_cap(
+        getattr(args, "max_system_ram_gb", None),
+        getattr(args, "workload_budget_gb", None),
+    )
     _apply_cpu_cap(getattr(args, "max_cpu_threads", None))
     try:
         result = pulse_check_artifact(
@@ -289,7 +297,10 @@ def cmd_pulse_check(args: argparse.Namespace) -> int:
 
 def cmd_eval_sweep(args: argparse.Namespace) -> int:
     _apply_gpu_memory_cap("torch", args.device, getattr(args, "max_gpu_mem_gb", None))
-    _apply_system_ram_cap(getattr(args, "max_system_ram_gb", None))
+    _apply_system_ram_cap(
+        getattr(args, "max_system_ram_gb", None),
+        getattr(args, "workload_budget_gb", None),
+    )
     _apply_cpu_cap(getattr(args, "max_cpu_threads", None))
     try:
         result = eval_sweep(

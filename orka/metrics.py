@@ -122,6 +122,8 @@ def _stage_quality_metrics(candidate: dict, backend: str) -> dict:
             import torch
         except Exception as exc:
             raise RuntimeError("torch metrics requires torch") from exc
+        if _is_torch_tensor(orig) and orig.device != decoded_sum.device:
+            decoded_sum = decoded_sum.to(orig.device)
         diff = orig - decoded_sum
         sse = float((diff * diff).sum().detach().cpu().item())
         abs_diff = diff.abs()

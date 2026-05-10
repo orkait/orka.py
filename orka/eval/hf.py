@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Sequence
 
-from orka.reconstruct import _write_complete_safetensors_reconstruction
+from orka.reconstruct import reconstruct_artifact
 
 
 def _resolve_eval_model_dir(source: Path, model_dir: Path | None) -> Path:
@@ -64,10 +64,10 @@ def _prepare_reconstructed_hf_dir(
     if not manifest_path.exists():
         raise FileNotFoundError(f"missing Orka manifest: {manifest_path}")
     manifest = json.loads(manifest_path.read_text())
-    reconstructed = _write_complete_safetensors_reconstruction(
+    reconstructed = reconstruct_artifact(
         artifact_dir,
         target_dir / "model.safetensors",
-        manifest,
+        output_format="safetensors",
         device=device,
     )
     return {

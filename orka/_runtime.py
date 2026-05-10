@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import queue
+import resource
 import threading
 import time
 from typing import Sequence
@@ -21,8 +22,19 @@ except ImportError:
     torch = None
 
 
+# Hard ceiling: never let RAM_CAP exceed this regardless of user input.
+# Calibrated for 32GB systems: leaves 5GB for kernel + UI + swap-pressure margin.
+# Override only via env var ORKA_HARD_CEILING_GB (e.g. for 64GB machines).
+HARD_CEILING_GB = float(os.environ.get("ORKA_HARD_CEILING_GB", "25.0"))
+
+# Preflight thresholds (override via env vars if you know what you're doing):
+PREFLIGHT_MIN_AVAIL_GB = float(os.environ.get("ORKA_PREFLIGHT_MIN_AVAIL_GB", "5.0"))
+PREFLIGHT_MAX_SWAP_GB = float(os.environ.get("ORKA_PREFLIGHT_MAX_SWAP_GB", "4.0"))
+
+
 class SystemRAMExceededError(RuntimeError):
-    """Raised at pipeline checkpoints when the RAM monitor flagged overage."""
+    """Raised at pipeline checkpoints when the RAM monitor flagged overage,
+    or when preflight checks refuse to start a job."""
 
 
 def _get_system_memory_info():
@@ -82,25 +94,146 @@ def _check_ram_cap():
 _MONITOR_STOP_EVENT = threading.Event()
 _MONITOR_THREAD: threading.Thread | None = None
 
-def _apply_system_ram_cap(max_ram_gb: float | None) -> None:
-    """Start daemon RAM monitor. No-op when psutil missing."""
-    global _MONITOR_THREAD
+
+def _preflight_memory_check(workload_budget_gb: float = 5.0) -> None:
+    """Refuse to start work if system is already under memory pressure.
+
+    Raises ``SystemRAMExceededError`` if:
+      - MemAvailable is below workload_budget + safety margin
+      - Swap usage exceeds threshold (system already thrashing-prone)
+
+    These checks STOP the job before any allocation happens. They protect
+    against running heavy workloads on a system that will freeze under load.
+    """
     if not _HAS_PSUTIL:
-        import sys
+        return
+    vm = psutil.virtual_memory()
+    avail_gb = vm.available / (1024 ** 3)
+    sw = psutil.swap_memory()
+    swap_used_gb = sw.used / (1024 ** 3)
+    required_avail = workload_budget_gb + PREFLIGHT_MIN_AVAIL_GB
+
+    if avail_gb < required_avail:
+        raise SystemRAMExceededError(
+            f"REFUSING to start: MemAvailable={avail_gb:.1f}GB < "
+            f"workload_budget={workload_budget_gb:.1f}GB + safety_margin={PREFLIGHT_MIN_AVAIL_GB:.1f}GB. "
+            f"Free memory before retrying (close VM/browser/other processes), "
+            f"or override via ORKA_PREFLIGHT_MIN_AVAIL_GB if you accept the risk."
+        )
+    if swap_used_gb > PREFLIGHT_MAX_SWAP_GB:
+        raise SystemRAMExceededError(
+            f"REFUSING to start: SwapUsed={swap_used_gb:.1f}GB > "
+            f"threshold={PREFLIGHT_MAX_SWAP_GB:.1f}GB. "
+            f"System under prior memory pressure - will thrash if pushed further. "
+            f"Run 'sudo swapoff -a && sudo swapon -a' to clear swap, "
+            f"or override via ORKA_PREFLIGHT_MAX_SWAP_GB."
+        )
+
+
+def _apply_hard_ram_cap(max_ram_gb: float) -> None:
+    """OS-enforced hard cap on process address space (RLIMIT_AS).
+
+    Unlike the polling monitor, this is enforced by the kernel: any malloc/mmap
+    that would push the process over the limit returns NULL/raises MemoryError.
+    PyTorch, numpy, BLAS - they all hit the wall here. Cannot be circumvented.
+
+    This is the layer that actually prevents system-freezing OOM scenarios.
+    The polling monitor is kept as a softer early-warning above this hard cap.
+    """
+    import sys
+    if max_ram_gb is None or max_ram_gb <= 0:
+        return
+    cap_bytes = int(max_ram_gb * (1024 ** 3))
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+        new_soft = cap_bytes
+        new_hard = cap_bytes if hard == resource.RLIM_INFINITY else min(cap_bytes, hard)
+        if new_hard < new_soft:
+            new_soft = new_hard
+        resource.setrlimit(resource.RLIMIT_AS, (new_soft, new_hard))
         print(
-            "WARNING: --max-system-ram-gb requested but psutil is not installed; cap disabled.",
+            f"INFO: Hard RLIMIT_AS = {new_soft / (1024 ** 3):.2f} GB "
+            f"(OS-enforced; malloc beyond this raises MemoryError)",
             file=sys.stderr,
         )
-        return
+    except (ValueError, OSError) as exc:
+        print(
+            f"WARNING: could not set RLIMIT_AS hard cap ({exc}); "
+            f"falling back to polling monitor only",
+            file=sys.stderr,
+        )
 
-    if max_ram_gb is None:
-        max_ram_gb = _calculate_default_ram_cap_gb()
-    if max_ram_gb is None:
-        return
 
+def _enforce_hard_ceiling(requested_gb: float) -> float:
+    """Clamp requested cap to HARD_CEILING_GB. Logs if clamped."""
     import sys
-    print(f"INFO: System RAM cap = {max_ram_gb:.2f} GB (poll 100ms)", file=sys.stderr)
+    if requested_gb > HARD_CEILING_GB:
+        print(
+            f"WARNING: requested RAM cap {requested_gb:.1f}GB exceeds "
+            f"HARD_CEILING_GB={HARD_CEILING_GB:.1f}GB. Clamping. "
+            f"Override only via ORKA_HARD_CEILING_GB env var (you accept system-freeze risk).",
+            file=sys.stderr,
+        )
+        return HARD_CEILING_GB
+    return requested_gb
 
+
+def _apply_system_ram_cap(
+    max_ram_gb: float | None, workload_budget_gb: float | None
+) -> None:
+    """Apply 4-layer RAM cap. Both args required when cap is requested.
+
+      1. Preflight check  - refuse if MemAvailable < budget+5GB or SwapUsed > 4GB
+      2. Hard ceiling     - clamp max_ram_gb to HARD_CEILING_GB (25GB)
+      3. RLIMIT_AS        - OS-enforced cap on process address space
+      4. Polling monitor  - 100ms early-warning checkpoint
+
+    Pass max_ram_gb=None to skip cap entirely (NOT recommended).
+    When max_ram_gb is set, workload_budget_gb is required (no default - caller
+    MUST think about expected process budget).
+
+    Per-workload budget table (process delta, validated):
+      tiny script         : 0.5 GB
+      SmolLM2-135M torch  : 5 GB    (numpy: 2.5)
+      Pythia-160M         : 5 GB    (numpy: 2.5)
+      Bloom-560m          : 7 GB    (numpy: 4)
+      Qwen3-0.6B torch    : 9 GB    (numpy: 5)
+      SmolLM2-360M        : 7 GB    (numpy: 3.5)
+    Add +2 if EM-AQ enabled, +1 if family_stages_map, +1 if prefetch>2.
+    """
+    global _MONITOR_THREAD
+    import sys
+
+    if max_ram_gb is None:
+        # User explicitly opted out of cap. Skip everything.
+        return
+
+    if not _HAS_PSUTIL:
+        raise RuntimeError(
+            "psutil required for RAM cap enforcement. install via `uv pip install psutil`."
+        )
+
+    if workload_budget_gb is None:
+        raise ValueError(
+            "workload_budget_gb is required when max_ram_gb is set. "
+            "Pass --workload-budget-gb on CLI. See orka._runtime per-workload table."
+        )
+
+    # Layer 1
+    _preflight_memory_check(workload_budget_gb=workload_budget_gb)
+
+    # Layer 2
+    max_ram_gb = _enforce_hard_ceiling(max_ram_gb)
+
+    # Layer 3
+    _apply_hard_ram_cap(max_ram_gb)
+
+    # Layer 4
+    print(
+        f"INFO: System RAM cap = {max_ram_gb:.2f} GB (poll 100ms, hard ceiling {HARD_CEILING_GB:.1f}GB, "
+        f"workload_budget={workload_budget_gb:.1f}GB)",
+        file=sys.stderr,
+    )
     _MONITOR_STOP_EVENT.clear()
     _MONITOR_THREAD = threading.Thread(
         target=_monitor_ram_task,
