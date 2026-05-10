@@ -579,9 +579,10 @@ def pack_checkpoint(
                         slrq_salient=slrq_salient,
                     )
 
-                # Capture pre-rotation flat when rotation is on but normalization didn't set it.
-                # _stage_quality_metrics needs source_flat to compare un-rotated decode output.
-                if source_flat is None and (rotation != "none" or outlier_frac > 0):
+                # --- Post-Normalization Pre-processing ---
+                # Capture source_flat if not already set by normalization.
+                # This is mandatory for quality metrics verification.
+                if source_flat is None:
                     if backend == "torch":
                         _, _arr = _torch_f32(tensor, resolved_device)
                         source_flat = _arr.reshape(-1).detach().cpu()

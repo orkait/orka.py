@@ -471,6 +471,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--out", required=True, help="output JSON for the semantic analysis"
     )
     sem_analyze.add_argument(
+        "--save-sensitivity-map", help="generate a .json file for orka pack --sensitivity-map"
+    )
+    sem_analyze.add_argument(
         "--device", default="cpu", help="device for embedding analysis (cpu/cuda)"
     )
     sem_analyze.set_defaults(func=cmd_sem_analyze)

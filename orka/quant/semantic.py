@@ -139,5 +139,29 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
     
     Path(args.out).write_text(json.dumps(analysis, indent=2) + "\n")
     print(f"Analysis saved to {args.out}", flush=True)
+
+    # NEW: Automatic Sensitivity Map Generation for Orka Pack
+    if getattr(args, "save_sensitivity_map", None):
+        print(f"--- Generating Sensitivity Map for Pack ---", flush=True)
+        # We define pillars as:
+        # 1. Master tokens of semantic hubs (The unique concepts)
+        # 2. Top 500 productive morphological roots
+        top_tokens = set()
+        for hub in hubs:
+            top_tokens.add(hub["master_tid"])
+        
+        # Add tokens that ARE roots themselves (terminating at a productive node)
+        # This is simplified: we take the first 1000 IDs for now as a heuristic
+        # In Phase 4 we will do exact mapping.
+        for tid in range(min(1000, vocab_size)):
+            top_tokens.add(tid)
+
+        s_map = {
+            "top_tokens": sorted(list(top_tokens)),
+            "layers": []
+        }
+        Path(args.save_sensitivity_map).write_text(json.dumps(s_map, indent=2) + "\n")
+        print(f"Sensitivity map saved to {args.save_sensitivity_map}", flush=True)
+
     return 0
 
