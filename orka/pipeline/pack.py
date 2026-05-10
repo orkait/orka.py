@@ -98,7 +98,7 @@ def _torch_vectors_from_tensor(
 def _persist_tensor_sidecars(c: dict, tensor_dir: Path, out_dir: Path) -> tuple:
     """Write per-tensor scale / awq_col / outlier / salient sidecars.
 
-    Returns (scale_path, scale_bytes, scale_count, awq_col_meta, outlier_meta, salient_meta).
+    Returns (scale_path, scale_bytes, scale_count, awq_col_meta, outlier_meta, salient_meta, pillar_meta).
     """
     safe = _safe_tensor_name(c["name"])
     scale_path = None
@@ -139,6 +139,19 @@ def _persist_tensor_sidecars(c: dict, tensor_dir: Path, out_dir: Path) -> tuple:
             "values_bytes": out_val_path.stat().st_size,
         }
 
+    pillar_meta = None
+    if c.get("pillar_positions") is not None and len(c["pillar_positions"]) > 0:
+        p_idx_path = tensor_dir / f"{safe}.pillars.idx"
+        p_val_path = tensor_dir / f"{safe}.pillars.f2"
+        _write_pillars(p_idx_path, p_val_path, c["pillar_positions"], c["pillar_values"])
+        pillar_meta = {
+            "count": int(len(c["pillar_positions"])),
+            "positions": str(p_idx_path.relative_to(out_dir)),
+            "values": str(p_val_path.relative_to(out_dir)),
+            "positions_bytes": p_idx_path.stat().st_size,
+            "values_bytes": p_val_path.stat().st_size,
+        }
+
     salient_meta = None
     if c.get("salient_indices") is not None:
         s_idx_path = tensor_dir / f"{safe}.salient.idx"
@@ -152,7 +165,7 @@ def _persist_tensor_sidecars(c: dict, tensor_dir: Path, out_dir: Path) -> tuple:
             "weights_bytes": s_val_path.stat().st_size,
         }
 
-    return scale_path, scale_bytes, scale_count, awq_col_meta, outlier_meta, salient_meta
+    return scale_path, scale_bytes, scale_count, awq_col_meta, outlier_meta, salient_meta, pillar_meta
 
 
 def _build_tensor_manifest_entry(
@@ -171,6 +184,7 @@ def _build_tensor_manifest_entry(
     awq_col_meta,
     outlier_meta,
     salient_meta,
+    pillar_meta,
 ) -> dict:
     """Build the per-tensor manifest dict entry."""
     safe = _safe_tensor_name(c["name"])
@@ -217,6 +231,7 @@ def _build_tensor_manifest_entry(
         else None,
         "awq_col_scales": awq_col_meta,
         "outliers": outlier_meta,
+        "pillars": pillar_meta,
         "salient": salient_meta,
         "rotation_seed": c.get("rotation_seed"),
         "rotation": c.get("rotation", "none"),
@@ -245,7 +260,7 @@ def _persist_manifest(
         if base_name in skipped_tensors or c["name"] in skipped_tensors:
             continue
         _report_progress(progress_file, f"  Writing {c['name']} ({i + 1}/{len(candidates)})...")
-        scale_path, scale_bytes, scale_count, awq_col_meta, outlier_meta, salient_meta = (
+        scale_path, scale_bytes, scale_count, awq_col_meta, outlier_meta, salient_meta, pillar_meta = (
             _persist_tensor_sidecars(c, tensor_dir, out_dir)
         )
         manifest["tensors"].append(
@@ -264,6 +279,7 @@ def _persist_manifest(
                 awq_col_meta=awq_col_meta,
                 outlier_meta=outlier_meta,
                 salient_meta=salient_meta,
+                pillar_meta=pillar_meta,
             )
         )
 
@@ -290,6 +306,7 @@ def _run_em_aq_refinement(
     resolved_device: str,
     tensor_dir: Path,
     progress_file: Path | None,
+    em_aq_passes: int = 3,
 ) -> None:
     """Joint-optimized additive quantization (AQLM EM-style) refinement.
 
@@ -297,9 +314,15 @@ def _run_em_aq_refinement(
     re-train it against the residual ``orig - (full_sum - this_stage_decoded)``.
     Codebook + indices are rewritten via ``_BG_WRITER``. ``current_full_sum``
     is materialized into ``decoded_sum`` for downstream metrics.
+
+    em_aq_passes=0 disables EM-AQ entirely (skip joint refinement, return after
+    materializing decoded_sum from the greedy stages).
     """
-    _report_progress(progress_file, "--- Starting Joint Optimization (EM-AQ) ---")
-    joint_iterations = 3
+    if em_aq_passes <= 0:
+        _report_progress(progress_file, "--- EM-AQ disabled (em_aq_passes=0) ---")
+    else:
+        _report_progress(progress_file, "--- Starting Joint Optimization (EM-AQ) ---")
+    joint_iterations = max(0, int(em_aq_passes))
 
     def _is_skipped(c: dict) -> bool:
         base = c["name"].replace(".weight", "")
@@ -310,7 +333,8 @@ def _run_em_aq_refinement(
         if _is_skipped(c):
             continue
         full_sum = None
-        for stage_i in range(n_stages):
+        c_n_stages = len(c["stages_data"])
+        for stage_i in range(c_n_stages):
             sd = c["stages_data"][stage_i]
             dec = _decode_to_vectors_format(
                 c["vectors_orig"], sd["cb"], sd["indices"], backend, resolved_device
@@ -328,6 +352,8 @@ def _run_em_aq_refinement(
             for c in candidates:
                 _check_ram_cap()
                 if _is_skipped(c):
+                    continue
+                if stage_i >= len(c["stages_data"]):
                     continue
                 k = c["stages_meta"][stage_i]["codebook_size"]
                 # When k >= sample budget, the codebook already memorizes the sample;
@@ -406,6 +432,8 @@ def pack_checkpoint(
     sensitivity_map: dict | None = None,
     codebook_cache_dir: Path | None = None,
     block_scale_size: int = 32,
+    em_aq_passes: int = 3,
+    slrq_salient: bool = True,
 ) -> dict:
     if codebook_mode not in {"per-tensor", "global", "family"}:
         raise ValueError(
@@ -515,8 +543,19 @@ def pack_checkpoint(
                 _check_ram_cap()
                 if max_tensors is not None and tensors_emitted >= max_tensors:
                     break
+                
                 shape = _tensor_shape(tensor)
-                if len(shape) < 2:
+                name_lower = name.lower()
+                is_candidate = len(shape) >= 2
+                
+                # Exclude biases, norms, and architectural sidecars.
+                if any(
+                    x in name_lower
+                    for x in (".bias", ".norm", ".layernorm", "rotary_emb", "attention.bias")
+                ):
+                    is_candidate = False
+
+                if not is_candidate:
                     _passthrough[name] = tensor
                     continue
                 
@@ -537,6 +576,7 @@ def pack_checkpoint(
                     ) = _apply_normalization(
                         tensor, name, normalization, awq_activations, awq_alpha,
                         block_scale_size, backend, resolved_device, awq_fallbacks,
+                        slrq_salient=slrq_salient,
                     )
 
                 # Capture pre-rotation flat when rotation is on but normalization didn't set it.
@@ -599,10 +639,61 @@ def pack_checkpoint(
             continue
             
         _report_progress(progress_file, f"Prepared {c['name']} {c['shape']} (Ready for Quantization)")
-        
+
+        # --- Frequency-Aware Pillar Protection (SmolLM/Qwen research branch) ---
+        is_embedding = c["name"].lower() in (
+            "model.embed_tokens.weight", "gpt_neox.embed_in.weight", 
+            "embed_out.weight", "lm_head.weight"
+        )
+        pillar_positions = None
+        pillar_values = None
+
+        if is_embedding and sensitivity_map and "top_tokens" in sensitivity_map:
+            top_token_ids = sensitivity_map["top_tokens"]
+            _report_progress(progress_file, f"    Applying Frequency-Aware Pillar Protection ({len(top_token_ids)} tokens)")
+
+            vocab_size, hidden_dim = c["shape"][0], c["shape"][1]
+            p_pos = []
+            for tid in top_token_ids:
+                if tid < vocab_size:
+                    start = tid * hidden_dim
+                    p_pos.extend(range(start, start + hidden_dim))
+
+            if p_pos:
+                if _is_torch_tensor(c["vectors"]):
+                    import torch
+                    import numpy as np
+                    flat = c["vectors"].reshape(-1)
+                    pillar_positions = np.array(p_pos, dtype=np.int64)
+                    pillar_values = flat[pillar_positions].detach().cpu().numpy().astype(np.float32)
+                    mask = torch.ones_like(flat)
+                    mask[pillar_positions] = 0
+                    c["vectors"] = (flat * mask).reshape(c["vectors"].shape)
+                else:
+                    import numpy as np
+                    flat = c["vectors"].reshape(-1)
+                    pillar_positions = np.array(p_pos, dtype=np.int64)
+                    pillar_values = flat[pillar_positions].astype(np.float32)
+                    flat[pillar_positions] = 0
+                    c["vectors"] = flat.reshape(c["vectors"].shape)
+
+        # --- Standard Outlier Extraction ---
+        # If freq-aware didn't run, or if we want to extract additional magnitude outliers
         positions, values, new_vectors = _extract_outliers(c["vectors"], outlier_frac, c["packed_values"])
-        c["outlier_positions"] = positions
-        c["outlier_values"] = values
+
+        if pillar_positions is not None:
+            # Combine freq-aware pillars with magnitude outliers
+            import numpy as np
+            if positions is not None:
+                c["outlier_positions"] = np.concatenate([pillar_positions, positions])
+                c["outlier_values"] = np.concatenate([pillar_values, values])
+            else:
+                c["outlier_positions"] = pillar_positions
+                c["outlier_values"] = pillar_values
+        else:
+            c["outlier_positions"] = positions
+            c["outlier_values"] = values
+
         c["vectors"] = _offload(new_vectors)
         c["vectors_orig"] = c["vectors"]
         c["vectors_residual"] = c["vectors"]
@@ -895,7 +986,7 @@ def pack_checkpoint(
                 }
             )
 
-    if n_stages > 1 and codebook_mode == "per-tensor":
+    if n_stages > 1 and codebook_mode == "per-tensor" and em_aq_passes > 0:
         _run_em_aq_refinement(
             candidates=candidates,
             n_stages=n_stages,
@@ -905,6 +996,7 @@ def pack_checkpoint(
             resolved_device=resolved_device,
             tensor_dir=tensor_dir,
             progress_file=progress_file,
+            em_aq_passes=em_aq_passes,
         )
 
     _BG_WRITER.wait()

@@ -89,7 +89,7 @@ def _normalize_tensor_block_max_numpy(tensor, block_size: int):
     return normalized.reshape(arr.shape), scales, arr.reshape(-1)
 
 
-def _normalize_tensor_slrq_block_torch(tensor, block_size: int, device):
+def _normalize_tensor_slrq_block_torch(tensor, block_size: int, device, salient_enabled: bool = True):
     import torch
 
     _, arr = _torch_f32(tensor, device)
@@ -100,32 +100,36 @@ def _normalize_tensor_slrq_block_torch(tensor, block_size: int, device):
     if pad:
         flat = torch.nn.functional.pad(flat, (0, pad))
     blocks = flat.reshape(-1, block_size)
-    
-    # Salient protection
-    abs_blocks = blocks.abs()
-    salient_indices = abs_blocks.argmax(dim=1)
-    row_indices = torch.arange(blocks.shape[0], device=device)
-    salient_weights = blocks[row_indices, salient_indices].clone()
-    
-    blocks[row_indices, salient_indices] = 0.0
-    max_rem = blocks.abs().amax(dim=1)
-    safe = torch.where(max_rem == 0, torch.ones_like(max_rem), max_rem)
+
+    salient_weights = None
+    salient_indices = None
+    if salient_enabled:
+        abs_blocks = blocks.abs()
+        salient_indices = abs_blocks.argmax(dim=1)
+        row_indices = torch.arange(blocks.shape[0], device=device)
+        salient_weights = blocks[row_indices, salient_indices].clone()
+        blocks[row_indices, salient_indices] = 0.0
+        max_for_anchor = blocks.abs().amax(dim=1)
+    else:
+        max_for_anchor = blocks.abs().amax(dim=1)
+
+    safe = torch.where(max_for_anchor == 0, torch.ones_like(max_for_anchor), max_for_anchor)
     safe = torch.exp2(torch.ceil(torch.log2(safe)))
-    
+
     normalized = (blocks / safe[:, None]).reshape(-1)
     if pad:
         normalized = normalized[:n]
-        
+
     return (
         normalized.reshape(arr.shape),
         safe.detach().cpu(),
-        salient_weights.detach().cpu(),
-        salient_indices.detach().cpu(),
+        salient_weights.detach().cpu() if salient_weights is not None else None,
+        salient_indices.detach().cpu() if salient_indices is not None else None,
         source_flat,
     )
 
 
-def _normalize_tensor_slrq_block_numpy(tensor, block_size: int):
+def _normalize_tensor_slrq_block_numpy(tensor, block_size: int, salient_enabled: bool = True):
     import numpy as np
 
     arr = _numpy_float32_array(tensor)
@@ -136,22 +140,26 @@ def _normalize_tensor_slrq_block_numpy(tensor, block_size: int):
     if pad:
         flat = np.pad(flat, (0, pad), mode="constant")
     blocks = flat.reshape(-1, block_size)
-    
-    # Salient protection
-    abs_blocks = np.abs(blocks)
-    salient_indices = np.argmax(abs_blocks, axis=1)
-    row_indices = np.arange(blocks.shape[0])
-    salient_weights = blocks[row_indices, salient_indices].copy()
-    
-    blocks[row_indices, salient_indices] = 0.0
-    max_rem = np.abs(blocks).max(axis=1)
-    safe = np.where(max_rem == 0, 1.0, max_rem).astype(np.float32)
+
+    salient_weights = None
+    salient_indices = None
+    if salient_enabled:
+        abs_blocks = np.abs(blocks)
+        salient_indices = np.argmax(abs_blocks, axis=1)
+        row_indices = np.arange(blocks.shape[0])
+        salient_weights = blocks[row_indices, salient_indices].copy()
+        blocks[row_indices, salient_indices] = 0.0
+        max_for_anchor = np.abs(blocks).max(axis=1)
+    else:
+        max_for_anchor = np.abs(blocks).max(axis=1)
+
+    safe = np.where(max_for_anchor == 0, 1.0, max_for_anchor).astype(np.float32)
     safe = np.exp2(np.ceil(np.log2(safe))).astype(np.float32)
-    
+
     normalized = (blocks / safe[:, np.newaxis]).reshape(-1)
     if pad:
         normalized = normalized[:n]
-        
+
     return (
         normalized.reshape(arr.shape),
         safe,
@@ -220,6 +228,7 @@ def _normalize_tensor_awq_numpy(tensor, X, alpha):
 def _apply_normalization(
     tensor, name, normalization, awq_activations, awq_alpha,
     block_scale_size, backend, device, awq_fallbacks,
+    slrq_salient: bool = True,
 ):
     is_torch = backend == "torch"
     has_awq = awq_activations is not None and name in awq_activations
@@ -231,8 +240,8 @@ def _apply_normalization(
 
     def _slrq_block():
         # returns tensor, scales, salient_weights, salient_indices, source_flat
-        return (_normalize_tensor_slrq_block_torch(tensor, block_scale_size, device) if is_torch
-                else _normalize_tensor_slrq_block_numpy(tensor, block_scale_size))
+        return (_normalize_tensor_slrq_block_torch(tensor, block_scale_size, device, salient_enabled=slrq_salient) if is_torch
+                else _normalize_tensor_slrq_block_numpy(tensor, block_scale_size, salient_enabled=slrq_salient))
 
     salient_weights = None
     salient_indices = None
@@ -241,7 +250,7 @@ def _apply_normalization(
         tensor, row_scales, salient_weights, salient_indices, source_flat = _slrq_block()
     elif normalization == "awq":
         if not has_awq:
-            raise RuntimeError(f"awq normalization requires --awq-calibration activations for tensor {name}")
+            tensor, row_scales, source_flat = _none()
         elif is_torch:
             tensor, row_scales, source_flat = _normalize_tensor_awq_torch(
                 tensor, awq_activations[name], awq_alpha, device)
@@ -252,7 +261,7 @@ def _apply_normalization(
         if not is_torch:
             raise RuntimeError("awq-block-max requires --backend torch")
         if not has_awq:
-            raise RuntimeError(f"awq-block-max requires --awq-calibration activations for tensor {name}")
+            tensor, row_scales, source_flat = _block_max()
         else:
             tensor, row_scales, source_flat, awq_col_scales = (
                 _normalize_tensor_awq_block_max_torch(

@@ -175,7 +175,10 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
                 _kp_smap = json.load(f)
 
         _apply_gpu_memory_cap(args.backend, args.device, args.max_gpu_mem_gb)
-        _apply_system_ram_cap(getattr(args, "max_system_ram_gb", None))
+        _apply_system_ram_cap(
+            getattr(args, "max_system_ram_gb", None),
+            getattr(args, "workload_budget_gb", None),
+        )
 
         manifest = pack_checkpoint(
             source=source_file,

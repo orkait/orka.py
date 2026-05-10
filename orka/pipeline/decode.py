@@ -11,6 +11,7 @@ from orka._format import (
     _read_f32_vector,
     _read_indices,
     _read_outliers,
+    _read_pillars,
     _read_salient,
 )
 from orka.transforms.normalize import (
@@ -50,6 +51,15 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict) -> list[float]:
     if outl:
         positions, values = _read_outliers(
             out_dir / outl["positions"], out_dir / outl["values"]
+        )
+        for pos, val in zip(positions, values):
+            decoded[int(pos)] = float(val)
+
+    # Re-inject Concept Pillars (FP16)
+    pillars = tensor_meta.get("pillars")
+    if pillars:
+        positions, values = _read_pillars(
+            out_dir / pillars["positions"], out_dir / pillars["values"]
         )
         for pos, val in zip(positions, values):
             decoded[int(pos)] = float(val)
@@ -130,6 +140,15 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
     outl = tm.get("outliers")
     if outl:
         positions, values = _read_outliers(out_dir / outl["positions"], out_dir / outl["values"])
+        if positions:
+            pos_t = torch.tensor(list(positions), dtype=torch.long, device=device)
+            val_t = torch.tensor(list(values), dtype=torch.float32, device=device)
+            decoded[pos_t] = val_t
+
+    # Re-inject Concept Pillars (FP16)
+    pillars = tm.get("pillars")
+    if pillars:
+        positions, values = _read_pillars(out_dir / pillars["positions"], out_dir / pillars["values"])
         if positions:
             pos_t = torch.tensor(list(positions), dtype=torch.long, device=device)
             val_t = torch.tensor(list(values), dtype=torch.float32, device=device)

@@ -70,69 +70,122 @@ def _write_json_reconstruction(
     output_path.write_text(json.dumps(output, indent=2) + "\n")
 
 
-def _write_safetensors_reconstruction(output_path: Path, tensors: dict) -> None:
-    try:
-        import numpy as np
-        from safetensors.numpy import save_file
-    except Exception as exc:
-        raise RuntimeError(
-            "safetensors reconstruction requires numpy and safetensors"
-        ) from exc
-
-    arrays = {}
-    for name, tensor in tensors.items():
-        arrays[name] = np.asarray(tensor["flat"], dtype=np.float32).reshape(
-            tensor["shape"]
-        )
-    save_file(arrays, str(output_path))
-
-def _write_complete_safetensors_reconstruction(
+def _write_complete_safetensors_reconstruction_binary(
     out_dir: Path, output_path: Path, manifest: dict, device: str | None = None
 ) -> dict:
-    """Reconstruct full model. Uses GPU streaming path when device='cuda' to avoid Python list bloat."""
-    if device is not None and "cuda" in str(device).lower():
-        try:
-            import torch
-            if torch.cuda.is_available():
-                from safetensors.torch import save_file as save_torch
-                from safetensors import safe_open
-                arrays: dict = {}
-                packed_names = {t["name"] for t in manifest.get("tensors", [])}
-                # Passthrough first
-                pp = out_dir / "passthrough.safetensors"
-                if pp.exists():
-                    with safe_open(str(pp), framework="pt") as f:
-                        for name in f.keys():
-                            arrays[name] = f.get_tensor(name).contiguous()
-                # Source fallback for anything missing
-                source = Path(manifest["source"])
-                if source.exists():
-                    with safe_open(str(source), framework="pt") as f:
-                        for name in f.keys():
-                            if name in packed_names or name in arrays:
-                                continue
-                            arrays[name] = f.get_tensor(name).contiguous()
-                # GPU decode quantized tensors, move to CPU immediately to free GPU memory
-                for tm in manifest.get("tensors", []):
-                    dec_gpu = _decode_tensor_torch(out_dir, tm, device)
-                    arrays[tm["name"]] = dec_gpu.cpu().contiguous()
-                    del dec_gpu
+    """Reconstruct full model using a custom binary writer to avoid RAM OOMs."""
+    import struct
+    import numpy as np
+    from safetensors import safe_open
+
+    # 1. IDENTIFY ALL TENSORS AND THEIR SHAPES (WITHOUT LOADING DATA)
+    # We need name -> {shape, source_type, meta_ptr}
+    registry = {}
+    packed_names = {t["name"] for t in manifest.get("tensors", [])}
+
+    # A. Passthrough tensors (from Orka artifact)
+    pp = out_dir / "passthrough.safetensors"
+    if pp.exists():
+        with safe_open(str(pp), framework="np") as f:
+            for name in f.keys():
+                registry[name] = {"shape": f.get_slice(name).get_shape(), "source": "passthrough"}
+
+    # B. Source fallback (anything missing from packed/passthrough)
+    source = Path(manifest["source"])
+    if source.exists():
+        with safe_open(str(source), framework="np") as f:
+            for name in f.keys():
+                if name not in packed_names and name not in registry:
+                    registry[name] = {"shape": f.get_slice(name).get_shape(), "source": "source_fallback"}
+
+    # C. Packed tensors
+    for tm in manifest.get("tensors", []):
+        registry[tm["name"]] = {"shape": tm["shape"], "source": "quantized", "meta": tm}
+
+    # 2. CALCULATE OFFSETS AND BUILD HEADER
+    header = {"__metadata__": {"format": "pt" if device and "cuda" in str(device) else "np"}}
+    current_offset = 0
+    
+    # Sort names for deterministic layout
+    sorted_names = sorted(registry.keys())
+    
+    for name in sorted_names:
+        reg = registry[name]
+        shape = [int(x) for x in reg["shape"]]
+        numel = 1
+        for dim in shape:
+            numel *= dim
+        
+        # All Orka reconstructions are float32 (4 bytes)
+        byte_size = numel * 4
+        
+        header[name] = {
+            "dtype": "F32",
+            "shape": shape,
+            "data_offsets": [current_offset, current_offset + byte_size]
+        }
+        current_offset += byte_size
+
+    # 3. SERIALIZE HEADER
+    header_json = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    header_len = len(header_json)
+    
+    # Safetensors requires the data block to start at an 8-byte aligned offset.
+    # Data start = 8 (prefix) + N (header_len). 
+    # To make (8 + N) % 8 == 0, N must be a multiple of 8.
+    padding = (8 - (header_len % 8)) % 8
+    header_json_padded = header_json + (b" " * padding)
+    header_full_len = len(header_json_padded)
+    
+    # 4. STREAM TO DISK
+    print(f"Streaming reconstruction to {output_path.name} ({len(sorted_names)} tensors)...", flush=True)
+    with open(output_path, "wb") as f:
+        # 8-byte little-endian header size (N)
+        f.write(struct.pack("<Q", header_full_len))
+        # JSON Header + Space Padding
+        f.write(header_json_padded)
+        
+        # Data block: decode and write ONE-BY-ONE
+        for i, name in enumerate(sorted_names):
+            reg = registry[name]
+            
+            arr = None
+            if reg["source"] == "quantized":
+                if device and "cuda" in str(device).lower():
+                    # GPU decode
+                    import torch
+                    dec = _decode_tensor_torch(out_dir, reg["meta"], device)
+                    arr = dec.detach().cpu().numpy().astype(np.float32)
+                    del dec
                     torch.cuda.empty_cache()
-                save_torch(arrays, str(output_path))
-                return {"out": str(output_path), "tensor_count": len(arrays), "format": "safetensors"}
-        except Exception as exc:
-            print(f"GPU reconstruction failed ({exc}); falling back to numpy path", flush=True)
-    # CPU/numpy fallback (the slow path)
-    tensors = _complete_decoded_tensor_map(out_dir, manifest)
-    _write_safetensors_reconstruction(output_path, tensors)
+                else:
+                    # CPU decode
+                    dec = _decode_tensor(out_dir, reg["meta"])
+                    arr = np.asarray(dec, dtype=np.float32)
+            else:
+                # Passthrough or source fallback: handle BF16 via torch if possible
+                loader_path = pp if reg["source"] == "passthrough" else source
+                try:
+                    import torch
+                    with safe_open(str(loader_path), framework="pt") as s:
+                        arr = s.get_tensor(name).to(torch.float32).cpu().numpy()
+                except (ImportError, RuntimeError):
+                    # Fallback to numpy (will fail if tensor is BF16)
+                    with safe_open(str(loader_path), framework="np") as s:
+                        arr = s.get_tensor(name).astype(np.float32)
+            
+            f.write(arr.tobytes())
+            del arr # Mandatory cleanup
+
     return {
         "out": str(output_path),
-        "tensor_count": len(tensors),
+        "tensor_count": len(sorted_names),
         "format": "safetensors",
     }
 
+
 def reconstruct_artifact(
-    out_dir: Path, output_path: Path, output_format: str = "json"
+    out_dir: Path, output_path: Path, output_format: str = "json", device: str | None = None
 ) -> dict:
     manifest_path = out_dir / "manifest.json"
     if not manifest_path.exists():
@@ -141,17 +194,15 @@ def reconstruct_artifact(
         raise ValueError("output_format must be 'json' or 'safetensors'")
 
     manifest = json.loads(manifest_path.read_text())
-    tensors = _decoded_tensor_map(out_dir, manifest)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if output_format == "json":
+        tensors = _decoded_tensor_map(out_dir, manifest)
         _write_json_reconstruction(out_dir, output_path, manifest, tensors)
+        return {
+            "out": str(output_path),
+            "tensor_count": len(tensors),
+            "format": output_format,
+        }
     else:
-        tensors = _complete_decoded_tensor_map(out_dir, manifest)
-        _write_safetensors_reconstruction(output_path, tensors)
-
-    return {
-        "out": str(output_path),
-        "tensor_count": len(tensors),
-        "format": output_format,
-    }
+        return _write_complete_safetensors_reconstruction_binary(out_dir, output_path, manifest, device)

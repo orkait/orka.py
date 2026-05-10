@@ -72,12 +72,23 @@ def inspect_checkpoint(path: Path) -> dict:
         if numel <= 0:
             continue
         total_params += numel
+
+        # Candidate logic: Dense weights only.
+        # Exclude biases, norms, and architectural sidecars.
+        is_candidate = len(shape) >= 2
+        name_lower = name.lower()
+        if any(
+            x in name_lower
+            for x in (".bias", ".norm", ".layernorm", "rotary_emb", "attention.bias")
+        ):
+            is_candidate = False
+
         tensors.append(
             {
                 "name": name,
                 "shape": shape,
                 "numel": numel,
-                "candidate": len(shape) >= 2,
+                "candidate": is_candidate,
             }
         )
     return {
