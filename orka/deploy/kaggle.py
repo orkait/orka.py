@@ -121,10 +121,6 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
         return 1
 
     on_kaggle = Path("/kaggle/working").exists()
-    if on_kaggle:
-        print("Kaggle: upgrading transformers and accelerate ...", flush=True)
-        import subprocess
-        subprocess.run([os.sys.executable, "-m", "pip", "install", "--upgrade", "transformers", "accelerate", "huggingface_hub"], check=True)
 
     if args.out:
         out_dir = Path(args.out)
