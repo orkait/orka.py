@@ -9,20 +9,23 @@ TMP_DS="/tmp/orka_dataset_bundle"
 
 echo "--- Step 1: Versioning Code in Kaggle Dataset ---"
 rm -rf "$TMP_DS"
-mkdir -p "$TMP_DS/orka"
-cp -r "$ROOT_DIR/orka"/* "$TMP_DS/orka/"
+mkdir -p "$TMP_DS"
+
+# Create a zip of the package
+(cd "$ROOT_DIR" && zip -r "$TMP_DS/orka_core.zip" orka -x "*.pyc" "__pycache__/*")
 
 # Always init metadata to ensure it exists
+cd "$TMP_DS"
 kaggle datasets init -p .
 sed -i "s/INSERT_TITLE_HERE/$DATASET_SLUG/g" dataset-metadata.json
 sed -i "s/INSERT_SLUG_HERE/$DATASET_SLUG/g" dataset-metadata.json
 
 if ! kaggle datasets status "superkaiii/$DATASET_SLUG" > /dev/null 2>&1; then
     echo "Creating new private dataset..."
-    kaggle datasets create -p . --dir-mode zip
+    kaggle datasets create -p .
 else
     echo "Updating existing dataset version..."
-    kaggle datasets version -p . -m "Update Orka Core" --dir-mode zip
+    kaggle datasets version -p . -m "Update Orka Core"
 fi
 
 echo "--- Step 2: Pushing Kernel ---"
@@ -33,8 +36,7 @@ mkdir -p "$TMP_DEPLOY"
 cp "$ROOT_DIR/orka_entry_kaggle.py" "$TMP_DEPLOY/orka.py"
 cp "$SCRIPT_DIR/kernel-metadata.json" "$TMP_DEPLOY/"
 
-# Ensure correct data source name in metadata
-sed -i "s|orka-compiler-core|${DATASET_SLUG}|g" "$TMP_DEPLOY/orka.py"
+# Fix metadata to point to local orka.py
 sed -i 's|../../orka.py|orka.py|g' "$TMP_DEPLOY/kernel-metadata.json"
 
 cd "$TMP_DEPLOY"
