@@ -177,7 +177,8 @@ def _write_complete_safetensors_reconstruction_binary(
                         if n == name:
                             # Convert to numpy float32
                             if hasattr(t, "detach"): # Torch
-                                arr = t.detach().cpu().numpy().astype(np.float32)
+                                import torch
+                                arr = t.detach().cpu().to(torch.float32).numpy()
                             else: # Numpy
                                 arr = np.asarray(t, dtype=np.float32)
                             break
