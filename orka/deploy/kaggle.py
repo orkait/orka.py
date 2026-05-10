@@ -440,6 +440,7 @@ def bootstrap_argv(argv: list) -> None:
         "--outlier-frac",   str(cfg["outlier_frac"]),
         "--group-size",     str(cfg["group_size"]),
         "--codebook-size",  str(cfg["codebook_size"]),
+        "--em-aq-passes",   str(cfg.get("em_aq_passes", 3)),
     ]
     if cfg.get("awq_calibration"):
         argv += [
