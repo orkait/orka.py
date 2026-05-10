@@ -93,12 +93,11 @@ def _write_complete_safetensors_reconstruction_binary(
     # B. Source fallback (anything missing from packed/passthrough)
     source = Path(manifest["source"])
     if source.exists():
-        with safe_open(str(source), framework="np") as f:
-            for name in f.keys():
-                if name not in packed_names and name not in registry:
-                    registry[name] = {"shape": f.get_slice(name).get_shape(), "source": "source_fallback"}
+        for name, tensor in _load_tensors(source):
+            if name not in packed_names and name not in registry:
+                registry[name] = {"shape": _tensor_shape(tensor), "source": "source_fallback"}
 
-    # C. Packed tensors
+    # 2. CALCULATE OFFSETS AND BUILD HEADER
     for tm in manifest.get("tensors", []):
         registry[tm["name"]] = {"shape": tm["shape"], "source": "quantized", "meta": tm}
 
@@ -164,15 +163,24 @@ def _write_complete_safetensors_reconstruction_binary(
                     arr = np.asarray(dec, dtype=np.float32)
             else:
                 # Passthrough or source fallback: handle BF16 via torch if possible
-                loader_path = pp if reg["source"] == "passthrough" else source
-                try:
-                    import torch
-                    with safe_open(str(loader_path), framework="pt") as s:
-                        arr = s.get_tensor(name).to(torch.float32).cpu().numpy()
-                except (ImportError, RuntimeError):
-                    # Fallback to numpy (will fail if tensor is BF16)
-                    with safe_open(str(loader_path), framework="np") as s:
-                        arr = s.get_tensor(name).astype(np.float32)
+                if reg["source"] == "passthrough":
+                    try:
+                        import torch
+                        with safe_open(str(pp), framework="pt") as s:
+                            arr = s.get_tensor(name).to(torch.float32).cpu().numpy()
+                    except (ImportError, RuntimeError):
+                        with safe_open(str(pp), framework="np") as s:
+                            arr = s.get_tensor(name).astype(np.float32)
+                else: # source_fallback
+                    # Generic load (handles JSON/PT/Safetensors)
+                    for n, t in _load_tensors(source):
+                        if n == name:
+                            # Convert to numpy float32
+                            if hasattr(t, "detach"): # Torch
+                                arr = t.detach().cpu().numpy().astype(np.float32)
+                            else: # Numpy
+                                arr = np.asarray(t, dtype=np.float32)
+                            break
             
             f.write(arr.tobytes())
             del arr # Mandatory cleanup
