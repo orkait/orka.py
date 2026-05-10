@@ -17,6 +17,7 @@ from orka.cli.commands import (
     cmd_pulse_check,
     cmd_reconstruct,
     cmd_report,
+    cmd_sem_analyze,
     cmd_sweep,
     cmd_verify,
 )
@@ -461,6 +462,18 @@ def build_parser() -> argparse.ArgumentParser:
     eval_sweep_cmd.add_argument("--max-gpu-mem-gb", type=float, default=None,
                                 help="strict cap on per-process GPU memory (GB).")
     eval_sweep_cmd.set_defaults(func=cmd_eval_sweep)
+
+    sem_analyze = sub.add_parser(
+        "sem-analyze", help="Phase 1-3: Ingest vocabulary and discover linguistic roots/clusters"
+    )
+    sem_analyze.add_argument("model_dir", help="Hugging Face model directory")
+    sem_analyze.add_argument(
+        "--out", required=True, help="output JSON for the semantic analysis"
+    )
+    sem_analyze.add_argument(
+        "--device", default="cpu", help="device for embedding analysis (cpu/cuda)"
+    )
+    sem_analyze.set_defaults(func=cmd_sem_analyze)
 
     def _run_tests(_args):
         import unittest

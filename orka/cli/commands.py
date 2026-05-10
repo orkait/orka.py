@@ -20,12 +20,13 @@ from orka.activations import _load_awq_activations
 from orka.deploy.kaggle import cmd_kaggle_pack
 from orka.eval import eval_artifact, eval_sweep, pulse_check_artifact
 from orka.pipeline.pack import pack_checkpoint
-from orka.quant import (
+from orka.quant.spec import (
     _resolve_quant_stages,
     estimate_payload,
     is_rvq_mixed_spec,
     rvq_mixed_family_stages,
 )
+from orka.quant.semantic import cmd_sem_analyze
 from orka.reconstruct import reconstruct_artifact
 from orka.report import report_artifact
 from orka.sweep import sweep_checkpoint
