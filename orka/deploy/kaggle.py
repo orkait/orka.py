@@ -173,6 +173,44 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
         if getattr(args, "sensitivity_map", None):
             with open(args.sensitivity_map) as f:
                 _kp_smap = json.load(f)
+        elif not getattr(args, "skip_sensitive", False) and on_kaggle:
+            # AUTO-GENERATE PILLARS ON KAGGLE
+            try:
+                print("--- Auto-generating Pillar Map (Frequency + Magnitude) ---", flush=True)
+                from transformers import AutoTokenizer, AutoModelForCausalLM
+                import numpy as np
+                from scipy.stats import rankdata
+                from collections import Counter
+                
+                tok = AutoTokenizer.from_pretrained(src_dir)
+                with open(calib_path) as f:
+                    text = f.read()
+                counts = Counter(tok.encode(text))
+                
+                mod = AutoModelForCausalLM.from_pretrained(src_dir, torch_dtype="auto", device_map="cpu")
+                emb = mod.get_input_embeddings().weight.detach().numpy()
+                actual_vocab = emb.shape[0]
+                norms = np.linalg.norm(emb, axis=1)
+                
+                f_arr = np.zeros(actual_vocab)
+                for tid, c in counts.items():
+                    if tid < actual_vocab: f_arr[tid] = c
+                
+                f_rank = rankdata(f_arr) / actual_vocab
+                n_rank = rankdata(norms) / actual_vocab
+                score = (f_rank * 0.5) + (n_rank * 0.5)
+                
+                # Protect top 10%
+                top_count = int(actual_vocab * 0.10)
+                top_ids = np.argsort(score)[::-1][:top_count].tolist()
+                _kp_smap = {"top_tokens": top_ids, "layers": []}
+                print(f"Kaggle: protected {len(top_ids)} pillars", flush=True)
+                # Cleanup to free RAM for packing
+                del mod
+                import gc
+                gc.collect()
+            except Exception as exc:
+                print(f"WARNING: Auto-pillar failed ({exc}); proceeding without pillars", flush=True)
 
         _apply_gpu_memory_cap(args.backend, args.device, args.max_gpu_mem_gb)
         _apply_system_ram_cap(
@@ -203,6 +241,9 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
             progress_file=Path(args.progress_file) if args.progress_file else None,
             sensitivity_map=_kp_smap,
             max_tensors=args.max_tensors,
+            em_aq_passes=getattr(args, "em_aq_passes", 3),
+            slrq_salient=getattr(args, "slrq_salient", True),
+            codebook_cache_dir=Path(args.codebook_cache) if getattr(args, "codebook_cache", None) else None,
         )
 
         artifact_report = report_artifact(out_dir)
@@ -292,9 +333,9 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
 
 
 _KAGGLE_CONFIG = {
-    "repo_id":         "Qwen/Qwen3-0.6B",
+    "repo_id":         "Qwen/Qwen3.5-0.8B",
     "upload_repo":     None,
-    "quant_mode":      "rvq-16-8-8",
+    "quant_mode":      "rvq-mixed",
     "codebook_mode":   "per-tensor",
     "normalization":   "awq-block-max",
     "rotation":        "orthogonal",
@@ -304,17 +345,18 @@ _KAGGLE_CONFIG = {
     "max_gpu_mem_gb":  14.0,
     "sample_vectors":  1000000,
     "iterations":      12,
-    "outlier_frac":    0.001,
+    "outlier_frac":    0.01,
     "group_size":      8,
     "codebook_size":   256,
     "awq_calibration": True,
     "awq_alpha":       0.5,
     "calibration_max_prompts": 128,
     "calibration_max_length":  512,
-    "skip_sensitive":  True,
+    "skip_sensitive":  False,
     "run_eval":        True,
     "eval_max_prompts": 64,
     "eval_max_length":  256,
+    "em_aq_passes":    3,
 }
 
 
