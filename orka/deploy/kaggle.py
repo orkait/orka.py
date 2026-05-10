@@ -333,7 +333,7 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
 
 
 _KAGGLE_CONFIG = {
-    "repo_id":         "Qwen/Qwen3.5-0.8B",
+    "repo_id":         "Qwen/Qwen3-MoE-1.5B-A0.3B",
     "upload_repo":     None,
     "quant_mode":      "rvq-mixed",
     "codebook_mode":   "per-tensor",
