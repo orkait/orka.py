@@ -68,11 +68,14 @@ from typing import Sequence, Union
 QUANT_SPEC_MAX_PER_STAGE_BITS = 64
 QUANT_SPEC_MAX_TOTAL_BITS = 64
 
-# Updated mixed precision: Use Vector (12-bit) then Scalar (4-bit + 4-bit) for embeddings
+# Default mixed precision for MoE and Dense architectures
 RVQ_MIXED_FAMILY_BITS = {
-    "embedding": [16, 8], 
-    "attention": [16, 8],
-    "mlp": [16, 8],
+    "embedding": [12, "s4", "s4"],  # High fidelity linguistic brain
+    "shared_expert": [16, 8],       # The MoE 'Teacher' (Always active)
+    "expert": [12, "s4"],           # Routed experts (Sparse logic)
+    "router": [16, 16],             # Sensitive gating layers
+    "attention": [16, 8],           # Logic layers
+    "mlp": [16, 8],                 # Logic layers
     "other": [16],
 }
 
