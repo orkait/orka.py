@@ -4,10 +4,17 @@ import sys
 import zipfile
 import io
 import shutil
+import subprocess
+
+# --- PRE-FLIGHT: UPGRADE ENVIRONMENT ON KAGGLE ---
+if os.path.exists("/kaggle/working"):
+    print("Kaggle: Upgrading transformers/accelerate before first import...", flush=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "transformers", "accelerate"], check=True)
+    print("Kaggle: Upgrade complete.", flush=True)
 
 # This blob will be filled by the push.sh script
 ORKA_SOURCE_B64 = """{{ORKA_SOURCE_B64}}"""
-
+...
 def extract_orka():
     if ORKA_SOURCE_B64.startswith("{{"):
         print("Error: ORKA_SOURCE_B64 not populated. Run via push.sh")
