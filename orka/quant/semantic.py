@@ -88,12 +88,46 @@ def find_semantic_hubs(embeddings: np.ndarray, threshold: float = 0.999):
     return sorted(hubs, key=lambda x: x["member_count"], reverse=True)
 
 
+def profile_architecture(model_dir: Path) -> dict:
+    """Phase 0: Generic architectural profiling."""
+    config_path = model_dir / "config.json"
+    if not config_path.exists():
+        return {"type": "unknown"}
+    
+    with open(config_path) as f:
+        cfg = json.load(f)
+    
+    m_type = cfg.get("model_type", "unknown")
+    num_layers = cfg.get("num_hidden_layers", 0)
+    hidden_size = cfg.get("hidden_size", 0)
+    
+    # Detect MoE
+    num_experts = cfg.get("num_experts", cfg.get("n_routed_experts", 0))
+    is_moe = num_experts > 0
+    
+    return {
+        "architecture": m_type,
+        "is_moe": is_moe,
+        "experts": num_experts,
+        "layers": num_layers,
+        "hidden_dim": hidden_size,
+        "params_estimate_millions": (cfg.get("num_parameters", 0)) // 1_000_000
+    }
+
+
 def cmd_sem_analyze(args: argparse.Namespace) -> int:
-    """Entry point for orka sem-analyze (Phases 1-3)."""
+    """Entry point for orka sem-analyze (Phases 0-3)."""
     from transformers import AutoTokenizer, AutoModelForCausalLM
     import torch
     
     model_dir = Path(args.model_dir)
+    
+    print(f"--- Phase 0: Architectural Profiling ---", flush=True)
+    profile = profile_architecture(model_dir)
+    print(f"  Type: {profile['architecture'].upper()} ({'MoE' if profile['is_moe'] else 'Dense'})", flush=True)
+    if profile["is_moe"]:
+        print(f"  Experts: {profile['experts']}", flush=True)
+    
     print(f"--- Phase 1: Ingesting {model_dir.name} ---", flush=True)
     
     try:
