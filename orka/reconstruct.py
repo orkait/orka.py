@@ -92,10 +92,13 @@ def _write_complete_safetensors_reconstruction_binary(
 
     # B. Source fallback (anything missing from packed/passthrough)
     source = Path(manifest["source"])
+    source_map = {}
     if source.exists():
+        print(f"INFO: Indexing source checkpoint for reconstruction fallback...", flush=True)
         for name, tensor in _load_tensors(source):
             if name not in packed_names and name not in registry:
                 registry[name] = {"shape": _tensor_shape(tensor), "source": "source_fallback"}
+                source_map[name] = tensor
 
     # 2. CALCULATE OFFSETS AND BUILD HEADER
     for tm in manifest.get("tensors", []):
@@ -172,19 +175,20 @@ def _write_complete_safetensors_reconstruction_binary(
                         with safe_open(str(pp), framework="np") as s:
                             arr = s.get_tensor(name).astype(np.float32)
                 else: # source_fallback
-                    # Generic load (handles JSON/PT/Safetensors)
-                    for n, t in _load_tensors(source):
-                        if n == name:
-                            # Convert to numpy float32
-                            if hasattr(t, "detach"): # Torch
-                                import torch
-                                arr = t.detach().cpu().to(torch.float32).numpy()
-                            else: # Numpy
-                                arr = np.asarray(t, dtype=np.float32)
-                            break
+                    t = source_map.get(name)
+                    if t is not None:
+                        # Convert to numpy float32
+                        if hasattr(t, "detach"): # Torch
+                            import torch
+                            arr = t.detach().cpu().to(torch.float32).numpy()
+                        else: # Numpy
+                            arr = np.asarray(t, dtype=np.float32)
+                    else:
+                        raise ValueError(f"CRITICAL: Tensor {name} missing from both artifact and source.")
             
             f.write(arr.tobytes())
             del arr # Mandatory cleanup
+
 
     return {
         "out": str(output_path),

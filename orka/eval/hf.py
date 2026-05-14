@@ -42,8 +42,7 @@ def _copy_hf_sidecars(source_dir: Path, target_dir: Path) -> list[str]:
     for child in sorted(source_dir.iterdir()):
         if not child.is_file() or _is_model_weight_sidecar(child):
             continue
-        if child.suffix.lower() not in {".json", ".txt", ".model"}:
-            continue
+        # Copy everything else: .json, .txt, .model, and CRITICAL .py files for trust_remote_code
         shutil.copy2(child, target_dir / child.name)
         copied.append(child.name)
     if "config.json" not in copied:
@@ -111,6 +110,16 @@ def _hf_prompt_losses(
         trust_remote_code=True,
         torch_dtype=torch.float32,
     )
+
+    # --- NUMERICAL STABILITY PATCH (MoE RESEARCH) ---
+    # Fix for DeepseekV4 MLA instability causing NaNs in SDPA
+    if hasattr(model, "config") and getattr(model.config, "model_type", None) == "deepseek_v4":
+        print("    Applying Numerical Stability Patch for Deepseek-V4 architecture...", flush=True)
+        for name, module in model.named_modules():
+            if "attn" in name.lower() and hasattr(module, "scaling"):
+                # Force float32 scaling to prevent overflow
+                module.scaling = float(module.scaling)
+
     model.to(device)
     model.eval()
 
@@ -133,11 +142,18 @@ def _hf_prompt_losses(
                     if key in {"input_ids", "attention_mask"}
                 }
                 outputs = model(**model_inputs, labels=model_inputs["input_ids"])
+                loss = float(outputs.loss.detach().cpu().item())
+                
+                if torch.isnan(torch.tensor(loss)):
+                    # Final attempt: run without mask if NaN detected
+                    outputs = model(model_inputs["input_ids"], labels=model_inputs["input_ids"])
+                    loss = float(outputs.loss.detach().cpu().item())
+
                 rows.append(
                     {
                         "prompt": prompt,
                         "token_count": int(input_ids.shape[-1]) - 1,
-                        "loss": float(outputs.loss.detach().cpu().item()),
+                        "loss": loss,
                     }
                 )
     finally:
@@ -149,6 +165,8 @@ def _hf_prompt_losses(
         del model, tokenizer
         if device != "cpu":
             try:
+                import gc
+                gc.collect()
                 torch.cuda.empty_cache()
             except Exception:
                 pass

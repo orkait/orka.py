@@ -63,13 +63,17 @@ def _monitor_ram_task(cap_gb: float, stop_event: threading.Event, interval: floa
     if not _HAS_PSUTIL:
         return
     cap_bytes = cap_gb * 1024 ** 3
+    process = psutil.Process(os.getpid())
     while not stop_event.is_set():
-        used = psutil.virtual_memory().used
-        if used > cap_bytes:
-            _set_ram_exceeded(
-                f"System RAM usage ({used / (1024 ** 3):.2f} GB) exceeded cap ({cap_gb:.2f} GB)"
-            )
-            break
+        try:
+            used = process.memory_info().rss
+            if used > cap_bytes:
+                _set_ram_exceeded(
+                    f"Process RAM usage ({used / (1024 ** 3):.2f} GB) exceeded cap ({cap_gb:.2f} GB)"
+                )
+                break
+        except Exception:
+            pass
         time.sleep(interval)
 
 
@@ -131,37 +135,13 @@ def _preflight_memory_check(workload_budget_gb: float = 5.0) -> None:
 
 
 def _apply_hard_ram_cap(max_ram_gb: float) -> None:
-    """OS-enforced hard cap on process address space (RLIMIT_AS).
-
-    Unlike the polling monitor, this is enforced by the kernel: any malloc/mmap
-    that would push the process over the limit returns NULL/raises MemoryError.
-    PyTorch, numpy, BLAS - they all hit the wall here. Cannot be circumvented.
-
-    This is the layer that actually prevents system-freezing OOM scenarios.
-    The polling monitor is kept as a softer early-warning above this hard cap.
+    """OBSOLETE: OS-enforced hard cap on process address space (RLIMIT_AS).
+    
+    This has been disabled because capping Virtual Memory (VSZ) crashes 
+    CUDA/PyTorch which aggressively maps 20GB+ of virtual addresses for context 
+    regardless of physical RAM usage. The polling monitor handles physical RAM safety.
     """
-    import sys
-    if max_ram_gb is None or max_ram_gb <= 0:
-        return
-    cap_bytes = int(max_ram_gb * (1024 ** 3))
-    try:
-        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-        new_soft = cap_bytes
-        new_hard = cap_bytes if hard == resource.RLIM_INFINITY else min(cap_bytes, hard)
-        if new_hard < new_soft:
-            new_soft = new_hard
-        resource.setrlimit(resource.RLIMIT_AS, (new_soft, new_hard))
-        print(
-            f"INFO: Hard RLIMIT_AS = {new_soft / (1024 ** 3):.2f} GB "
-            f"(OS-enforced; malloc beyond this raises MemoryError)",
-            file=sys.stderr,
-        )
-    except (ValueError, OSError) as exc:
-        print(
-            f"WARNING: could not set RLIMIT_AS hard cap ({exc}); "
-            f"falling back to polling monitor only",
-            file=sys.stderr,
-        )
+    return
 
 
 def _enforce_hard_ceiling(requested_gb: float) -> float:

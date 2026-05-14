@@ -18,6 +18,7 @@ from orka.cli.commands import (
     cmd_reconstruct,
     cmd_report,
     cmd_sem_analyze,
+    cmd_sem_map,
     cmd_sweep,
     cmd_verify,
 )
@@ -151,6 +152,11 @@ def build_parser() -> argparse.ArgumentParser:
             "--awq-model-dir",
             default=None,
             help="HF model dir for AWQ activation collection",
+        )
+        p.add_argument(
+            "--awq-activations-file",
+            default=None,
+            help="JSON file containing pre-calculated AWQ activations to reuse",
         )
         p.add_argument(
             "--awq-alpha",
@@ -478,6 +484,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sem_analyze.set_defaults(func=cmd_sem_analyze)
 
+    sem_map = sub.add_parser(
+        "sem-map", help="Phase 4: Link character roots to geometric concept hubs"
+    )
+    sem_map.add_argument("analysis_json", help="output from orka sem-analyze")
+    sem_map.add_argument(
+        "--out", required=True, help="output JSON for the concept mapping table"
+    )
+    sem_map.set_defaults(func=cmd_sem_map)
+
     def _run_tests(_args):
         import unittest
 
@@ -486,6 +501,14 @@ def build_parser() -> argparse.ArgumentParser:
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         return 0 if result.wasSuccessful() else 1
 
+
+    sem_calc = sub.add_parser(
+        "sem-calc", help="Pre-calculate AWQ activations and linguistic pillars"
+    )
+    sem_calc.add_argument("source", help="source checkpoint (.safetensors / .pt / .bin)")
+    add_pack_args(sem_calc)
+    sem_calc.add_argument("--out", required=True, help="output JSON for the calculated data")
+    sem_calc.set_defaults(func=cmd_calc)
 
     selftest = sub.add_parser("selftest", help="run built-in tests")
     selftest.set_defaults(func=_run_tests)

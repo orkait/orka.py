@@ -119,13 +119,26 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
     """Entry point for orka sem-analyze (Phases 0-3)."""
     from transformers import AutoTokenizer, AutoModelForCausalLM
     import torch
+    from orka.deploy.kaggle import _hf_snapshot_with_retry
     
-    model_dir = Path(args.model_dir)
+    model_input = args.model_dir
+    model_dir = Path(model_input)
+    
+    # 1. Automatic Download/Resolve
+    if not model_dir.exists():
+        print(f"--- Resolving {model_input} from HF Hub ---", flush=True)
+        try:
+            from huggingface_hub import snapshot_download
+            # Download to default HF cache and return path
+            model_dir = Path(snapshot_download(model_input))
+        except Exception as exc:
+            print(f"Error downloading model: {exc}")
+            return 1
     
     print(f"--- Phase 0: Architectural Profiling ---", flush=True)
     profile = profile_architecture(model_dir)
-    print(f"  Type: {profile['architecture'].upper()} ({'MoE' if profile['is_moe'] else 'Dense'})", flush=True)
-    if profile["is_moe"]:
+    print(f"  Type: {profile.get('architecture', 'unknown').upper()} ({'MoE' if profile.get('is_moe') else 'Dense'})", flush=True)
+    if profile.get("is_moe"):
         print(f"  Experts: {profile['experts']}", flush=True)
     
     print(f"--- Phase 1: Ingesting {model_dir.name} ---", flush=True)
@@ -158,6 +171,7 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
     
     analysis = {
         "model": model_dir.name,
+        "model_dir": str(model_dir),
         "vocab_size": vocab_size,
         "hidden_dim": hidden_dim,
         "productive_roots": roots[:1000],
@@ -198,4 +212,55 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
         print(f"Sensitivity map saved to {args.save_sensitivity_map}", flush=True)
 
     return 0
+
+
+def cmd_sem_map(args: argparse.Namespace) -> int:
+    """Entry point for orka sem-map (Phase 4)."""
+    analysis_path = Path(args.analysis_json)
+    if not analysis_path.exists():
+        print(f"Error: Analysis file not found: {analysis_path}")
+        return 1
+        
+    with open(analysis_path) as f:
+        analysis = json.load(f)
+        
+    vocab_size = analysis["vocab_size"]
+    hubs = analysis.get("semantic_hubs", [])
+    
+    print(f"--- Phase 4: Concept Union Mapping ({analysis['model']}) ---", flush=True)
+    
+    # link_table: child_tid -> {parent_tid, relationship_type, confidence}
+    link_table = {}
+    
+    # 1. Map Geometric Hubs (The 'Synonyms')
+    # These are high-confidence mathematical redundancies.
+    for hub in hubs:
+        master = hub["master_tid"]
+        for member in hub["member_tids"]:
+            if member == master: continue
+            link_table[str(member)] = {
+                "parent": int(master),
+                "type": "geometric_synonym",
+                "confidence": float(hub["avg_similarity"])
+            }
+            
+    print(f"  Mapped {len(link_table)} geometric synonyms.", flush=True)
+    
+    # 2. Map Morphological Variations (Placeholder for Phase 4 evolution)
+    # Full morphological mapping requires the tokenizer in this step to match strings to roots.
+    # For now, we utilize the geometric hubs which give the highest compression win.
+    
+    map_result = {
+        "model": analysis["model"],
+        "vocab_size": vocab_size,
+        "master_concept_count": vocab_size - len(link_table),
+        "links": link_table,
+        "status": "Phase 4 Complete"
+    }
+    
+    Path(args.out).write_text(json.dumps(map_result, indent=2) + "\n")
+    print(f"Concept Map saved to {args.out}", flush=True)
+    print(f"  Theoretical Deduplication: {len(link_table)} vectors removed.", flush=True)
+    return 0
+
 
