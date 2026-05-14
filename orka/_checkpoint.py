@@ -10,6 +10,19 @@ from orka._tensor import _tensor_numel, _tensor_shape
 
 
 def _load_tensors(path: Path) -> Iterable[tuple[str, object]]:
+    if path.is_dir():
+        # Sharded Checkpoint Support
+        print(f"INFO: Loading sharded checkpoint from directory: {path}", flush=True)
+        # Priority: Safetensors -> Torch -> Bin
+        patterns = ["*.safetensors", "*.pt", "*.pth", "*.bin"]
+        found_any = False
+        for pattern in patterns:
+            for shard in sorted(path.glob(pattern)):
+                yield from _load_tensors(shard)
+                found_any = True
+            if found_any: break
+        return
+
     suffix = path.suffix.lower()
     if suffix == ".json":
         with path.open() as f:
