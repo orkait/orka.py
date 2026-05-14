@@ -47,6 +47,54 @@ def _fwht_numpy(x):
         h *= 2
     return x / math.sqrt(n)
 
+
+def _largest_pow2_divisor(n: int) -> int:
+    if n <= 0:
+        return 0
+    return n & (-n)
+
+
+def _block_fwht_torch(x, block_size: int):
+    n = int(x.shape[-1])
+    if n % block_size != 0:
+        raise ValueError(f"block FWHT: dim {n} not divisible by block_size {block_size}")
+    if block_size & (block_size - 1) != 0:
+        raise ValueError(f"block FWHT: block_size {block_size} not power-of-2")
+    leading = list(x.shape[:-1])
+    n_blocks = n // block_size
+    reshaped = x.reshape(*leading, n_blocks, block_size)
+    transformed = _fwht_torch(reshaped)
+    return transformed.reshape(*leading, n)
+
+
+def _block_fwht_numpy(x, block_size: int):
+    import numpy as np
+
+    arr = np.array(x, dtype=np.float32, copy=True)
+    n = arr.shape[-1]
+    if n % block_size != 0:
+        raise ValueError(f"block FWHT: dim {n} not divisible by block_size {block_size}")
+    if block_size & (block_size - 1) != 0:
+        raise ValueError(f"block FWHT: block_size {block_size} not power-of-2")
+    leading = list(arr.shape[:-1])
+    n_blocks = n // block_size
+    reshaped = arr.reshape(*leading, n_blocks, block_size)
+    transformed = _fwht_numpy(reshaped)
+    return transformed.reshape(*leading, n)
+
+
+def _hadamard_block_size(cols: int, min_block: int = 4) -> int:
+    """Pick block size for Hadamard. Returns cols if pow2, else largest pow2 divisor.
+    Raises if no usable divisor >= min_block."""
+    if cols & (cols - 1) == 0:
+        return cols
+    div = _largest_pow2_divisor(cols)
+    if div < min_block:
+        raise ValueError(
+            f"hadamard: cols {cols} has no power-of-2 divisor >= {min_block}"
+        )
+    return div
+
 def _tensor_rotation_seed(global_seed: int, name: str) -> int:
     import hashlib
 
@@ -84,22 +132,16 @@ def _rotate_tensor_to_2d(
             rows, cols = shape[0], 1
             for s in shape[1:]:
                 cols *= int(s)
-            if cols & (cols - 1) != 0:
-                raise ValueError(
-                    f"hadamard rotation requires power-of-2 last-dim product, tensor {name} has {cols}"
-                )
-            return _fwht_torch(t.reshape(rows, cols)).reshape(shape), 0
+            block_size = _hadamard_block_size(cols)
+            return _block_fwht_torch(t.reshape(rows, cols), block_size).reshape(shape), 0
 
         arr = _numpy_float32_array(tensor)
         shape = [int(x) for x in arr.shape]
         rows, cols = shape[0], 1
         for s in shape[1:]:
             cols *= int(s)
-        if cols & (cols - 1) != 0:
-            raise ValueError(
-                f"hadamard rotation requires power-of-2 last-dim product, tensor {name} has {cols}"
-            )
-        return _fwht_numpy(arr.reshape((rows, cols))).reshape(shape), 0
+        block_size = _hadamard_block_size(cols)
+        return _block_fwht_numpy(arr.reshape((rows, cols)), block_size).reshape(shape), 0
 
     seed = _tensor_rotation_seed(rotation_seed, name)
     if backend == "torch":
@@ -110,6 +152,15 @@ def _rotate_tensor_to_2d(
         rows, cols = shape[0], 1
         for s in shape[1:]:
             cols *= int(s)
+        
+        # Sanity cap: N*N matrix allocation for orthogonal rotation.
+        # 16384 * 16384 * 4 bytes = 1.0 GB. 
+        if cols > 16384:
+            raise ValueError(
+                f"tensor {name} too wide for orthogonal rotation (cols={cols} > 16384). "
+                "Large tensors like attention masks should be skipped via sensitivity map or excluded from candidates."
+            )
+            
         q = _generate_orthogonal_torch(cols, seed, resolved, torch.float32)
         return (t.reshape(rows, cols) @ q).reshape(shape), seed
     arr = _numpy_float32_array(tensor)
@@ -117,6 +168,13 @@ def _rotate_tensor_to_2d(
     rows, cols = shape[0], 1
     for s in shape[1:]:
         cols *= int(s)
+        
+    if cols > 16384:
+        raise ValueError(
+            f"tensor {name} too wide for orthogonal rotation (cols={cols} > 16384). "
+            "Large tensors like attention masks should be skipped via sensitivity map or excluded from candidates."
+        )
+        
     q = _generate_orthogonal_numpy(cols, seed)
     return (arr.reshape(rows, cols) @ q).reshape(shape), seed
 
@@ -130,7 +188,8 @@ def _unrotate_flat(flat, shape, rotation: str, seed: int):
         cols *= int(s)
     arr = np.asarray(flat, dtype=np.float32)[: rows * cols].reshape(rows, cols)
     if rotation == "hadamard":
-        unrotated = _fwht_numpy(arr)
+        block_size = _hadamard_block_size(cols)
+        unrotated = _block_fwht_numpy(arr, block_size)
     else:
         q = _generate_orthogonal_numpy(cols, seed)
         unrotated = arr @ q.T

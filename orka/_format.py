@@ -115,9 +115,6 @@ def _write_passthrough_tensors(path: Path, tensors: dict) -> None:
     except Exception as exc:
         raise RuntimeError(f"failed to write passthrough tensors (numpy): {exc}") from exc
 
-_FP16_MAX = 65504.0
-
-
 def _write_outliers(idx_path: Path, val_path: Path, positions, values) -> None:
     try:
         import numpy as np
@@ -125,17 +122,8 @@ def _write_outliers(idx_path: Path, val_path: Path, positions, values) -> None:
         raise RuntimeError("outlier writing requires numpy") from exc
     idx_path.parent.mkdir(parents=True, exist_ok=True)
     val_arr = np.asarray(values, dtype=np.float32)
-    over = np.abs(val_arr) > _FP16_MAX
-    if bool(over.any()):
-        n_over = int(over.sum())
-        max_abs = float(np.max(np.abs(val_arr)))
-        print(
-            f"WARN: {n_over} outlier value(s) exceed fp16 range ({max_abs:.1f} > {_FP16_MAX}); "
-            f"will be clipped to ±inf at {val_path.name}",
-            file=os.sys.stderr,
-        )
     np.asarray(positions, dtype="<u4").tofile(str(idx_path))
-    val_arr.astype("<f2").tofile(str(val_path))
+    val_arr.astype("<f4").tofile(str(val_path))
 
 
 def _read_outliers(idx_path: Path, val_path: Path) -> tuple[list[int], list[float]]:
@@ -144,9 +132,35 @@ def _read_outliers(idx_path: Path, val_path: Path) -> tuple[list[int], list[floa
     except Exception as exc:
         raise RuntimeError("outlier reading requires numpy") from exc
     positions = np.fromfile(str(idx_path), dtype="<u4")
-    values = np.fromfile(str(val_path), dtype="<f2").astype(np.float32)
+    values = np.fromfile(str(val_path), dtype="<f4").astype(np.float32)
     if len(positions) != len(values):
         raise ValueError(f"outlier count mismatch: {len(positions)} != {len(values)}")
+    return positions.tolist(), values.tolist()
+
+
+def _write_pillars(idx_path: Path, val_path: Path, positions, values) -> None:
+    """Save critical Concept Pillars in FP16 (<f2) for space efficiency."""
+    try:
+        import numpy as np
+    except Exception as exc:
+        raise RuntimeError("pillar writing requires numpy") from exc
+    idx_path.parent.mkdir(parents=True, exist_ok=True)
+    val_arr = np.asarray(values, dtype=np.float32)
+    # Check for FP16 overflow just in case
+    if np.abs(val_arr).max() > 65504.0:
+        val_arr = np.clip(val_arr, -65504.0, 65504.0)
+    np.asarray(positions, dtype="<u4").tofile(str(idx_path))
+    val_arr.astype("<f2").tofile(str(val_path))
+
+
+def _read_pillars(idx_path: Path, val_path: Path) -> tuple[list[int], list[float]]:
+    """Read Concept Pillars from FP16 (<f2) sidecar."""
+    try:
+        import numpy as np
+    except Exception as exc:
+        raise RuntimeError("pillar reading requires numpy") from exc
+    positions = np.fromfile(str(idx_path), dtype="<u4")
+    values = np.fromfile(str(val_path), dtype="<f2").astype(np.float32)
     return positions.tolist(), values.tolist()
 
 
