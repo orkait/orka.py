@@ -21,8 +21,8 @@ def _collect_activations_hf(
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except Exception as exc:
         raise RuntimeError("activation calibration requires torch and transformers") from exc
-    tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True)
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(str(model_dir), local_files_only=True, trust_remote_code=True)
     model.to(device)
     model.eval()
     activations: dict[str, list] = {}
@@ -68,6 +68,22 @@ import argparse
 
 
 def _load_awq_activations(args: argparse.Namespace):
+    if getattr(args, "awq_activations_file", None):
+        import json
+        import torch
+        path = Path(args.awq_activations_file)
+        if not path.exists():
+            raise FileNotFoundError(f"AWQ activations file not found: {path}")
+        print(f"Loading pre-calculated AWQ activations from {path}...", flush=True)
+        try:
+            with open(path, "r") as f:
+                raw = json.load(f)
+            # JSON format often contains lists; convert back to tensors for normalization module
+            return {k: torch.tensor(v, dtype=torch.float32) for k, v in raw.items()}
+        except Exception:
+            # Fallback to torch.load for binary .pt files
+            return torch.load(str(path), map_location="cpu")
+
     if not args.awq_calibration:
         return None
     prompts = _read_prompt_file(

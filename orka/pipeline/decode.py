@@ -11,6 +11,7 @@ from orka._format import (
     _read_f32_vector,
     _read_indices,
     _read_outliers,
+    _read_pillars,
     _read_salient,
 )
 from orka.transforms.normalize import (
@@ -42,14 +43,26 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict) -> list[float]:
     import numpy as np
     decoded_np = np.zeros(index_count * group_size, dtype=np.float32)
     for stage in stages:
-        cb = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, group_size)
-        idxs = np.asarray(_read_indices(out_dir / stage["indices"], int(stage["index_bits"]), index_count), dtype=np.int64)
+        s_group_size = int(stage.get("group_size", group_size))
+        s_index_count = math.ceil(padded_values / s_group_size)
+        
+        cb = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, s_group_size)
+        idxs = np.asarray(_read_indices(out_dir / stage["indices"], int(stage["index_bits"]), s_index_count), dtype=np.int64)
         decoded_np += cb[idxs].reshape(-1)
     decoded = decoded_np[: int(tensor_meta["packed_values"])].tolist()
     outl = tensor_meta.get("outliers")
     if outl:
         positions, values = _read_outliers(
             out_dir / outl["positions"], out_dir / outl["values"]
+        )
+        for pos, val in zip(positions, values):
+            decoded[int(pos)] = float(val)
+
+    # Re-inject Concept Pillars (FP16)
+    pillars = tensor_meta.get("pillars")
+    if pillars:
+        positions, values = _read_pillars(
+            out_dir / pillars["positions"], out_dir / pillars["values"]
         )
         for pos, val in zip(positions, values):
             decoded[int(pos)] = float(val)
@@ -117,7 +130,10 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
 
     decoded = torch.zeros(index_count * group_size, dtype=torch.float32, device=device)
     for stage in stages:
-        cb_np = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, group_size)
+        s_group_size = int(stage.get("group_size", group_size))
+        s_index_count = math.ceil(padded_values / s_group_size)
+
+        cb_np = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, s_group_size)
         idxs_np = np.frombuffer(
             (out_dir / stage["indices"]).read_bytes(),
             dtype=_index_bit_spec(int(stage["index_bits"]))[1],
@@ -130,6 +146,15 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
     outl = tm.get("outliers")
     if outl:
         positions, values = _read_outliers(out_dir / outl["positions"], out_dir / outl["values"])
+        if positions:
+            pos_t = torch.tensor(list(positions), dtype=torch.long, device=device)
+            val_t = torch.tensor(list(values), dtype=torch.float32, device=device)
+            decoded[pos_t] = val_t
+
+    # Re-inject Concept Pillars (FP16)
+    pillars = tm.get("pillars")
+    if pillars:
+        positions, values = _read_pillars(out_dir / pillars["positions"], out_dir / pillars["values"])
         if positions:
             pos_t = torch.tensor(list(positions), dtype=torch.long, device=device)
             val_t = torch.tensor(list(values), dtype=torch.float32, device=device)

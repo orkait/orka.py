@@ -80,6 +80,7 @@ def _quality_metrics_for_numpy_flat(
     src = np.asarray(source, dtype=np.float32).reshape(-1)
     rec = np.asarray(reconstructed, dtype=np.float32).reshape(-1)
     if src.shape[0] != rec.shape[0]:
+        print(f"DEBUG: Size Mismatch! Source: {src.shape[0]}, Recon: {rec.shape[0]}", flush=True)
         raise ValueError("source and reconstructed arrays must have the same size")
 
     sse = 0.0
@@ -122,6 +123,8 @@ def _stage_quality_metrics(candidate: dict, backend: str) -> dict:
             import torch
         except Exception as exc:
             raise RuntimeError("torch metrics requires torch") from exc
+        if _is_torch_tensor(orig) and orig.device != decoded_sum.device:
+            decoded_sum = decoded_sum.to(orig.device)
         diff = orig - decoded_sum
         sse = float((diff * diff).sum().detach().cpu().item())
         abs_diff = diff.abs()
@@ -195,6 +198,15 @@ def _stage_quality_metrics(candidate: dict, backend: str) -> dict:
         positions = np.asarray(list(outlier_positions), dtype=np.int64)
         values = np.asarray(list(outlier_values), dtype=np.float32)
         flat_decoded[positions] = values
+
+    # Patch Concept Pillars (also stored in normalized space)
+    pillar_positions = candidate.get("pillar_positions")
+    pillar_values = candidate.get("pillar_values")
+    if pillar_positions is not None:
+        p_pos = np.asarray(list(pillar_positions), dtype=np.int64)
+        p_val = np.asarray(list(pillar_values), dtype=np.float32)
+        flat_decoded[p_pos] = p_val
+
     # Un-rotate first (matching decode order: un-rotate → un-normalize).
     if has_rotation:
         flat_decoded = np.asarray(

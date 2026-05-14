@@ -10,7 +10,8 @@
   "enable_tpu": false,
   "enable_internet": true,
   "dataset_sources": [
-    "superkaiii/hf-token-private"
+    "superkaiii/hf-token-private",
+    "superkaiii/orka-compiler-core-v2"
   ],
   "docker_image_pinning_type": "latest",
   "kernel_sources": [],

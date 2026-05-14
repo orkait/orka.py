@@ -17,6 +17,8 @@ from orka.cli.commands import (
     cmd_pulse_check,
     cmd_reconstruct,
     cmd_report,
+    cmd_sem_analyze,
+    cmd_sem_map,
     cmd_sweep,
     cmd_verify,
 )
@@ -85,7 +87,20 @@ def build_parser() -> argparse.ArgumentParser:
             "--rotation",
             choices=["none", "orthogonal", "hadamard"],
             default="none",
-            help="rotation along inner axis before VQ. orthogonal: per-tensor seeded random orthogonal (any size). hadamard: deterministic FWHT (requires power-of-2 last dim).",
+            help="rotation along inner axis before VQ. orthogonal: per-tensor seeded random orthogonal (any size). hadamard: block-diagonal FWHT (uses largest pow2 divisor of last dim; full FWHT if last dim is pow2).",
+        )
+        p.add_argument(
+            "--em-aq-passes",
+            type=int,
+            default=3,
+            help="number of EM-AQ joint refinement passes after greedy RVQ. 0 disables.",
+        )
+        p.add_argument(
+            "--no-slrq-salient",
+            dest="slrq_salient",
+            action="store_false",
+            default=True,
+            help="disable salient-weight extraction inside slrq-block (keeps power-of-2 anchor only).",
         )
         p.add_argument(
             "--rotation-seed",
@@ -106,7 +121,15 @@ def build_parser() -> argparse.ArgumentParser:
             "--max-system-ram-gb",
             type=float,
             default=None,
-            help="strict cap on total system RAM usage (GB). If exceeded, the process terminates safely.",
+            help="strict cap on total system RAM (GB). RLIMIT_AS-enforced. Hard ceiling 25GB.",
+        )
+        p.add_argument(
+            "--workload-budget-gb",
+            type=float,
+            default=None,
+            help="estimated process RAM budget (GB) used by preflight check. "
+                 "Typical: SmolLM2=5, Pythia=5, Bloom=7, Qwen3-0.6B=9. "
+                 "Required when --max-system-ram-gb is set.",
         )
         p.add_argument(
             "--max-cpu-threads",
@@ -129,6 +152,11 @@ def build_parser() -> argparse.ArgumentParser:
             "--awq-model-dir",
             default=None,
             help="HF model dir for AWQ activation collection",
+        )
+        p.add_argument(
+            "--awq-activations-file",
+            default=None,
+            help="JSON file containing pre-calculated AWQ activations to reuse",
         )
         p.add_argument(
             "--awq-alpha",
@@ -199,12 +227,15 @@ def build_parser() -> argparse.ArgumentParser:
     verify.set_defaults(func=cmd_verify)
 
     reconstruct = sub.add_parser(
-        "reconstruct", help="decode an .orka artifact to JSON tensors"
+        "reconstruct", help="decode an .orka artifact into a standard format"
     )
     reconstruct.add_argument("artifact")
     reconstruct.add_argument("--out", required=True)
     reconstruct.add_argument(
         "--format", choices=["json", "safetensors"], default="json"
+    )
+    reconstruct.add_argument(
+        "--device", default=None, help="device for decoding (cpu/cuda)"
     )
     reconstruct.set_defaults(func=cmd_reconstruct)
 
@@ -269,7 +300,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-system-ram-gb",
         type=float,
         default=None,
-        help="strict cap on total system RAM usage (GB). If exceeded, the process terminates safely.",
+        help="strict cap on total system RAM (GB). RLIMIT_AS-enforced. Hard ceiling 25GB.",
+    )
+    sweep.add_argument(
+        "--workload-budget-gb",
+        type=float,
+        default=None,
+        help="estimated process RAM budget (GB) for preflight. Required with --max-system-ram-gb.",
     )
     sweep.add_argument(
         "--max-cpu-threads",
@@ -315,6 +352,21 @@ def build_parser() -> argparse.ArgumentParser:
     sweep.add_argument("--calibration-max-prompts", type=int, default=32)
     sweep.add_argument("--calibration-max-length", type=int, default=256)
     sweep.add_argument("--calibration-max-samples", type=int, default=4096)
+    sweep.add_argument(
+        "--em-aq-passes",
+        type=int,
+        default=3,
+        help="number of EM-AQ joint refinement passes after greedy RVQ. 0 disables.",
+    )
+    sweep.add_argument(
+        "--sensitivity-map",
+        help="JSON file from sensitivity.py to enable mixed-precision",
+    )
+    sweep.add_argument(
+        "--codebook-cache",
+        default=None,
+        help="dir to cache stage-0 codebooks (zero-loss reuse on identical configs)",
+    )
     sweep.set_defaults(func=cmd_sweep)
 
     eval_cmd = sub.add_parser(
@@ -338,7 +390,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow transformers to download missing files",
     )
     eval_cmd.add_argument("--max-system-ram-gb", type=float, default=None,
-                          help="strict cap on total system RAM usage (GB).")
+                          help="strict cap on total system RAM (GB). RLIMIT_AS-enforced.")
+    eval_cmd.add_argument("--workload-budget-gb", type=float, default=None,
+                          help="estimated process RAM budget (GB) for preflight. Required with --max-system-ram-gb.")
     eval_cmd.add_argument("--max-cpu-threads", type=int, default=None,
                           help="cap CPU threads (torch + OMP/MKL + affinity).")
     eval_cmd.add_argument("--max-gpu-mem-gb", type=float, default=None,
@@ -366,7 +420,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow transformers to download missing files",
     )
     pulse_check_cmd.add_argument("--max-system-ram-gb", type=float, default=None,
-                                 help="strict cap on total system RAM usage (GB).")
+                                 help="strict cap on total system RAM (GB). RLIMIT_AS-enforced.")
+    pulse_check_cmd.add_argument("--workload-budget-gb", type=float, default=None,
+                                 help="estimated process RAM budget (GB) for preflight. Required with --max-system-ram-gb.")
     pulse_check_cmd.add_argument("--max-cpu-threads", type=int, default=None,
                                  help="cap CPU threads (torch + OMP/MKL + affinity).")
     pulse_check_cmd.add_argument("--max-gpu-mem-gb", type=float, default=None,
@@ -404,12 +460,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow transformers to download missing files",
     )
     eval_sweep_cmd.add_argument("--max-system-ram-gb", type=float, default=None,
-                                help="strict cap on total system RAM usage (GB).")
+                                help="strict cap on total system RAM (GB). RLIMIT_AS-enforced.")
+    eval_sweep_cmd.add_argument("--workload-budget-gb", type=float, default=None,
+                                help="estimated process RAM budget (GB) for preflight. Required with --max-system-ram-gb.")
     eval_sweep_cmd.add_argument("--max-cpu-threads", type=int, default=None,
                                 help="cap CPU threads (torch + OMP/MKL + affinity).")
     eval_sweep_cmd.add_argument("--max-gpu-mem-gb", type=float, default=None,
                                 help="strict cap on per-process GPU memory (GB).")
     eval_sweep_cmd.set_defaults(func=cmd_eval_sweep)
+
+    sem_analyze = sub.add_parser(
+        "sem-analyze", help="Phase 1-3: Ingest vocabulary and discover linguistic roots/clusters"
+    )
+    sem_analyze.add_argument("model_dir", help="Hugging Face model directory")
+    sem_analyze.add_argument(
+        "--out", required=True, help="output JSON for the semantic analysis"
+    )
+    sem_analyze.add_argument(
+        "--save-sensitivity-map", help="generate a .json file for orka pack --sensitivity-map"
+    )
+    sem_analyze.add_argument(
+        "--device", default="cpu", help="device for embedding analysis (cpu/cuda)"
+    )
+    sem_analyze.set_defaults(func=cmd_sem_analyze)
+
+    sem_map = sub.add_parser(
+        "sem-map", help="Phase 4: Link character roots to geometric concept hubs"
+    )
+    sem_map.add_argument("analysis_json", help="output from orka sem-analyze")
+    sem_map.add_argument(
+        "--out", required=True, help="output JSON for the concept mapping table"
+    )
+    sem_map.set_defaults(func=cmd_sem_map)
 
     def _run_tests(_args):
         import unittest
@@ -419,6 +501,14 @@ def build_parser() -> argparse.ArgumentParser:
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         return 0 if result.wasSuccessful() else 1
 
+
+    sem_calc = sub.add_parser(
+        "sem-calc", help="Pre-calculate AWQ activations and linguistic pillars"
+    )
+    sem_calc.add_argument("source", help="source checkpoint (.safetensors / .pt / .bin)")
+    add_pack_args(sem_calc)
+    sem_calc.add_argument("--out", required=True, help="output JSON for the calculated data")
+    sem_calc.set_defaults(func=cmd_calc)
 
     selftest = sub.add_parser("selftest", help="run built-in tests")
     selftest.set_defaults(func=_run_tests)
