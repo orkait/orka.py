@@ -177,18 +177,26 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
             # AUTO-GENERATE PILLARS ON KAGGLE
             try:
                 print("--- Auto-generating Pillar Map (Frequency + Magnitude) ---", flush=True)
-                from transformers import AutoTokenizer, AutoModelForCausalLM
+                from transformers import AutoTokenizer
                 import numpy as np
                 from scipy.stats import rankdata
                 from collections import Counter
+                from safetensors import safe_open
                 
                 tok = AutoTokenizer.from_pretrained(src_dir, trust_remote_code=True)
                 with open(calib_path) as f:
                     text = f.read()
                 counts = Counter(tok.encode(text))
                 
-                mod = AutoModelForCausalLM.from_pretrained(src_dir, torch_dtype="auto", device_map="cpu", trust_remote_code=True)
-                emb = mod.get_input_embeddings().weight.detach().numpy()
+                emb = None
+                with safe_open(str(source_file), framework="np") as f:
+                    for k in f.keys():
+                        if "embed_tokens" in k or "wte" in k or "word_embeddings" in k:
+                            emb = f.get_tensor(k)
+                            break
+                if emb is None:
+                    raise RuntimeError("Could not find embedding tensor in safetensors file")
+                    
                 actual_vocab = emb.shape[0]
                 norms = np.linalg.norm(emb, axis=1)
                 
@@ -205,8 +213,8 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
                 top_ids = np.argsort(score)[::-1][:top_count].tolist()
                 _kp_smap = {"top_tokens": top_ids, "layers": []}
                 print(f"Kaggle: protected {len(top_ids)} pillars", flush=True)
-                # Cleanup to free RAM for packing
-                del mod
+                
+                del emb
                 import gc
                 gc.collect()
             except Exception as exc:
@@ -333,29 +341,29 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
 
 
 _KAGGLE_CONFIG = {
-    "repo_id":         "Qwen/Qwen3-MoE-15B-A2B",
+    "repo_id":         "Qwen/Qwen2.5-0.5B",
     "upload_repo":     None,
     "quant_mode":      "rvq-mixed",
     "codebook_mode":   "per-tensor",
-    "normalization":   "awq-block-max",
+    "normalization":   "slrq-block",
     "rotation":        "orthogonal",
     "rotation_seed":   42,
     "backend":         "torch",
     "device":          "cuda",
     "max_gpu_mem_gb":  14.0,
-    "sample_vectors":  1000000,
+    "sample_vectors":  500000,
     "iterations":      12,
     "outlier_frac":    0.01,
-    "group_size":      8,
+    "group_size":      1024,
     "codebook_size":   256,
-    "awq_calibration": True,
+    "awq_calibration": False,
     "awq_alpha":       0.5,
-    "calibration_max_prompts": 128,
-    "calibration_max_length":  512,
+    "calibration_max_prompts": 32,
+    "calibration_max_length":  256,
     "skip_sensitive":  False,
     "run_eval":        True,
-    "eval_max_prompts": 64,
-    "eval_max_length":  256,
+    "eval_max_prompts": 50,
+    "eval_max_length":  128,
     "em_aq_passes":    3,
 }
 
