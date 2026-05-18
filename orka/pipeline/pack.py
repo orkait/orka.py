@@ -308,16 +308,6 @@ def _run_em_aq_refinement(
     progress_file: Path | None,
     em_aq_passes: int = 3,
 ) -> None:
-    """Joint-optimized additive quantization (AQLM EM-style) refinement.
-
-    After the greedy stage-by-stage RVQ pass, unfreeze each stage in turn and
-    re-train it against the residual ``orig - (full_sum - this_stage_decoded)``.
-    Codebook + indices are rewritten via ``_BG_WRITER``. ``current_full_sum``
-    is materialized into ``decoded_sum`` for downstream metrics.
-
-    em_aq_passes=0 disables EM-AQ entirely (skip joint refinement, return after
-    materializing decoded_sum from the greedy stages).
-    """
     if em_aq_passes <= 0:
         _report_progress(progress_file, "--- EM-AQ disabled (em_aq_passes=0) ---")
     else:
@@ -328,18 +318,18 @@ def _run_em_aq_refinement(
         base = c["name"].replace(".weight", "")
         return base in skipped_tensors or c["name"] in skipped_tensors
 
-    # Materialize the current full reconstruction once per candidate.
-    for c in candidates:
+    for i, c in enumerate(candidates):
+        _check_ram_cap()
         if _is_skipped(c):
             continue
-        full_sum = None
+            
         c_n_stages = len(c["stages_data"])
+        
+        # 1. Decode current full_sum
+        full_sum = None
         for stage_i in range(c_n_stages):
             sd = c["stages_data"][stage_i]
-            # Use per-stage group size to determine target shape
             s_group_size = sd.get("group_size", c["group_size"])
-            
-            # Use a scalar template for scalar stages to prevent dimension mismatch
             t_template = c["vectors_orig"]
             if s_group_size == 1 and c["group_size"] > 1:
                 t_template = c["vectors_orig"].reshape(-1, 1)
@@ -347,94 +337,95 @@ def _run_em_aq_refinement(
             dec = _decode_to_vectors_format(
                 t_template, sd["cb"], sd["indices"], backend, resolved_device
             )
-            
-            # Reshape back to the original vector shape if it was a scalar stage
             if s_group_size == 1 and c["group_size"] > 1:
                 dec = dec.reshape(c["vectors_orig"].shape)
-
             full_sum = dec if full_sum is None else full_sum + dec
-        c["current_full_sum"] = full_sum
+            del dec
+        
+        current_full_sum = full_sum
 
-    for joint_iter in range(joint_iterations):
-        _report_progress(
-            progress_file,
-            f"Joint Refinement Pass {joint_iter + 1}/{joint_iterations}",
-        )
-        for stage_i in range(n_stages):
-            _report_progress(progress_file, f"    Refining stage {stage_i + 1}/{n_stages}...")
-            for c in candidates:
-                _check_ram_cap()
-                if _is_skipped(c):
-                    continue
-                if stage_i >= len(c["stages_data"]):
-                    continue
-                
-                sd = c["stages_data"][stage_i]
-                s_group_size = sd.get("group_size", c["group_size"])
-                k = c["stages_meta"][stage_i]["codebook_size"]
+        if joint_iterations > 0 and c_n_stages > 1:
+            _report_progress(progress_file, f"  Joint Refining {c['name']} ({i+1}/{len(candidates)})...")
+            # 2. EM-AQ Loop for this tensor
+            for joint_iter in range(joint_iterations):
+                for stage_i in range(c_n_stages):
+                    _check_ram_cap()
+                    sd = c["stages_data"][stage_i]
+                    s_group_size = sd.get("group_size", c["group_size"])
+                    k = c["stages_meta"][stage_i]["codebook_size"]
 
-                if sample_vectors is not None and k >= sample_vectors:
-                    continue
+                    if sample_vectors is not None and k >= sample_vectors:
+                        continue
 
-                # Recalculate old_dec with correct shape
-                t_template = c["vectors_orig"]
-                if s_group_size == 1 and c["group_size"] > 1:
-                    t_template = c["vectors_orig"].reshape(-1, 1)
+                    t_template = c["vectors_orig"]
+                    if s_group_size == 1 and c["group_size"] > 1:
+                        t_template = c["vectors_orig"].reshape(-1, 1)
 
-                old_dec_raw = _decode_to_vectors_format(
-                    t_template, sd["cb"], sd["indices"], backend, resolved_device
-                )
-                old_dec = old_dec_raw
-                if s_group_size == 1 and c["group_size"] > 1:
-                    old_dec = old_dec_raw.reshape(c["vectors_orig"].shape)
+                    old_dec_raw = _decode_to_vectors_format(
+                        t_template, sd["cb"], sd["indices"], backend, resolved_device
+                    )
+                    old_dec = old_dec_raw
+                    if s_group_size == 1 and c["group_size"] > 1:
+                        old_dec = old_dec_raw.reshape(c["vectors_orig"].shape)
 
-                target = _vectors_subtract(
-                    c["vectors_orig"], (c["current_full_sum"] - old_dec)
-                )
-                
-                # Reshape target for training if scalar
-                target_train = target
-                if s_group_size == 1 and c["group_size"] > 1:
-                    target_train = target.reshape(-1, 1)
+                    target = _vectors_subtract(
+                        c["vectors_orig"], (current_full_sum - old_dec)
+                    )
+                    
+                    target_train = target
+                    if s_group_size == 1 and c["group_size"] > 1:
+                        target_train = target.reshape(-1, 1)
 
-                training = _sample_vector_rows(target_train, sample_vectors)
-                vw = c.get("vector_weights") if s_group_size > 1 else None
+                    training = _sample_vector_rows(target_train, sample_vectors)
+                    vw = c.get("vector_weights") if s_group_size > 1 else None
 
-                cb, _, _ = learn_codebook_auto(
-                    training, min(k, len(training)), 2, backend, resolved_device,
-                    vector_weights=vw, initial_codebook=sd["cb"],
-                )
-                indices, _ = quantize_vectors_auto(target_train, cb, backend, resolved_device)
+                    cb, _, _ = learn_codebook_auto(
+                        training, min(k, len(training)), 2, backend, resolved_device,
+                        vector_weights=vw, initial_codebook=sd["cb"],
+                    )
+                    indices, _ = quantize_vectors_auto(target_train, cb, backend, resolved_device)
 
-                new_dec_raw = _decode_to_vectors_format(
-                    target_train, cb, indices, backend, resolved_device
-                )
-                new_dec = new_dec_raw
-                if s_group_size == 1 and c["group_size"] > 1:
-                    new_dec = new_dec_raw.reshape(c["vectors_orig"].shape)
+                    new_dec_raw = _decode_to_vectors_format(
+                        target_train, cb, indices, backend, resolved_device
+                    )
+                    new_dec = new_dec_raw
+                    if s_group_size == 1 and c["group_size"] > 1:
+                        new_dec = new_dec_raw.reshape(c["vectors_orig"].shape)
 
-                c["current_full_sum"] = (c["current_full_sum"] - old_dec) + new_dec
-                c["stages_data"][stage_i] = {"cb": cb, "indices": indices, "group_size": s_group_size}
+                    current_full_sum = (current_full_sum - old_dec) + new_dec
+                    c["stages_data"][stage_i] = {"cb": cb, "indices": indices, "group_size": s_group_size}
 
-                safe = _safe_tensor_name(c["name"])
-                cb_path = tensor_dir / f"{safe}.s{stage_i}.codebook.f32"
-                _BG_WRITER.submit(_write_codebook, cb_path, cb)
-                idx_path = tensor_dir / f"{safe}.s{stage_i}.indices"
-                _BG_WRITER.submit(
-                    _write_indices,
-                    idx_path,
-                    indices.cpu() if hasattr(indices, "cpu") else indices,
-                    c["stages_meta"][stage_i]["index_bits"],
-                )
-                c["decoded_sum"] = None
+                    safe = _safe_tensor_name(c["name"])
+                    cb_path = tensor_dir / f"{safe}.s{stage_i}.codebook.f32"
+                    _BG_WRITER.submit(_write_codebook, cb_path, cb)
+                    idx_path = tensor_dir / f"{safe}.s{stage_i}.indices"
+                    _BG_WRITER.submit(
+                        _write_indices,
+                        idx_path,
+                        indices.cpu() if hasattr(indices, "cpu") else indices,
+                        c["stages_meta"][stage_i]["index_bits"],
+                    )
+                    
+                    del old_dec_raw, old_dec, target, target_train, training, cb, indices, new_dec_raw, new_dec
+                    import gc
+                    gc.collect()
 
-    # Materialize current_full_sum into decoded_sum and refresh metrics.
-    for c in candidates:
-        if "current_full_sum" in c:
-            c["decoded_sum"] = _offload_to_cpu(c["current_full_sum"])
-            del c["current_full_sum"]
-        if not _is_skipped(c):
-            c["refined_metrics"] = _stage_quality_metrics(c, backend)
+        c["decoded_sum"] = _offload_to_cpu(current_full_sum)
+        del current_full_sum
+        c["refined_metrics"] = _stage_quality_metrics(c, backend)
+        
+        # Free ALL stage indices and vectors from RAM now that we're done!
+        for stage_i in range(c_n_stages):
+            if "indices" in c["stages_data"][stage_i]:
+                c["stages_data"][stage_i]["indices"] = None
+        
+        if "vectors_orig" in c:
+            c["vectors_orig"] = None
+        if "vectors" in c:
+            c["vectors"] = None
+            
+        import gc
+        gc.collect()
 
 
 def pack_checkpoint(
@@ -1015,6 +1006,16 @@ def pack_checkpoint(
                     import torch as _t
                     _t.cuda.empty_cache()
                 except Exception: pass
+                
+            # If we are doing EM-AQ, we don't need residual/decoded_sum in RAM
+            # because EM-AQ recalculates them from vectors_orig.
+            if em_aq_passes > 0 and stage_i == n_stages - 1:
+                if "vectors_residual" in c:
+                    del c["vectors_residual"]
+                if "decoded_sum" in c:
+                    del c["decoded_sum"]
+                import gc
+                gc.collect()
 
             c["stages_meta"].append(
                 {
