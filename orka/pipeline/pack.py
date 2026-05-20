@@ -392,7 +392,12 @@ def _run_em_aq_refinement(
                     if s_group_size == 1 and c["group_size"] > 1:
                         new_dec = new_dec_raw.reshape(c["vectors_orig"].shape)
 
-                    current_full_sum = (current_full_sum - old_dec) + new_dec
+                    if hasattr(current_full_sum, "sub_"):
+                        # In-place PyTorch math avoids creating 3 massive intermediate tensors
+                        current_full_sum.sub_(old_dec).add_(new_dec)
+                    else:
+                        current_full_sum = (current_full_sum - old_dec) + new_dec
+                        
                     c["stages_data"][stage_i] = {"cb": cb, "indices": indices, "group_size": s_group_size}
 
                     safe = _safe_tensor_name(c["name"])
