@@ -207,11 +207,10 @@ def _stage_quality_metrics(candidate: dict, backend: str) -> dict:
         p_val = np.asarray(list(pillar_values), dtype=np.float32)
         flat_decoded[p_pos] = p_val
 
-    # Un-rotate first (matching decode order: un-rotate → un-normalize).
     if has_rotation:
         flat_decoded = np.asarray(
             _unrotate_flat(
-                flat_decoded.tolist(),
+                flat_decoded,
                 candidate["shape"],
                 rotation,
                 int(rot_seed or 0),
