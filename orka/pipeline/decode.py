@@ -15,19 +15,23 @@ from orka._format import (
     _read_salient,
 )
 from orka.transforms.normalize import (
-    _apply_block_max_scales,
-    _apply_col_l2_scales,
+    _apply_block_max_scales_numpy,
+    _apply_col_l2_scales_numpy,
 )
 from orka.transforms.rotate import (
-    _fwht_numpy,
+    _block_fwht_torch,
     _generate_orthogonal_numpy,
+    _hadamard_block_size,
     _unrotate_flat,
 )
 
 
-def _decode_tensor(out_dir: Path, tensor_meta: dict) -> list[float]:
+def _decode_tensor(out_dir: Path, tensor_meta: dict):
+    import numpy as np
+
     group_size = int(tensor_meta["group_size"])
     padded_values = int(tensor_meta["padded_values"])
+    packed_values = int(tensor_meta["packed_values"])
     index_count = math.ceil(padded_values / group_size)
     stages = tensor_meta.get("stages")
     if not stages:
@@ -40,72 +44,71 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict) -> list[float]:
             }
         ]
 
-    import numpy as np
     decoded_np = np.zeros(index_count * group_size, dtype=np.float32)
     for stage in stages:
         s_group_size = int(stage.get("group_size", group_size))
         s_index_count = math.ceil(padded_values / s_group_size)
-        
         cb = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, s_group_size)
-        idxs = np.asarray(_read_indices(out_dir / stage["indices"], int(stage["index_bits"]), s_index_count), dtype=np.int64)
-        decoded_np += cb[idxs].reshape(-1)
-    decoded = decoded_np[: int(tensor_meta["packed_values"])].tolist()
+        idxs = _read_indices(out_dir / stage["indices"], int(stage["index_bits"]), s_index_count)
+        decoded_np += cb[idxs.astype(np.int64, copy=False)].reshape(-1)
+
+    decoded = decoded_np[:packed_values].copy()
+
     outl = tensor_meta.get("outliers")
     if outl:
         positions, values = _read_outliers(
             out_dir / outl["positions"], out_dir / outl["values"]
         )
-        for pos, val in zip(positions, values):
-            decoded[int(pos)] = float(val)
+        if positions.size:
+            decoded[positions.astype(np.int64, copy=False)] = values
 
-    # Re-inject Concept Pillars (FP16)
     pillars = tensor_meta.get("pillars")
     if pillars:
         positions, values = _read_pillars(
             out_dir / pillars["positions"], out_dir / pillars["values"]
         )
-        for pos, val in zip(positions, values):
-            decoded[int(pos)] = float(val)
-            
+        if positions.size:
+            decoded[positions.astype(np.int64, copy=False)] = values
+
     rotation = tensor_meta.get("rotation", "none")
     if rotation in {"orthogonal", "hadamard"}:
         seed = int(tensor_meta.get("rotation_seed") or 0)
         decoded = _unrotate_flat(decoded, tensor_meta["shape"], rotation, seed)
+
     norm = tensor_meta.get("normalization", "none")
     if norm == "awq":
         scales = _read_f32_vector(
             out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"])
         )
-        decoded = _apply_col_l2_scales(decoded, tensor_meta["shape"], scales)
+        decoded = _apply_col_l2_scales_numpy(decoded, tensor_meta["shape"], scales)
     elif norm in ("block-max", "slrq-block"):
         scales = _read_f32_vector(
             out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"])
         )
         block_size = int(tensor_meta.get("block_scale_size") or 32)
-        decoded = _apply_block_max_scales(decoded, scales, block_size)
-
+        decoded = _apply_block_max_scales_numpy(decoded, scales, block_size)
     elif norm == "awq-block-max":
         block_scales = _read_f32_vector(
             out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"])
         )
         block_size = int(tensor_meta.get("block_scale_size") or 32)
-        decoded = _apply_block_max_scales(decoded, block_scales, block_size)
+        decoded = _apply_block_max_scales_numpy(decoded, block_scales, block_size)
         awq_meta = tensor_meta.get("awq_col_scales")
         if awq_meta:
             awq_scales = _read_f32_vector(
                 out_dir / awq_meta["path"], int(awq_meta["count"])
             )
-            decoded = _apply_col_l2_scales(decoded, tensor_meta["shape"], awq_scales)
+            decoded = _apply_col_l2_scales_numpy(decoded, tensor_meta["shape"], awq_scales)
 
     salient = tensor_meta.get("salient")
     if salient:
         s_idx, s_val = _read_salient(out_dir / salient["indices"], out_dir / salient["weights"])
-        # SLRQ: re-inject salient weights AFTER scaling to avoid double-scaling.
-        block_size = int(tensor_meta.get("block_scale_size") or 32)
-        for b_idx, (local_idx, weight) in enumerate(zip(s_idx, s_val)):
-            flat_idx = b_idx * block_size + int(local_idx)
-            if flat_idx < len(decoded):
-                decoded[flat_idx] = float(weight)
+        if s_idx.size:
+            block_size = int(tensor_meta.get("block_scale_size") or 32)
+            b_count = s_idx.shape[0]
+            flat_indices = np.arange(b_count, dtype=np.int64) * block_size + s_idx.astype(np.int64, copy=False)
+            mask = flat_indices < decoded.shape[0]
+            decoded[flat_indices[mask]] = s_val[mask]
 
     return decoded
 
@@ -146,18 +149,17 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
     outl = tm.get("outliers")
     if outl:
         positions, values = _read_outliers(out_dir / outl["positions"], out_dir / outl["values"])
-        if positions:
-            pos_t = torch.tensor(list(positions), dtype=torch.long, device=device)
-            val_t = torch.tensor(list(values), dtype=torch.float32, device=device)
+        if positions.size:
+            pos_t = torch.from_numpy(positions.astype(np.int64, copy=False)).to(device)
+            val_t = torch.from_numpy(values).to(device)
             decoded[pos_t] = val_t
 
-    # Re-inject Concept Pillars (FP16)
     pillars = tm.get("pillars")
     if pillars:
         positions, values = _read_pillars(out_dir / pillars["positions"], out_dir / pillars["values"])
-        if positions:
-            pos_t = torch.tensor(list(positions), dtype=torch.long, device=device)
-            val_t = torch.tensor(list(values), dtype=torch.float32, device=device)
+        if positions.size:
+            pos_t = torch.from_numpy(positions.astype(np.int64, copy=False)).to(device)
+            val_t = torch.from_numpy(values).to(device)
             decoded[pos_t] = val_t
 
     rotation = tm.get("rotation", "none")
@@ -169,7 +171,8 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
             cols *= int(s)
         arr = decoded[:rows * cols].reshape(rows, cols)
         if rotation == "hadamard":
-            unrotated = torch.from_numpy(_fwht_numpy(arr.cpu().numpy())).to(device)
+            block_size = _hadamard_block_size(cols)
+            unrotated = _block_fwht_torch(arr, block_size)
         else:
             q = torch.from_numpy(_generate_orthogonal_numpy(cols, seed)).to(device)
             unrotated = arr @ q.T
