@@ -193,4 +193,4 @@ def _unrotate_flat(flat, shape, rotation: str, seed: int):
     else:
         q = _generate_orthogonal_numpy(cols, seed)
         unrotated = arr @ q.T
-    return unrotated.reshape(-1).tolist()
+    return unrotated.reshape(-1)

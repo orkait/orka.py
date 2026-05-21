@@ -48,6 +48,7 @@ from orka._util import (
     _source_signature,
 )
 from orka._checkpoint import _load_tensors
+from orka._features import AWQ_DISABLED_MESSAGE, awq_feature_enabled
 from orka.codebook import (
     _codebook_cache_key,
     _codebook_cache_load,
@@ -194,12 +195,13 @@ def _build_tensor_manifest_entry(
         f"{safe}.indices" if n_stages == 1 else f"{safe}.s0.indices"
     )
     index_bytes_total = sum(s["index_bytes"] for s in c["stages_meta"])
+    vector_count = c.get("vector_count") or (c["packed_values"] // c["group_size"])
     return {
         "name": c["name"],
         "shape": c["shape"],
         "packed_values": c["packed_values"],
         "padded_values": c["padded_values"],
-        "vector_count": len(c["vectors_orig"]),
+        "vector_count": vector_count,
         "training_vector_count": first["training_vector_count"],
         "group_size": c["group_size"],
         "codebook_size": first["codebook_size"],
@@ -282,6 +284,9 @@ def _persist_manifest(
                 pillar_meta=pillar_meta,
             )
         )
+        c["source_flat"] = None
+        c["decoded_sum"] = None
+        c["vectors_orig"] = None
 
     manifest["total_index_bytes"] = total_index_bytes
     manifest["tensor_count"] = len(manifest["tensors"])
@@ -418,17 +423,18 @@ def _run_em_aq_refinement(
         c["decoded_sum"] = _offload_to_cpu(current_full_sum)
         del current_full_sum
         c["refined_metrics"] = _stage_quality_metrics(c, backend)
-        
-        # Free ALL stage indices and vectors from RAM now that we're done!
+        c["source_flat"] = None
+        c["decoded_sum"] = None
+
         for stage_i in range(c_n_stages):
             if "indices" in c["stages_data"][stage_i]:
                 c["stages_data"][stage_i]["indices"] = None
-        
+
         if "vectors_orig" in c:
             c["vectors_orig"] = None
         if "vectors" in c:
             c["vectors"] = None
-            
+
         import gc
         gc.collect()
 
@@ -453,12 +459,15 @@ def pack_checkpoint(
     awq_activations: dict | None = None,
     awq_alpha: float = 0.5,
     max_tensors: int | None = None,
+    only_tensors: list[str] | None = None,
     progress_file: Path | None = None,
     sensitivity_map: dict | None = None,
     codebook_cache_dir: Path | None = None,
     block_scale_size: int = 32,
     em_aq_passes: int = 3,
     slrq_salient: bool = True,
+    tensor_partition_count: int | None = None,
+    tensor_partition_index: int | None = None,
 ) -> dict:
     if codebook_mode not in {"per-tensor", "global", "family"}:
         raise ValueError(
@@ -476,6 +485,10 @@ def pack_checkpoint(
         raise ValueError(
             "normalization must be 'none', 'block-max', 'awq', 'awq-block-max', or 'slrq-block'"
         )
+    if (
+        normalization in {"awq", "awq-block-max"} or awq_activations is not None
+    ) and not awq_feature_enabled():
+        raise RuntimeError(AWQ_DISABLED_MESSAGE)
     if rotation not in {"none", "orthogonal", "hadamard"}:
         raise ValueError("rotation must be 'none', 'orthogonal', or 'hadamard'")
     if backend == "torch":
@@ -483,6 +496,31 @@ def pack_checkpoint(
         resolved_device = str(_resolve_torch_device(device))
     else:
         resolved_device = "cpu"
+
+    if tensor_partition_count is not None:
+        if tensor_partition_count < 1:
+            raise ValueError("tensor_partition_count must be >= 1")
+        if tensor_partition_index is None:
+            raise ValueError(
+                "tensor_partition_index is required when tensor_partition_count is set"
+            )
+        if tensor_partition_index < 0 or tensor_partition_index >= tensor_partition_count:
+            raise ValueError(
+                "tensor_partition_index must be in [0, tensor_partition_count)"
+            )
+
+    if (
+        tensor_partition_count is not None
+        and tensor_partition_count > 1
+        and codebook_mode != "per-tensor"
+    ):
+        raise ValueError(
+            "tensor partitions require per-tensor codebooks. Use --codebook-mode per-tensor."
+        )
+
+    if tensor_partition_count == 1:
+        tensor_partition_count = 1
+        tensor_partition_index = 0
 
     if rotation == "orthogonal" and rotation_seed is None:
         rotation_seed = int.from_bytes(os.urandom(8), "little")
@@ -543,6 +581,12 @@ def pack_checkpoint(
         "rotation": rotation,
         "rotation_seed": rotation_seed,
         "awq_enabled": awq_activations is not None,
+        "tensor_partition_count": (
+            None if tensor_partition_count is None else tensor_partition_count
+        ),
+        "tensor_partition_index": (
+            None if tensor_partition_index is None else tensor_partition_index
+        ),
         "tensors": [],
     }
 
@@ -564,15 +608,23 @@ def pack_checkpoint(
     prefetch_queue = queue.Queue(maxsize=4)
     prefetch_done = threading.Event()
     _prefetch_exc: list[BaseException] = []
+    _prefetch_state = {"candidate_count": 0}
 
     def _prefetch_worker():
         try:
             tensors_emitted = 0
             for name, tensor in _load_tensors(source):
                 _check_ram_cap()
+
+                if only_tensors is not None:
+                    base_name = name.replace(".weight", "")
+                    if name not in only_tensors and base_name not in only_tensors:
+                        _passthrough[name] = tensor
+                        continue
+
                 if max_tensors is not None and tensors_emitted >= max_tensors:
                     break
-                
+
                 shape = _tensor_shape(tensor)
                 name_lower = name.lower()
                 is_candidate = len(shape) >= 2
@@ -592,6 +644,14 @@ def pack_checkpoint(
                 if name.replace(".weight", "") in skipped_tensors or name in skipped_tensors:
                     _passthrough[name] = tensor
                     continue
+
+                if tensor_partition_count is not None:
+                    slot = _prefetch_state["candidate_count"] % tensor_partition_count
+                    _prefetch_state["candidate_count"] += 1
+                    if slot != tensor_partition_index:
+                        continue
+                else:
+                    _prefetch_state["candidate_count"] += 1
 
                 row_scales = None
                 source_flat = None
@@ -662,6 +722,7 @@ def pack_checkpoint(
                     "vector_weights": vw, "stages_data": {},
                 })
                 tensors_emitted += 1
+
         except BaseException as exc:
             _prefetch_exc.append(exc)
         finally:
@@ -755,11 +816,17 @@ def pack_checkpoint(
         if isinstance(exc, (SystemRAMExceededError, CappedOutOfMemoryError)):
             raise type(exc)(f"prefetch worker: {exc}") from exc
         raise RuntimeError(f"prefetch worker failed: {exc}") from exc
-    if not candidates:
+    if not candidates and tensor_partition_count is None:
         raise RuntimeError(
             "prefetch worker produced 0 candidates - no quantizable tensors found "
             "(check model path, tensor shapes, and device errors above)"
         )
+    if not candidates and tensor_partition_count is not None:
+        if _prefetch_state["candidate_count"] == 0:
+            raise RuntimeError(
+                "prefetch worker produced 0 candidates - no quantizable tensors found "
+                "(check model path, tensor shapes, and device errors above)"
+            )
 
     if _passthrough:
         passthrough_path = out_dir / "passthrough.safetensors"
@@ -1014,7 +1081,7 @@ def pack_checkpoint(
                 
             # If we are doing EM-AQ, we don't need residual/decoded_sum in RAM
             # because EM-AQ recalculates them from vectors_orig.
-            if em_aq_passes > 0 and stage_i == n_stages - 1:
+            if n_stages > 1 and codebook_mode == "per-tensor" and em_aq_passes > 0 and stage_i == n_stages - 1:
                 if "vectors_residual" in c:
                     del c["vectors_residual"]
                 if "decoded_sum" in c:

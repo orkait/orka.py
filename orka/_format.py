@@ -7,7 +7,6 @@ salient (SLRQ), and FP16 passthrough tensors.
 from __future__ import annotations
 
 import os
-import struct
 from pathlib import Path
 from typing import Sequence
 
@@ -41,13 +40,13 @@ def _write_indices(path: Path, indices: Sequence[int], index_bits: int) -> None:
 
 
 def _write_codebook(path: Path, codebook: Sequence[Sequence[float]]) -> None:
-    if _is_torch_tensor(codebook):
-        codebook = codebook.detach().cpu().tolist()
+    import numpy as np
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as f:
-        for row in codebook:
-            for value in row:
-                f.write(struct.pack("<f", float(value)))
+    if _is_torch_tensor(codebook):
+        arr = codebook.detach().cpu().to(dtype=__import__("torch").float32).numpy()
+    else:
+        arr = np.asarray(codebook, dtype=np.float32)
+    np.ascontiguousarray(arr, dtype="<f4").tofile(str(path))
 
 
 def _write_f32_vector(path: Path, values) -> None:
@@ -58,34 +57,25 @@ def _write_f32_vector(path: Path, values) -> None:
     path.write_bytes(np.asarray(values, dtype="<f4").tobytes())
 
 
-def _read_f32_vector(path: Path, expected_count: int) -> list[float]:
-    data = path.read_bytes()
-    expected = expected_count * 4
-    if len(data) != expected:
+def _read_f32_vector(path: Path, expected_count: int):
+    import numpy as np
+    arr = np.fromfile(str(path), dtype="<f4")
+    if arr.shape[0] != expected_count:
         raise ValueError(
-            f"f32 vector size mismatch for {path}: expected {expected}, got {len(data)}"
+            f"f32 vector size mismatch for {path}: expected {expected_count}, got {arr.shape[0]}"
         )
-    return [value[0] for value in struct.iter_unpack("<f", data)]
+    return arr
 
 
-
-def _read_indices(path: Path, index_bits: int, expected_count: int) -> list[int]:
-    ceiling, _, struct_fmt = _index_bit_spec(index_bits)
-    data = path.read_bytes()
-    bytes_per = ceiling // 8
-    if ceiling == 8:
-        indices = list(data)
-    else:
-        if len(data) % bytes_per:
-            raise ValueError(
-                f"index file size not multiple of {bytes_per} bytes: {path}"
-            )
-        indices = [value[0] for value in struct.iter_unpack(struct_fmt, data)]
-    if len(indices) != expected_count:
+def _read_indices(path: Path, index_bits: int, expected_count: int):
+    import numpy as np
+    _, np_dtype, _ = _index_bit_spec(index_bits)
+    arr = np.fromfile(str(path), dtype=np_dtype)
+    if arr.shape[0] != expected_count:
         raise ValueError(
-            f"index count mismatch for {path}: expected {expected_count}, got {len(indices)}"
+            f"index count mismatch for {path}: expected {expected_count}, got {arr.shape[0]}"
         )
-    return indices
+    return arr
 
 
 def _write_passthrough_tensors(path: Path, tensors: dict) -> None:
@@ -126,7 +116,7 @@ def _write_outliers(idx_path: Path, val_path: Path, positions, values) -> None:
     val_arr.astype("<f4").tofile(str(val_path))
 
 
-def _read_outliers(idx_path: Path, val_path: Path) -> tuple[list[int], list[float]]:
+def _read_outliers(idx_path: Path, val_path: Path):
     try:
         import numpy as np
     except Exception as exc:
@@ -135,7 +125,7 @@ def _read_outliers(idx_path: Path, val_path: Path) -> tuple[list[int], list[floa
     values = np.fromfile(str(val_path), dtype="<f4").astype(np.float32)
     if len(positions) != len(values):
         raise ValueError(f"outlier count mismatch: {len(positions)} != {len(values)}")
-    return positions.tolist(), values.tolist()
+    return positions, values
 
 
 def _write_pillars(idx_path: Path, val_path: Path, positions, values) -> None:
@@ -153,7 +143,7 @@ def _write_pillars(idx_path: Path, val_path: Path, positions, values) -> None:
     val_arr.astype("<f2").tofile(str(val_path))
 
 
-def _read_pillars(idx_path: Path, val_path: Path) -> tuple[list[int], list[float]]:
+def _read_pillars(idx_path: Path, val_path: Path):
     """Read Concept Pillars from FP16 (<f2) sidecar."""
     try:
         import numpy as np
@@ -161,7 +151,7 @@ def _read_pillars(idx_path: Path, val_path: Path) -> tuple[list[int], list[float
         raise RuntimeError("pillar reading requires numpy") from exc
     positions = np.fromfile(str(idx_path), dtype="<u4")
     values = np.fromfile(str(val_path), dtype="<f2").astype(np.float32)
-    return positions.tolist(), values.tolist()
+    return positions, values
 
 
 
