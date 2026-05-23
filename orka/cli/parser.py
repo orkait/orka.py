@@ -14,11 +14,13 @@ from orka.cli.commands import (
     cmd_inspect,
     cmd_kaggle_pack,
     cmd_pack,
+    cmd_merge_orka,
     cmd_pulse_check,
     cmd_reconstruct,
     cmd_report,
     cmd_sem_analyze,
     cmd_sem_map,
+    cmd_sem_calc,
     cmd_sweep,
     cmd_verify,
 )
@@ -103,6 +105,24 @@ def build_parser() -> argparse.ArgumentParser:
             help="disable salient-weight extraction inside slrq-block (keeps power-of-2 anchor only).",
         )
         p.add_argument(
+            "--tensor-partition-count",
+            type=int,
+            default=None,
+            help="run only this partition of quantizable tensors for multi-GPU/CPU partitioning",
+        )
+        p.add_argument(
+            "--tensor-partition-index",
+            type=int,
+            default=None,
+            help="zero-based partition index, only used with --tensor-partition-count",
+        )
+        p.add_argument(
+            "--partition-worker-count",
+            type=int,
+            default=1,
+            help="max concurrent partition workers when orchestrating multi-GPU Kaggle packing",
+        )
+        p.add_argument(
             "--rotation-seed",
             type=int,
             default=None,
@@ -184,6 +204,12 @@ def build_parser() -> argparse.ArgumentParser:
             help="limit pack to first N tensors (for fail-fast iteration)",
         )
         p.add_argument(
+            "--only-tensors",
+            nargs="+",
+            default=None,
+            help="list of exact tensor names to process; skip all others",
+        )
+        p.add_argument(
             "--codebook-cache",
             default=None,
             help="dir to cache stage-0 codebooks (zero-loss reuse on identical configs)",
@@ -219,6 +245,18 @@ def build_parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report", help="summarize an .orka artifact")
     report.add_argument("artifact")
     report.set_defaults(func=cmd_report)
+
+    merge = sub.add_parser(
+        "merge-orka",
+        help="merge partitioned .orka artifacts into one complete artifact",
+    )
+    merge.add_argument(
+        "artifacts",
+        nargs="+",
+        help="one or more partitioned .orka paths",
+    )
+    merge.add_argument("--out", required=True)
+    merge.set_defaults(func=cmd_merge_orka)
 
     verify = sub.add_parser(
         "verify", help="decode an .orka artifact and recompute source MSE"
@@ -508,7 +546,7 @@ def build_parser() -> argparse.ArgumentParser:
     sem_calc.add_argument("source", help="source checkpoint (.safetensors / .pt / .bin)")
     add_pack_args(sem_calc)
     sem_calc.add_argument("--out", required=True, help="output JSON for the calculated data")
-    sem_calc.set_defaults(func=cmd_calc)
+    sem_calc.set_defaults(func=cmd_sem_calc)
 
     selftest = sub.add_parser("selftest", help="run built-in tests")
     selftest.set_defaults(func=_run_tests)

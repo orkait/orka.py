@@ -30,6 +30,7 @@ from orka.codebook import learn_codebook_auto, quantize_vectors_auto
 from orka.eval import _summarize_eval_rows, eval_artifact, eval_sweep
 from orka.metrics import quality_metrics_from_flat
 from orka.pipeline.pack import pack_checkpoint
+from orka.merge import merge_orka_artifacts
 from orka.quant import (
     PayloadEstimate,
     classify_tensor_family,
@@ -43,6 +44,15 @@ from orka.reconstruct import reconstruct_artifact
 from orka.report import report_artifact
 from orka.sweep import sweep_checkpoint
 from orka.verify import verify_artifact
+try:
+    from orka.layers import OrkaLinear, replace_linear_with_orka
+except Exception:
+    OrkaLinear = None
+
+    def replace_linear_with_orka(*_args, **_kwargs):
+        raise RuntimeError(
+            "Torch is required for layer helpers. Install torch to use OrkaLinear."
+        )
 
 __all__ = [
     "BackgroundWriter",
@@ -64,8 +74,11 @@ __all__ = [
     "quant_spec_from_sizes",
     "quantize_vectors_auto",
     "reconstruct_artifact",
+    "merge_orka_artifacts",
     "report_artifact",
     "rvq_mixed_family_stages",
     "sweep_checkpoint",
     "verify_artifact",
+    "OrkaLinear",
+    "replace_linear_with_orka",
 ]
