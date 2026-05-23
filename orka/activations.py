@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
+from orka._features import ensure_awq_feature_enabled
 from orka.eval.prompts import _read_prompt_file
 
 
@@ -68,6 +69,11 @@ import argparse
 
 
 def _load_awq_activations(args: argparse.Namespace):
+    if getattr(args, "awq_activations_file", None) or getattr(
+        args, "awq_calibration", None
+    ):
+        ensure_awq_feature_enabled()
+
     if getattr(args, "awq_activations_file", None):
         import json
         import torch

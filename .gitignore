@@ -16,3 +16,9 @@ results/
 *.safetensors
 test_model.json
 .venv/
+
+# Local generated artifacts and external checkouts
+.antigravitycli/
+.local_models/
+.local_runs/
+llama.cpp/

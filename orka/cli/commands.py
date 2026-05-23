@@ -35,6 +35,7 @@ from orka.report import report_artifact
 from orka.sweep import sweep_checkpoint
 from orka.verify import verify_artifact
 from orka._checkpoint import inspect_checkpoint
+from orka.merge import merge_orka_artifacts
 
 
 def cmd_calc(args: argparse.Namespace) -> int:
@@ -119,6 +120,7 @@ def cmd_pack(args: argparse.Namespace) -> int:
             awq_activations=awq_activations,
             awq_alpha=args.awq_alpha,
             max_tensors=args.max_tensors,
+            only_tensors=args.only_tensors,
             sensitivity_map=smap,
             progress_file=Path(args.progress_file) if args.progress_file else None,
             codebook_cache_dir=Path(args.codebook_cache).expanduser()
@@ -127,6 +129,8 @@ def cmd_pack(args: argparse.Namespace) -> int:
             block_scale_size=args.block_scale_size,
             em_aq_passes=getattr(args, "em_aq_passes", 3),
             slrq_salient=getattr(args, "slrq_salient", True),
+            tensor_partition_count=args.tensor_partition_count,
+            tensor_partition_index=args.tensor_partition_index,
         )
         print(
             json.dumps(
@@ -143,7 +147,25 @@ def cmd_pack(args: argparse.Namespace) -> int:
         _stop_ram_monitor()
 
 
-def cmd_calc(args: argparse.Namespace) -> int:
+def cmd_merge_orka(args: argparse.Namespace) -> int:
+    input_artifacts = [Path(path) for path in args.artifacts]
+    out_dir = Path(args.out)
+    merged = merge_orka_artifacts(input_artifacts=input_artifacts, out_dir=out_dir)
+    print(
+        json.dumps(
+            {
+                "out": str(out_dir),
+                "tensor_count": merged["tensor_count"],
+                "total_index_bytes": merged["total_index_bytes"],
+                "partitions": len(input_artifacts),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_sem_calc(args: argparse.Namespace) -> int:
     """Pre-calculate and save data (like AWQ scales)."""
     awq_activations = _load_awq_activations(args)
     if awq_activations:
