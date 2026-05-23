@@ -199,11 +199,16 @@ def _kmeans_parallel_init_numpy(rows, k: int, seed: int | None = None, oversampl
 
     return centroids[:k].astype(np.float32).copy()
 
-def _numpy_assign(vectors, codebook, chunk_size: int = 65536):
+def _numpy_assign(vectors, codebook, chunk_size: int = 65536, r_norm_sq=None):
     import numpy as np
 
     rows = np.asarray(vectors, dtype=np.float32)
     centroids = np.asarray(codebook, dtype=np.float32)
+    row_norms = None
+    if r_norm_sq is not None:
+        row_norms = np.asarray(r_norm_sq, dtype=np.float32).reshape(-1)
+        if row_norms.shape[0] != rows.shape[0]:
+            raise ValueError("r_norm_sq length must match vectors")
     indices = np.empty(rows.shape[0], dtype=np.int64)
     total = 0.0
     width = rows.shape[1]
@@ -217,13 +222,41 @@ def _numpy_assign(vectors, codebook, chunk_size: int = 65536):
     for start in range(0, rows.shape[0], effective_chunk):
         end = min(start + effective_chunk, rows.shape[0])
         chunk = rows[start:end]
-        r_norm_sq = np.sum(chunk * chunk, axis=1, dtype=np.float32)
-        dists = r_norm_sq[:, None] + c_norm_sq[None, :] - 2.0 * np.dot(chunk, centroids.T)
+        chunk_norm_sq = (
+            np.sum(chunk * chunk, axis=1, dtype=np.float32)
+            if row_norms is None
+            else row_norms[start:end]
+        )
+        dists = (
+            chunk_norm_sq[:, None]
+            + c_norm_sq[None, :]
+            - 2.0 * np.dot(chunk, centroids.T)
+        )
         chosen = np.argmin(dists, axis=1)
         indices[start:end] = chosen
         total += float(dists[np.arange(chosen.shape[0]), chosen].sum())
 
     return indices, total / (rows.shape[0] * width)
+
+
+def _numpy_centroid_sums(rows, indices, k: int):
+    import numpy as np
+
+    vectors = np.asarray(rows, dtype=np.float32)
+    assignments = np.asarray(indices, dtype=np.int64)
+    if assignments.shape[0] != vectors.shape[0]:
+        raise ValueError("indices length must match rows")
+    if assignments.size and (assignments.min() < 0 or assignments.max() >= k):
+        raise IndexError("centroid index out of bounds")
+
+    sums = np.empty((k, vectors.shape[1]), dtype=np.float32)
+    for dim in range(vectors.shape[1]):
+        sums[:, dim] = np.bincount(
+            assignments,
+            weights=vectors[:, dim],
+            minlength=k,
+        )[:k]
+    return sums
 
 
 def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_norm_sq=None):
@@ -315,6 +348,8 @@ def _learn_codebook_numpy(
     else:
         codebook = _kmeans_parallel_init_numpy(rows, k, seed=seed)
 
+    r_norm_sq = np.sum(rows * rows, axis=1, dtype=np.float32)
+
     from tqdm import tqdm
     pbar = tqdm(range(effective_iters), desc="      K-Means Iterations", leave=False)
     report_interval = max(1, effective_iters // 5)
@@ -322,14 +357,13 @@ def _learn_codebook_numpy(
         if (iter_i + 1) % report_interval == 0 or iter_i == 0 or iter_i == effective_iters - 1:
             print(f"      [Lloyd] Iteration {iter_i + 1}/{effective_iters}", flush=True)
         _check_ram_cap()
-        indices, _ = _numpy_assign(rows, codebook)
-        sums = np.zeros_like(codebook)
+        indices, _ = _numpy_assign(rows, codebook, r_norm_sq=r_norm_sq)
+        sums = _numpy_centroid_sums(rows, indices, k)
         counts = np.bincount(indices, minlength=k).astype(np.float32)
-        np.add.at(sums, indices, rows)
         nonzero = counts > 0
         codebook[nonzero] = sums[nonzero] / counts[nonzero, None]
 
-    indices, mse = _numpy_assign(rows, codebook)
+    indices, mse = _numpy_assign(rows, codebook, r_norm_sq=r_norm_sq)
     return codebook, indices, float(mse)
 
 
