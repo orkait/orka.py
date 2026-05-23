@@ -57,7 +57,10 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict):
     outl = tensor_meta.get("outliers")
     if outl:
         positions, values = _read_outliers(
-            out_dir / outl["positions"], out_dir / outl["values"]
+            out_dir / outl["positions"],
+            out_dir / outl["values"],
+            outl.get("positions_dtype", "uint32"),
+            outl.get("values_dtype", "float32"),
         )
         if positions.size:
             decoded[positions.astype(np.int64, copy=False)] = values
@@ -102,7 +105,12 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict):
 
     salient = tensor_meta.get("salient")
     if salient:
-        s_idx, s_val = _read_salient(out_dir / salient["indices"], out_dir / salient["weights"])
+        s_idx, s_val = _read_salient(
+            out_dir / salient["indices"],
+            out_dir / salient["weights"],
+            salient.get("indices_dtype", "uint32"),
+            salient.get("weights_dtype", "float32"),
+        )
         if s_idx.size:
             block_size = int(tensor_meta.get("block_scale_size") or 32)
             b_count = s_idx.shape[0]
@@ -148,7 +156,12 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
 
     outl = tm.get("outliers")
     if outl:
-        positions, values = _read_outliers(out_dir / outl["positions"], out_dir / outl["values"])
+        positions, values = _read_outliers(
+            out_dir / outl["positions"],
+            out_dir / outl["values"],
+            outl.get("positions_dtype", "uint32"),
+            outl.get("values_dtype", "float32"),
+        )
         if positions.size:
             pos_t = torch.from_numpy(positions.astype(np.int64, copy=False)).to(device)
             val_t = torch.from_numpy(values).to(device)
@@ -213,8 +226,12 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
 
     salient = tm.get("salient")
     if salient:
-        s_idx_np = np.fromfile(str(out_dir / salient["indices"]), dtype="<u4")
-        s_val_np = np.fromfile(str(out_dir / salient["weights"]), dtype="<f4")
+        s_idx_np, s_val_np = _read_salient(
+            out_dir / salient["indices"],
+            out_dir / salient["weights"],
+            salient.get("indices_dtype", "uint32"),
+            salient.get("weights_dtype", "float32"),
+        )
         
         s_idx = torch.from_numpy(s_idx_np.astype(np.int64)).to(device)
         s_val = torch.from_numpy(s_val_np).to(device)
@@ -230,4 +247,3 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
         decoded[flat_indices[mask]] = s_val[mask]
 
     return decoded.reshape(shape)
-

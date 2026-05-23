@@ -6,6 +6,9 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
+import sys
+import tarfile
 import tempfile
 import time
 from pathlib import Path
@@ -20,6 +23,7 @@ from orka.quant import (
     is_rvq_mixed_spec,
     rvq_mixed_family_stages,
 )
+from orka.merge import merge_orka_artifacts
 from orka.report import report_artifact
 
 
@@ -104,6 +108,203 @@ def _hf_upload_with_retry(
     raise RuntimeError(f"Upload failed after {max_retries} attempts") from last_exc
 
 
+def _append_arg(cmd: list[str], flag: str, value) -> None:
+    if value is not None:
+        cmd.extend([flag, str(value)])
+
+
+def _visible_cuda_ids() -> list[str]:
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible:
+        return [item.strip() for item in visible.split(",") if item.strip()]
+    try:
+        import torch
+        return [str(i) for i in range(torch.cuda.device_count())]
+    except Exception:
+        return []
+
+
+def _build_partition_pack_cmd(
+    args: argparse.Namespace,
+    source_file: Path,
+    part_dir: Path,
+    part_index: int,
+    part_count: int,
+    device: str,
+    sensitivity_map: Path | None,
+) -> list[str]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "orka",
+        "pack",
+        str(source_file),
+        "--out",
+        str(part_dir),
+        "--group-size",
+        str(args.group_size),
+        "--codebook-size",
+        str(args.codebook_size),
+        "--codebook-mode",
+        args.codebook_mode,
+        "--backend",
+        args.backend,
+        "--device",
+        device,
+        "--normalization",
+        args.normalization,
+        "--block-scale-size",
+        str(args.block_scale_size),
+        "--rotation",
+        args.rotation,
+        "--iterations",
+        str(args.iterations),
+        "--outlier-frac",
+        str(args.outlier_frac),
+        "--awq-alpha",
+        str(args.awq_alpha),
+        "--em-aq-passes",
+        str(getattr(args, "em_aq_passes", 3)),
+        "--tensor-partition-count",
+        str(part_count),
+        "--tensor-partition-index",
+        str(part_index),
+    ]
+    _append_arg(cmd, "--quant-mode", args.quant_mode)
+    if getattr(args, "codebook_sizes", None):
+        cmd.append("--codebook-sizes")
+        cmd.extend(str(value) for value in args.codebook_sizes)
+    _append_arg(cmd, "--rotation-seed", args.rotation_seed)
+    _append_arg(cmd, "--sample-vectors", args.sample_vectors)
+    _append_arg(cmd, "--max-values-per-tensor", args.max_values_per_tensor)
+    _append_arg(cmd, "--max-tensors", args.max_tensors)
+    _append_arg(cmd, "--max-gpu-mem-gb", args.max_gpu_mem_gb)
+    _append_arg(cmd, "--max-system-ram-gb", getattr(args, "max_system_ram_gb", None))
+    _append_arg(cmd, "--workload-budget-gb", getattr(args, "workload_budget_gb", None))
+    _append_arg(cmd, "--max-cpu-threads", getattr(args, "max_cpu_threads", None))
+    _append_arg(cmd, "--awq-calibration", args.awq_calibration)
+    _append_arg(cmd, "--awq-model-dir", args.awq_model_dir)
+    _append_arg(cmd, "--awq-activations-file", getattr(args, "awq_activations_file", None))
+    _append_arg(cmd, "--calibration-max-prompts", args.calibration_max_prompts)
+    _append_arg(cmd, "--calibration-max-length", args.calibration_max_length)
+    _append_arg(cmd, "--calibration-max-samples", args.calibration_max_samples)
+    if getattr(args, "progress_file", None):
+        progress = Path(args.progress_file)
+        child_progress = progress.with_name(f"{progress.stem}.part-{part_index}{progress.suffix}")
+        cmd.extend(["--progress-file", str(child_progress)])
+    if sensitivity_map is not None:
+        cmd.extend(["--sensitivity-map", str(sensitivity_map)])
+    if getattr(args, "only_tensors", None):
+        cmd.append("--only-tensors")
+        cmd.extend(args.only_tensors)
+    if getattr(args, "codebook_cache", None):
+        cache_dir = Path(args.codebook_cache) / f"part-{part_index}"
+        cmd.extend(["--codebook-cache", str(cache_dir)])
+    if not getattr(args, "slrq_salient", True):
+        cmd.append("--no-slrq-salient")
+    return cmd
+
+
+def _run_partitioned_pack(
+    args: argparse.Namespace,
+    source_file: Path,
+    out_dir: Path,
+    sensitivity_map_data: dict | None,
+) -> dict:
+    part_count = int(args.tensor_partition_count)
+    if part_count < 2:
+        raise ValueError("partitioned Kaggle pack requires at least two partitions")
+    if args.backend != "torch" or not str(args.device).startswith("cuda"):
+        raise ValueError("automatic partition workers require --backend torch --device cuda")
+
+    worker_count = int(getattr(args, "partition_worker_count", 1) or 1)
+    if worker_count < 1:
+        raise ValueError("partition_worker_count must be >= 1")
+    worker_count = min(worker_count, part_count)
+    if worker_count > 1 and getattr(args, "max_system_ram_gb", None) is not None:
+        print(
+            "WARNING: --max-system-ram-gb is per child process, not a notebook-wide RAM cap. "
+            "Use --partition-worker-count 1 for memory-first Kaggle runs.",
+            flush=True,
+        )
+
+    cuda_ids = _visible_cuda_ids()
+    if len(cuda_ids) < part_count:
+        raise RuntimeError(
+            f"requested {part_count} partitions but only {len(cuda_ids)} CUDA devices are visible"
+        )
+
+    if out_dir.exists() and any(out_dir.iterdir()):
+        raise RuntimeError(f"output directory already exists with content: {out_dir}")
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    sensitivity_map = None
+    if getattr(args, "sensitivity_map", None):
+        sensitivity_map = Path(args.sensitivity_map)
+    elif sensitivity_map_data is not None:
+        sensitivity_map = out_dir.parent / "orka_auto_sensitivity_map.json"
+        sensitivity_map.write_text(json.dumps(sensitivity_map_data, indent=2) + "\n")
+
+    part_dirs = [out_dir.parent / f"{out_dir.name}.part-{i}" for i in range(part_count)]
+    for part_dir in part_dirs:
+        if part_dir.exists():
+            shutil.rmtree(part_dir)
+
+    failed: list[int] = []
+    print(
+        f"--- Launching {part_count} Kaggle partitions with {worker_count} concurrent worker(s) ---",
+        flush=True,
+    )
+    for start in range(0, part_count, worker_count):
+        batch = list(range(start, min(start + worker_count, part_count)))
+        procs: list[tuple[int, subprocess.Popen]] = []
+        for offset, i in enumerate(batch):
+            part_dir = part_dirs[i]
+            env = os.environ.copy()
+            gpu_id = cuda_ids[offset]
+            env["CUDA_VISIBLE_DEVICES"] = gpu_id
+            cmd = _build_partition_pack_cmd(
+                args=args,
+                source_file=source_file,
+                part_dir=part_dir,
+                part_index=i,
+                part_count=part_count,
+                device="cuda:0",
+                sensitivity_map=sensitivity_map,
+            )
+            print(
+                f"Partition {i}/{part_count - 1}: physical GPU {gpu_id} -> logical cuda:0",
+                flush=True,
+            )
+            procs.append((i, subprocess.Popen(cmd, env=env)))
+
+        for i, proc in procs:
+            code = proc.wait()
+            if code != 0:
+                failed.append(i)
+        if failed:
+            break
+    if failed:
+        raise RuntimeError(f"partition workers failed: {failed}")
+
+    print("--- Merging partition artifacts ---", flush=True)
+    return merge_orka_artifacts(part_dirs, out_dir)
+
+
+def _write_artifact_tarball(out_dir: Path, on_kaggle: bool) -> Path:
+    tar_path = (
+        Path("/kaggle/working") / f"{out_dir.name}.tar.gz"
+        if on_kaggle
+        else out_dir.parent / f"{out_dir.name}.tar.gz"
+    )
+    if tar_path.exists():
+        tar_path.unlink()
+    print(f"--- Writing artifact tarball: {tar_path} ---", flush=True)
+    with tarfile.open(tar_path, "w:gz") as tar:
+        tar.add(out_dir, arcname=out_dir.name)
+    return tar_path
+
+
 def cmd_kaggle_pack(args: argparse.Namespace) -> int:
     try:
         from huggingface_hub import HfApi
@@ -167,14 +368,18 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
 
         if args.awq_calibration:
             args.awq_model_dir = str(src_dir)
-        _kp_awq = _load_awq_activations(args)
+        partition_parent = (
+            args.tensor_partition_count is not None
+            and args.tensor_partition_count > 1
+            and args.tensor_partition_index is None
+        )
+        _kp_awq = None if partition_parent else _load_awq_activations(args)
 
         _kp_smap = None
         if getattr(args, "sensitivity_map", None):
             with open(args.sensitivity_map) as f:
                 _kp_smap = json.load(f)
         elif not getattr(args, "skip_sensitive", False) and on_kaggle:
-            # AUTO-GENERATE PILLARS ON KAGGLE
             try:
                 print("--- Auto-generating Pillar Map (Frequency + Magnitude) ---", flush=True)
                 from transformers import AutoTokenizer
@@ -184,6 +389,13 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
                 from safetensors import safe_open
                 
                 tok = AutoTokenizer.from_pretrained(src_dir, trust_remote_code=True)
+                calib_path = (
+                    Path(args.eval_prompts)
+                    if getattr(args, "eval_prompts", None)
+                    else (Path(args.awq_calibration) if args.awq_calibration else None)
+                )
+                if calib_path is None or not calib_path.exists():
+                    raise RuntimeError("no calibration/eval prompts available")
                 with open(calib_path) as f:
                     text = f.read()
                 counts = Counter(tok.encode(text))
@@ -208,7 +420,6 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
                 n_rank = rankdata(norms) / actual_vocab
                 score = (f_rank * 0.5) + (n_rank * 0.5)
                 
-                # Protect top 10%
                 top_count = int(actual_vocab * 0.10)
                 top_ids = np.argsort(score)[::-1][:top_count].tolist()
                 _kp_smap = {"top_tokens": top_ids, "layers": []}
@@ -220,39 +431,44 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
             except Exception as exc:
                 print(f"WARNING: Auto-pillar failed ({exc}); proceeding without pillars", flush=True)
 
-        _apply_gpu_memory_cap(args.backend, args.device, args.max_gpu_mem_gb)
-        _apply_system_ram_cap(
-            getattr(args, "max_system_ram_gb", None),
-            getattr(args, "workload_budget_gb", None),
-        )
+        if partition_parent:
+            manifest = _run_partitioned_pack(args, source_file, out_dir, _kp_smap)
+        else:
+            _apply_gpu_memory_cap(args.backend, args.device, args.max_gpu_mem_gb)
+            _apply_system_ram_cap(
+                getattr(args, "max_system_ram_gb", None),
+                getattr(args, "workload_budget_gb", None),
+            )
 
-        manifest = pack_checkpoint(
-            source=source_file,
-            out_dir=out_dir,
-            group_size=args.group_size,
-            codebook_size=_kp_sizes[0],
-            codebook_sizes=_kp_sizes if _kp_family_map is None else None,
-            family_stages_map=_kp_family_map,
-            codebook_mode=_kp_codebook_mode,
-            backend=args.backend,
-            device=args.device,
-            normalization=args.normalization,
-            block_scale_size=args.block_scale_size,
-            rotation=args.rotation,
-            rotation_seed=args.rotation_seed,
-            sample_vectors=args.sample_vectors,
-            iterations=args.iterations,
-            max_values_per_tensor=args.max_values_per_tensor,
-            outlier_frac=args.outlier_frac,
-            awq_activations=_kp_awq,
-            awq_alpha=args.awq_alpha,
-            progress_file=Path(args.progress_file) if args.progress_file else None,
-            sensitivity_map=_kp_smap,
-            max_tensors=args.max_tensors,
-            em_aq_passes=getattr(args, "em_aq_passes", 3),
-            slrq_salient=getattr(args, "slrq_salient", True),
-            codebook_cache_dir=Path(args.codebook_cache) if getattr(args, "codebook_cache", None) else None,
-        )
+            manifest = pack_checkpoint(
+                source=source_file,
+                out_dir=out_dir,
+                group_size=args.group_size,
+                codebook_size=_kp_sizes[0],
+                codebook_sizes=_kp_sizes if _kp_family_map is None else None,
+                family_stages_map=_kp_family_map,
+                codebook_mode=_kp_codebook_mode,
+                backend=args.backend,
+                device=args.device,
+                normalization=args.normalization,
+                block_scale_size=args.block_scale_size,
+                rotation=args.rotation,
+                rotation_seed=args.rotation_seed,
+                sample_vectors=args.sample_vectors,
+                iterations=args.iterations,
+                max_values_per_tensor=args.max_values_per_tensor,
+                outlier_frac=args.outlier_frac,
+                awq_activations=_kp_awq,
+                awq_alpha=args.awq_alpha,
+                progress_file=Path(args.progress_file) if args.progress_file else None,
+                sensitivity_map=_kp_smap,
+                max_tensors=args.max_tensors,
+                em_aq_passes=getattr(args, "em_aq_passes", 3),
+                slrq_salient=getattr(args, "slrq_salient", True),
+                codebook_cache_dir=Path(args.codebook_cache) if getattr(args, "codebook_cache", None) else None,
+                tensor_partition_count=args.tensor_partition_count,
+                tensor_partition_index=args.tensor_partition_index,
+            )
 
         artifact_report = report_artifact(out_dir)
         pack_report = {
@@ -279,6 +495,12 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
         )
         report_path.write_text(json.dumps(pack_report, indent=2) + "\n")
         print(f"Pack report written to {report_path}", flush=True)
+
+        tar_path = _write_artifact_tarball(out_dir, on_kaggle)
+        pack_report["artifact_tarball"] = str(tar_path)
+        pack_report["artifact_tarball_bytes"] = tar_path.stat().st_size
+        pack_report["artifact_tarball_size"] = _human_bytes(tar_path.stat().st_size)
+        report_path.write_text(json.dumps(pack_report, indent=2) + "\n")
 
         if getattr(args, "run_eval", False):
             print("--- Running perplexity eval ---", flush=True)
@@ -350,9 +572,12 @@ _KAGGLE_CONFIG = {
     "rotation_seed":   42,
     "backend":         "torch",
     "device":          "cuda",
-    "max_gpu_mem_gb":  14.0,
-    "sample_vectors":  500000,
-    "iterations":      12,
+    "max_gpu_mem_gb":  13.0,
+    "max_system_ram_gb": 20.0,
+    "workload_budget_gb": 10.0,
+    "max_cpu_threads": 2,
+    "sample_vectors":  200000,
+    "iterations":      8,
     "outlier_frac":    0.01,
     "group_size":      1024,
     "codebook_size":   256,
@@ -365,6 +590,9 @@ _KAGGLE_CONFIG = {
     "eval_max_prompts": 50,
     "eval_max_length":  128,
     "em_aq_passes":    3,
+    "tensor_partition_count": 2,
+    "tensor_partition_index": None,
+    "partition_worker_count": 1,
 }
 
 
@@ -442,6 +670,9 @@ def bootstrap_argv(argv: list) -> None:
         "--backend",        cfg["backend"],
         "--device",         cfg["device"],
         *(["--max-gpu-mem-gb", str(cfg["max_gpu_mem_gb"])] if cfg.get("max_gpu_mem_gb") is not None else []),
+        *(["--max-system-ram-gb", str(cfg["max_system_ram_gb"])] if cfg.get("max_system_ram_gb") is not None else []),
+        *(["--workload-budget-gb", str(cfg["workload_budget_gb"])] if cfg.get("workload_budget_gb") is not None else []),
+        *(["--max-cpu-threads", str(cfg["max_cpu_threads"])] if cfg.get("max_cpu_threads") is not None else []),
         *(["--rotation-seed", str(cfg["rotation_seed"])] if cfg.get("rotation_seed") is not None else []),
         "--sample-vectors", str(cfg["sample_vectors"]),
         "--iterations",     str(cfg["iterations"]),
@@ -450,6 +681,21 @@ def bootstrap_argv(argv: list) -> None:
         "--codebook-size",  str(cfg["codebook_size"]),
         "--em-aq-passes",   str(cfg.get("em_aq_passes", 3)),
     ]
+    if cfg.get("tensor_partition_count") is not None:
+        argv += [
+            "--tensor-partition-count",
+            str(int(cfg["tensor_partition_count"])),
+        ]
+        if cfg.get("partition_worker_count") is not None:
+            argv += [
+                "--partition-worker-count",
+                str(int(cfg["partition_worker_count"])),
+            ]
+        if cfg.get("tensor_partition_index") is not None:
+            argv += [
+                "--tensor-partition-index",
+                str(int(cfg["tensor_partition_index"])),
+            ]
     if cfg.get("awq_calibration"):
         argv += [
             "--awq-calibration", str(calib_path),

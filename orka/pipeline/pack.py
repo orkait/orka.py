@@ -21,6 +21,7 @@ from orka._format import (
     _write_indices,
     _write_outliers,
     _write_passthrough_tensors,
+    _write_pillars,
     _write_salient,
 )
 from orka._runtime import (
@@ -131,11 +132,15 @@ def _persist_tensor_sidecars(c: dict, tensor_dir: Path, out_dir: Path) -> tuple:
     if c.get("outlier_positions") is not None and len(c["outlier_positions"]) > 0:
         out_idx_path = tensor_dir / f"{safe}.outliers.idx"
         out_val_path = tensor_dir / f"{safe}.outliers.val"
-        _write_outliers(out_idx_path, out_val_path, c["outlier_positions"], c["outlier_values"])
+        positions_dtype, values_dtype = _write_outliers(
+            out_idx_path, out_val_path, c["outlier_positions"], c["outlier_values"]
+        )
         outlier_meta = {
             "count": int(len(c["outlier_positions"])),
             "positions": str(out_idx_path.relative_to(out_dir)),
             "values": str(out_val_path.relative_to(out_dir)),
+            "positions_dtype": positions_dtype,
+            "values_dtype": values_dtype,
             "positions_bytes": out_idx_path.stat().st_size,
             "values_bytes": out_val_path.stat().st_size,
         }
@@ -157,11 +162,15 @@ def _persist_tensor_sidecars(c: dict, tensor_dir: Path, out_dir: Path) -> tuple:
     if c.get("salient_indices") is not None:
         s_idx_path = tensor_dir / f"{safe}.salient.idx"
         s_val_path = tensor_dir / f"{safe}.salient.val"
-        _write_salient(s_idx_path, s_val_path, c["salient_indices"], c["salient_weights"])
+        indices_dtype, weights_dtype = _write_salient(
+            s_idx_path, s_val_path, c["salient_indices"], c["salient_weights"]
+        )
         salient_meta = {
             "count": int(len(c["salient_weights"])),
             "indices": str(s_idx_path.relative_to(out_dir)),
             "weights": str(s_val_path.relative_to(out_dir)),
+            "indices_dtype": indices_dtype,
+            "weights_dtype": weights_dtype,
             "indices_bytes": s_idx_path.stat().st_size,
             "weights_bytes": s_val_path.stat().st_size,
         }
@@ -240,6 +249,67 @@ def _build_tensor_manifest_entry(
     }
 
 
+def _release_candidate_payload(c: dict) -> None:
+    for key in (
+        "source_flat",
+        "decoded_sum",
+        "vectors_orig",
+        "vectors",
+        "vectors_residual",
+        "row_scales",
+        "awq_col_scales",
+        "salient_weights",
+        "salient_indices",
+        "outlier_positions",
+        "outlier_values",
+        "pillar_positions",
+        "pillar_values",
+        "vector_weights",
+    ):
+        if key in c:
+            c[key] = None
+    stages_data = c.get("stages_data")
+    if isinstance(stages_data, dict):
+        for stage_data in stages_data.values():
+            if isinstance(stage_data, dict) and "indices" in stage_data:
+                stage_data["indices"] = None
+
+
+def _finalize_tensor_manifest_entry(
+    c: dict,
+    *,
+    n_stages: int,
+    group_size: int,
+    block_scale_size: int,
+    rotation: str,
+    backend: str,
+    out_dir: Path,
+    tensor_dir: Path,
+) -> dict:
+    scale_path, scale_bytes, scale_count, awq_col_meta, outlier_meta, salient_meta, pillar_meta = (
+        _persist_tensor_sidecars(c, tensor_dir, out_dir)
+    )
+    entry = _build_tensor_manifest_entry(
+        c,
+        n_stages=n_stages,
+        group_size=group_size,
+        block_scale_size=block_scale_size,
+        rotation=rotation,
+        backend=backend,
+        out_dir=out_dir,
+        tensor_dir=tensor_dir,
+        scale_path=scale_path,
+        scale_bytes=scale_bytes,
+        scale_count=scale_count,
+        awq_col_meta=awq_col_meta,
+        outlier_meta=outlier_meta,
+        salient_meta=salient_meta,
+        pillar_meta=pillar_meta,
+    )
+    _release_candidate_payload(c)
+    return entry
+
+
 def _persist_manifest(
     *,
     candidates: list,
@@ -262,11 +332,8 @@ def _persist_manifest(
         if base_name in skipped_tensors or c["name"] in skipped_tensors:
             continue
         _report_progress(progress_file, f"  Writing {c['name']} ({i + 1}/{len(candidates)})...")
-        scale_path, scale_bytes, scale_count, awq_col_meta, outlier_meta, salient_meta, pillar_meta = (
-            _persist_tensor_sidecars(c, tensor_dir, out_dir)
-        )
         manifest["tensors"].append(
-            _build_tensor_manifest_entry(
+            _finalize_tensor_manifest_entry(
                 c,
                 n_stages=n_stages,
                 group_size=group_size,
@@ -275,24 +342,13 @@ def _persist_manifest(
                 backend=backend,
                 out_dir=out_dir,
                 tensor_dir=tensor_dir,
-                scale_path=scale_path,
-                scale_bytes=scale_bytes,
-                scale_count=scale_count,
-                awq_col_meta=awq_col_meta,
-                outlier_meta=outlier_meta,
-                salient_meta=salient_meta,
-                pillar_meta=pillar_meta,
             )
         )
-        c["source_flat"] = None
-        c["decoded_sum"] = None
-        c["vectors_orig"] = None
 
     manifest["total_index_bytes"] = total_index_bytes
     manifest["tensor_count"] = len(manifest["tensors"])
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-
 
 def _offload_to_cpu(t):
     """Move torch tensor to CPU; passthrough numpy/list."""
@@ -581,6 +637,8 @@ def pack_checkpoint(
         "rotation": rotation,
         "rotation_seed": rotation_seed,
         "awq_enabled": awq_activations is not None,
+        "em_aq_passes": em_aq_passes,
+        "slrq_salient": slrq_salient,
         "tensor_partition_count": (
             None if tensor_partition_count is None else tensor_partition_count
         ),
@@ -728,6 +786,182 @@ def pack_checkpoint(
         finally:
             prefetch_done.set()
 
+    total_index_bytes = 0
+    streamed_tensor_count = 0
+
+    def _stage_spec_for_candidate(c: dict, stage_i: int):
+        if family_stages_resolved is not None:
+            stages_for_c = family_stages_resolved[c["family"]]
+            if stage_i >= len(stages_for_c):
+                return None
+            return stages_for_c[stage_i]
+        if stage_i >= len(stages_spec):
+            return None
+        return stages_spec[stage_i]
+
+    def _process_streamed_per_tensor_candidate(c: dict, stream_index: int) -> None:
+        nonlocal total_index_bytes
+        for stage_i in range(n_stages):
+            _check_ram_cap()
+            k_spec = _stage_spec_for_candidate(c, stage_i)
+            if k_spec is None:
+                continue
+
+            _report_progress(
+                progress_file,
+                f"Quantizing {c['name']} ({stream_index}) | Stage {stage_i + 1}/{n_stages} (Spec: {k_spec})",
+            )
+            safe = _safe_tensor_name(c["name"])
+            is_scalar_stage = isinstance(k_spec, str) and k_spec.startswith("s")
+            if is_scalar_stage:
+                k = 1 << int(k_spec[1:])
+                v_res = c["vectors_residual"].reshape(-1, 1)
+                c_group_size = 1
+            else:
+                k = int(k_spec)
+                v_res = c["vectors_residual"]
+                c_group_size = c["group_size"]
+
+            if backend == "torch":
+                c["vectors_orig"] = _onload(c["vectors_orig"], resolved_device)
+                v_res = _onload(v_res, resolved_device)
+                if c["decoded_sum"] is not None:
+                    c["decoded_sum"] = _onload(c["decoded_sum"], resolved_device)
+
+            cache_key = (
+                _codebook_cache_key(
+                    [
+                        "per-tensor",
+                        src_sig,
+                        c["name"],
+                        c_group_size,
+                        k,
+                        sample_vectors,
+                        iterations,
+                        backend,
+                        normalization,
+                        rotation,
+                        rotation_seed,
+                        outlier_frac,
+                        max_tensors,
+                        stage_i,
+                        "awq-weighted" if awq_activations else "unweighted",
+                    ]
+                )
+                if stage_i == 0
+                else None
+            )
+            cached = _codebook_cache_load(codebook_cache_dir, cache_key) if cache_key else None
+            if cached is not None:
+                cb = cached
+                training_count = sample_vectors or len(v_res)
+            else:
+                training = _sample_vector_rows(v_res, sample_vectors)
+                vw = c.get("vector_weights") if not is_scalar_stage else None
+                cb_seed = _derive_seed(
+                    ["per-tensor", src_sig, c["name"], c_group_size, k, stage_i]
+                )
+                cb, _, _ = learn_codebook_auto(
+                    training,
+                    min(k, len(training)),
+                    iterations,
+                    backend,
+                    resolved_device,
+                    vector_weights=vw,
+                    seed=cb_seed,
+                )
+                training_count = len(training)
+                if cache_key:
+                    _codebook_cache_save(codebook_cache_dir, cache_key, cb)
+
+            cb_path = tensor_dir / (
+                f"{safe}.codebook.f32" if n_stages == 1 else f"{safe}.s{stage_i}.codebook.f32"
+            )
+            _write_codebook(cb_path, cb)
+
+            indices, _ = quantize_vectors_auto(v_res, cb, backend, resolved_device)
+            c["stages_data"][stage_i] = {
+                "cb": cb,
+                "indices": indices,
+                "group_size": c_group_size,
+            }
+            index_bits = _index_bits_for_size(len(cb))
+            idx_path = tensor_dir / (
+                f"{safe}.indices" if n_stages == 1 else f"{safe}.s{stage_i}.indices"
+            )
+            _write_indices(idx_path, indices, index_bits)
+            stage_bytes = idx_path.stat().st_size
+            total_index_bytes += stage_bytes
+
+            decoded_raw = _decode_to_vectors_format(v_res, cb, indices, backend, resolved_device)
+            decoded = decoded_raw.reshape(c["vectors_residual"].shape) if is_scalar_stage else decoded_raw
+            if c["decoded_sum"] is None:
+                c["decoded_sum"] = decoded
+            else:
+                c["decoded_sum"] = c["decoded_sum"] + decoded
+            c["vectors_residual"] = _vectors_subtract(c["vectors_orig"], c["decoded_sum"])
+
+            if backend == "torch":
+                c["vectors_residual"] = _offload(c["vectors_residual"])
+                c["decoded_sum"] = _offload(c["decoded_sum"])
+                c["vectors_orig"] = _offload(c["vectors_orig"])
+                try:
+                    import torch as _t
+                    _t.cuda.empty_cache()
+                except Exception:
+                    pass
+
+            if (
+                n_stages > 1
+                and em_aq_passes > 0
+                and stage_i == n_stages - 1
+            ):
+                c.pop("vectors_residual", None)
+                c.pop("decoded_sum", None)
+                import gc
+                gc.collect()
+
+            c["stages_meta"].append(
+                {
+                    "stage": stage_i,
+                    "codebook": str(cb_path.relative_to(out_dir)),
+                    "codebook_size": len(cb),
+                    "index_bits": index_bits,
+                    "indices": str(idx_path.relative_to(out_dir)),
+                    "index_bytes": stage_bytes,
+                    "training_vector_count": training_count,
+                    "codebook_family": c["family"],
+                    "group_size": c_group_size,
+                }
+            )
+
+        if n_stages > 1 and em_aq_passes > 0:
+            _run_em_aq_refinement(
+                candidates=[c],
+                n_stages=n_stages,
+                skipped_tensors=skipped_tensors,
+                sample_vectors=sample_vectors,
+                backend=backend,
+                resolved_device=resolved_device,
+                tensor_dir=tensor_dir,
+                progress_file=progress_file,
+                em_aq_passes=em_aq_passes,
+            )
+
+        _BG_WRITER.wait()
+        manifest["tensors"].append(
+            _finalize_tensor_manifest_entry(
+                c,
+                n_stages=n_stages,
+                group_size=group_size,
+                block_scale_size=block_scale_size,
+                rotation=rotation,
+                backend=backend,
+                out_dir=out_dir,
+                tensor_dir=tensor_dir,
+            )
+        )
+
     prefetch_thread = threading.Thread(target=_prefetch_worker, daemon=True)
     prefetch_thread.start()
 
@@ -800,7 +1034,11 @@ def pack_checkpoint(
         c["vectors_residual"] = c["vectors"]
         c["decoded_sum"] = None
         c["stages_meta"] = []
-        candidates.append(c)
+        if codebook_mode == "per-tensor":
+            streamed_tensor_count += 1
+            _process_streamed_per_tensor_candidate(c, streamed_tensor_count)
+        else:
+            candidates.append(c)
         prefetch_queue.task_done()
 
     prefetch_thread.join()
@@ -816,12 +1054,12 @@ def pack_checkpoint(
         if isinstance(exc, (SystemRAMExceededError, CappedOutOfMemoryError)):
             raise type(exc)(f"prefetch worker: {exc}") from exc
         raise RuntimeError(f"prefetch worker failed: {exc}") from exc
-    if not candidates and tensor_partition_count is None:
+    if not candidates and streamed_tensor_count == 0 and tensor_partition_count is None:
         raise RuntimeError(
             "prefetch worker produced 0 candidates - no quantizable tensors found "
             "(check model path, tensor shapes, and device errors above)"
         )
-    if not candidates and tensor_partition_count is not None:
+    if not candidates and streamed_tensor_count == 0 and tensor_partition_count is not None:
         if _prefetch_state["candidate_count"] == 0:
             raise RuntimeError(
                 "prefetch worker produced 0 candidates - no quantizable tensors found "
@@ -832,6 +1070,14 @@ def pack_checkpoint(
         passthrough_path = out_dir / "passthrough.safetensors"
         _write_passthrough_tensors(passthrough_path, _passthrough)
         manifest["passthrough_count"] = len(_passthrough)
+
+    if codebook_mode == "per-tensor":
+        _BG_WRITER.wait()
+        manifest["total_index_bytes"] = total_index_bytes
+        manifest["tensor_count"] = len(manifest["tensors"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        return manifest
 
     total_index_bytes = 0
 
