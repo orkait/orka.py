@@ -33,7 +33,7 @@ TMP_DEPLOY="/tmp/orka_kernel_deploy"
 rm -rf "$TMP_DEPLOY"
 mkdir -p "$TMP_DEPLOY"
 
-cp "$ROOT_DIR/orka_entry_kaggle.py" "$TMP_DEPLOY/orka.py"
+cp "$SCRIPT_DIR/orka_smol_kaggle.py" "$TMP_DEPLOY/orka.py"
 cp "$SCRIPT_DIR/kernel-metadata.json" "$TMP_DEPLOY/"
 
 # Fix metadata to point to local orka.py

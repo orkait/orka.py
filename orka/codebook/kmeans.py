@@ -30,8 +30,13 @@ def _kmeans_pp_init_torch(
     if seed is not None:
         gen.manual_seed(int(seed) & ((1 << 63) - 1))
 
+    # Use FP16 on CUDA for 2× faster distance computation (ranking is identical)
+    use_half = rows.device.type == "cuda"
+    dist_dtype = torch.float16 if use_half else torch.float32
+    rows_dist = rows.to(dist_dtype)
+
     first = int(torch.randint(n, (1,), generator=gen, device=rows.device).item())
-    min_d2 = torch.sum((rows - rows[first]) ** 2, dim=1)
+    min_d2 = torch.sum((rows_dist - rows_dist[first]) ** 2, dim=1).float()
     candidate_chunks: list = [rows[first].unsqueeze(0)]
     total_candidates = 1
     candidate_cap = 5 * k  # absolute upper bound across all rounds
@@ -53,17 +58,18 @@ def _kmeans_pp_init_torch(
         if int(chosen.numel()) > per_round_cap:
             chosen = chosen[:per_round_cap]
 
-        new_centers = rows[chosen].contiguous()
-        candidate_chunks.append(new_centers)
+        new_centers = rows_dist[chosen].contiguous()
+        candidate_chunks.append(rows[chosen].contiguous())
         total_candidates += int(new_centers.shape[0])
 
         # Update min_d2 with GEMM-form distance, chunking by ~256 MB matrix budget.
         c_norm_sq = torch.sum(new_centers * new_centers, dim=1, keepdim=True).T
         c_count = int(new_centers.shape[0])
-        # 256 MB / (4 bytes * c_count) rows per chunk
-        batch_size = max(256, min(65536, (1 << 28) // (4 * max(c_count, 1))))
+        # Budget per chunk: 256 MB / (elem_size * c_count)
+        elem_size = 2 if use_half else 4
+        batch_size = max(256, min(65536, (1 << 28) // (elem_size * max(c_count, 1))))
         for i in range(0, n, batch_size):
-            batch_rows = rows[i : i + batch_size]
+            batch_rows = rows_dist[i : i + batch_size]
             r_norm_sq = torch.sum(batch_rows * batch_rows, dim=1, keepdim=True)
             dists = torch.addmm(
                 (r_norm_sq + c_norm_sq),
@@ -73,7 +79,7 @@ def _kmeans_pp_init_torch(
                 beta=1.0,
             )
             min_d2[i : i + batch_size] = torch.minimum(
-                min_d2[i : i + batch_size], dists.min(dim=1)[0]
+                min_d2[i : i + batch_size], dists.min(dim=1)[0].float()
             )
             del dists, batch_rows, r_norm_sq
         del new_centers, c_norm_sq
@@ -220,7 +226,7 @@ def _numpy_assign(vectors, codebook, chunk_size: int = 65536):
     return indices, total / (rows.shape[0] * width)
 
 
-def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536):
+def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_norm_sq=None):
     try:
         import torch
     except Exception as exc:
@@ -233,36 +239,39 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536):
 
     rows = _torch_float32_matrix(vectors, device).to(dtype)
     centroids = _torch_float32_matrix(codebook, device).to(dtype)
-    
+
     indices_parts = []
     total = 0.0
     width = int(rows.shape[1])
     k = int(centroids.shape[0])
-    
+
     # Pre-calculate squared norms for centroids: ||b||^2
     c_norm_sq = torch.sum(centroids.to(torch.float32) * centroids.to(torch.float32), dim=1, keepdim=True).T.to(dtype)
-    
+
+    if r_norm_sq is None:
+        r_norm_sq = torch.sum(rows.to(torch.float32) * rows.to(torch.float32), dim=1, keepdim=True).to(dtype)
+    else:
+        r_norm_sq = _torch_float32_matrix(r_norm_sq, device).to(dtype)
+
     effective_chunk = max(256, min(chunk_size, (1 << 28) // max(k, 1)))
 
     with torch.no_grad():
         for start in range(0, int(rows.shape[0]), effective_chunk):
             end = min(start + effective_chunk, int(rows.shape[0]))
             chunk = rows[start:end]
-            
-            # ||a - b||^2 = ||a||^2 + ||b||^2 - 2<a, b>
-            r_norm_sq = torch.sum(chunk.to(torch.float32) * chunk.to(torch.float32), dim=1, keepdim=True).to(dtype)
-            
+            r_norm_sq_chunk = r_norm_sq[start:end]
+
             dists = torch.addmm(
-                (r_norm_sq + c_norm_sq),
+                (r_norm_sq_chunk + c_norm_sq),
                 chunk,
                 centroids.T,
                 alpha=-2.0,
                 beta=1.0
             )
-            
+
             chosen = torch.argmin(dists, dim=1)
             indices_parts.append(chosen.detach().cpu())
-            
+
             # Accumulate error in float32 for precision
             total += float(
                 dists[torch.arange(chosen.shape[0], device=rows.device), chosen]
@@ -306,7 +315,12 @@ def _learn_codebook_numpy(
     else:
         codebook = _kmeans_parallel_init_numpy(rows, k, seed=seed)
 
-    for _ in range(effective_iters):
+    from tqdm import tqdm
+    pbar = tqdm(range(effective_iters), desc="      K-Means Iterations", leave=False)
+    report_interval = max(1, effective_iters // 5)
+    for iter_i in pbar:
+        if (iter_i + 1) % report_interval == 0 or iter_i == 0 or iter_i == effective_iters - 1:
+            print(f"      [Lloyd] Iteration {iter_i + 1}/{effective_iters}", flush=True)
         _check_ram_cap()
         indices, _ = _numpy_assign(rows, codebook)
         sums = np.zeros_like(codebook)
@@ -343,8 +357,16 @@ def _learn_codebook_torch(
 
     n = int(rows.shape[0])
     k = min(int(codebook_size), n)
-    # When k >= n/2 each centroid has ~1 sample on average; centroids barely move after init.
     effective_iters = min(iterations, 3) if k >= int(n * 0.9) else iterations
+
+    # Pre-resolve target dtype and pre-calculate row norms once
+    resolved = _resolve_torch_device(device)
+    use_half = resolved.type == "cuda"
+    dtype = torch.float16 if use_half else torch.float32
+
+    rows_dtype = rows.to(dtype)
+    r_norm_sq = torch.sum(rows.to(torch.float32) * rows.to(torch.float32), dim=1, keepdim=True).to(dtype)
+
     with torch.no_grad():
         if initial_codebook is not None:
             codebook = _torch_float32_matrix(initial_codebook, str(rows.device))[:k].clone()
@@ -356,8 +378,17 @@ def _learn_codebook_torch(
         sums = torch.zeros_like(codebook)
         counts = torch.zeros(k, dtype=torch.float32, device=rows.device)
 
-        for _ in range(effective_iters):
+        from tqdm import tqdm
+        pbar = tqdm(range(effective_iters), desc="      K-Means Iterations", leave=False)
+        report_interval = max(1, effective_iters // 5)
+        for iter_i in pbar:
+            if (iter_i + 1) % report_interval == 0 or iter_i == 0 or iter_i == effective_iters - 1:
+                print(f"      [Lloyd] Iteration {iter_i + 1}/{effective_iters}", flush=True)
             _check_ram_cap()
+
+            # Save old codebook to monitor convergence shift
+            old_codebook = codebook.clone()
+
             if vector_weights is not None:
                 W = torch.as_tensor(
                     vector_weights, dtype=torch.float32, device=rows.device
@@ -366,21 +397,28 @@ def _learn_codebook_torch(
                 weighted_cb = codebook * torch.sqrt(W)
                 indices, _ = _torch_assign(weighted_rows, weighted_cb, str(rows.device))
             else:
-                indices, _ = _torch_assign(rows, codebook, str(rows.device))
-            
+                indices, _ = _torch_assign(rows_dtype, codebook, str(rows.device), r_norm_sq=r_norm_sq)
+
             chosen = indices.to(device=rows.device, dtype=torch.long)
-            
+
             # Reuse buffers
             sums.zero_()
             counts.zero_()
-            
+
             sums.index_add_(0, chosen, rows)
             counts.index_put_((chosen,), torch.ones(len(chosen), device=rows.device), accumulate=True)
-            
+
             nonzero = counts > 0
             codebook[nonzero] = sums[nonzero] / counts[nonzero, None]
 
-        indices, mse = _torch_assign(rows, codebook, str(rows.device))
+            # Early stopping check: if centroids shift by less than 1e-5 relative to scale
+            if iter_i > 0:
+                max_diff = torch.max(torch.abs(codebook - old_codebook)).item()
+                if max_diff < 1e-5:
+                    print(f"      [Lloyd] Converged early at iteration {iter_i + 1} (max diff: {max_diff:.2e})", flush=True)
+                    break
+
+        indices, mse = _torch_assign(rows_dtype, codebook, str(rows.device), r_norm_sq=r_norm_sq)
     return codebook.detach().cpu(), indices, float(mse)
 
 
