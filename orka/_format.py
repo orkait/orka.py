@@ -81,12 +81,46 @@ def _index_bit_spec(index_bits: int) -> tuple[int, str, str]:
     raise ValueError(f"index_bits above 64 are not supported: got {index_bits}")
 
 
-def _write_indices(path: Path, indices: Sequence[int], index_bits: int) -> None:
+def _pack_indices(indices, bits: int):
+    """Pack integer indices into a contiguous big-endian bitstream at exact bit width.
+
+    Each index occupies exactly ``bits`` bits (MSB first); no padding to byte/int
+    boundaries except the final byte. Lossless inverse of ``_unpack_indices``.
+    """
     import numpy as np
-    ceiling, np_dtype, struct_fmt = _index_bit_spec(index_bits)
+
+    arr = np.asarray(indices, dtype=np.uint64).reshape(-1)
+    if arr.size == 0:
+        return np.zeros(0, dtype=np.uint8)
+    shifts = np.arange(bits - 1, -1, -1, dtype=np.uint64)
+    bitmat = ((arr[:, None] >> shifts) & np.uint64(1)).astype(np.uint8)
+    return np.packbits(bitmat.reshape(-1))
+
+
+def _unpack_indices(packed, bits: int, count: int):
+    """Inverse of ``_pack_indices``: recover ``count`` indices of ``bits`` width."""
+    import numpy as np
+
+    if count == 0:
+        return np.zeros(0, dtype=np.int64)
+    allbits = np.unpackbits(np.asarray(packed, dtype=np.uint8))[: count * bits]
+    bitmat = allbits.reshape(count, bits).astype(np.uint64)
+    weights = np.uint64(1) << np.arange(bits - 1, -1, -1, dtype=np.uint64)
+    return (bitmat * weights).sum(axis=1).astype(np.int64)
+
+
+def _write_indices(path: Path, indices: Sequence[int], index_bits: int) -> bool:
+    """Write indices to disk. Bit-packs when ``index_bits`` is not byte-aligned
+    (saves the padding waste of fixed-width uint8/16/32). Returns True if packed."""
+    import numpy as np
     if _is_torch_tensor(indices):
         indices = indices.detach().cpu().numpy()
+    if index_bits % 8 != 0:
+        path.write_bytes(_pack_indices(indices, index_bits).tobytes())
+        return True
+    _, np_dtype, _ = _index_bit_spec(index_bits)
     path.write_bytes(np.asarray(indices, dtype=np_dtype).tobytes())
+    return False
 
 
 def _write_codebook(path: Path, codebook: Sequence[Sequence[float]]) -> None:
@@ -117,8 +151,11 @@ def _read_f32_vector(path: Path, expected_count: int):
     return arr
 
 
-def _read_indices(path: Path, index_bits: int, expected_count: int):
+def _read_indices(path: Path, index_bits: int, expected_count: int, packed: bool = False):
     import numpy as np
+    if packed:
+        raw = np.fromfile(str(path), dtype=np.uint8)
+        return _unpack_indices(raw, index_bits, expected_count)
     _, np_dtype, _ = _index_bit_spec(index_bits)
     arr = np.fromfile(str(path), dtype=np_dtype)
     if arr.shape[0] != expected_count:

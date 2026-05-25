@@ -13,6 +13,7 @@ from orka._format import (
     _read_outliers,
     _read_pillars,
     _read_salient,
+    _unpack_indices,
 )
 from orka.transforms.normalize import (
     _apply_block_max_scales_numpy,
@@ -49,7 +50,10 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict):
         s_group_size = int(stage.get("group_size", group_size))
         s_index_count = math.ceil(padded_values / s_group_size)
         cb = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, s_group_size)
-        idxs = _read_indices(out_dir / stage["indices"], int(stage["index_bits"]), s_index_count)
+        idxs = _read_indices(
+            out_dir / stage["indices"], int(stage["index_bits"]), s_index_count,
+            packed=bool(stage.get("packed", False)),
+        )
         decoded_np += cb[idxs.astype(np.int64, copy=False)].reshape(-1)
 
     decoded = decoded_np[:packed_values].copy()
@@ -145,10 +149,16 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
         s_index_count = math.ceil(padded_values / s_group_size)
 
         cb_np = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, s_group_size)
-        idxs_np = np.frombuffer(
-            (out_dir / stage["indices"]).read_bytes(),
-            dtype=_index_bit_spec(int(stage["index_bits"]))[1],
-        ).astype(np.int64)
+        if bool(stage.get("packed", False)):
+            raw = np.fromfile(str(out_dir / stage["indices"]), dtype=np.uint8)
+            idxs_np = np.asarray(
+                _unpack_indices(raw, int(stage["index_bits"]), s_index_count), dtype=np.int64
+            )
+        else:
+            idxs_np = np.frombuffer(
+                (out_dir / stage["indices"]).read_bytes(),
+                dtype=_index_bit_spec(int(stage["index_bits"]))[1],
+            ).astype(np.int64)
         cb = torch.from_numpy(cb_np).to(device)
         idxs = torch.from_numpy(idxs_np).to(device)
         decoded.add_(cb[idxs].reshape(-1))
