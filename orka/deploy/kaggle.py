@@ -255,6 +255,14 @@ def _run_partitioned_pack(
         f"--- Launching {part_count} Kaggle partitions with {worker_count} concurrent worker(s) ---",
         flush=True,
     )
+    # Child workers run `python -m orka pack` in a fresh interpreter. When orka
+    # is loaded from a sys.path entry (e.g. a Kaggle dataset mount) rather than
+    # pip-installed, the child cannot import it. Propagate orka's parent dir via
+    # PYTHONPATH so the partition subprocesses resolve the package.
+    import orka as _orka_pkg
+
+    orka_parent = str(Path(_orka_pkg.__file__).resolve().parent.parent)
+
     for start in range(0, part_count, worker_count):
         batch = list(range(start, min(start + worker_count, part_count)))
         procs: list[tuple[int, subprocess.Popen]] = []
@@ -263,6 +271,7 @@ def _run_partitioned_pack(
             env = os.environ.copy()
             gpu_id = cuda_ids[offset]
             env["CUDA_VISIBLE_DEVICES"] = gpu_id
+            env["PYTHONPATH"] = orka_parent + os.pathsep + env.get("PYTHONPATH", "")
             cmd = _build_partition_pack_cmd(
                 args=args,
                 source_file=source_file,
@@ -382,6 +391,7 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
         elif not getattr(args, "skip_sensitive", False) and on_kaggle:
             try:
                 print("--- Auto-generating Pillar Map (Frequency + Magnitude) ---", flush=True)
+                import torch
                 from transformers import AutoTokenizer
                 import numpy as np
                 from scipy.stats import rankdata
@@ -401,10 +411,12 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
                 counts = Counter(tok.encode(text))
                 
                 emb = None
-                with safe_open(str(source_file), framework="np") as f:
+                # framework="pt" so bf16/fp16 embeddings load (numpy cannot represent bfloat16);
+                # cast to float32 numpy for the norm computation below.
+                with safe_open(str(source_file), framework="pt") as f:
                     for k in f.keys():
                         if "embed_tokens" in k or "wte" in k or "word_embeddings" in k:
-                            emb = f.get_tensor(k)
+                            emb = f.get_tensor(k).to(torch.float32).cpu().numpy()
                             break
                 if emb is None:
                     raise RuntimeError("Could not find embedding tensor in safetensors file")
@@ -563,23 +575,25 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
 
 
 _KAGGLE_CONFIG = {
-    "repo_id":         "Qwen/Qwen2.5-0.5B",
+    "repo_id":         "Qwen/Qwen3-0.6B",
     "upload_repo":     None,
-    "quant_mode":      "rvq-mixed",
+    "quant_mode":      "rvq-16-8",
     "codebook_mode":   "per-tensor",
     "normalization":   "slrq-block",
     "rotation":        "orthogonal",
     "rotation_seed":   42,
     "backend":         "torch",
     "device":          "cuda",
-    "max_gpu_mem_gb":  13.0,
-    "max_system_ram_gb": 20.0,
-    "workload_budget_gb": 10.0,
+    # Per-child caps (one child process per GPU). On Kaggle 2x T4 (16 GB each,
+    # ~30 GB host RAM) two concurrent workers must each stay well under half of host RAM.
+    "max_gpu_mem_gb":  14.0,
+    "max_system_ram_gb": 12.0,
+    "workload_budget_gb": 9.0,
     "max_cpu_threads": 2,
     "sample_vectors":  200000,
     "iterations":      8,
     "outlier_frac":    0.01,
-    "group_size":      1024,
+    "group_size":      8,
     "codebook_size":   256,
     "awq_calibration": False,
     "awq_alpha":       0.5,
@@ -590,9 +604,10 @@ _KAGGLE_CONFIG = {
     "eval_max_prompts": 50,
     "eval_max_length":  128,
     "em_aq_passes":    3,
+    # Dual-GPU: split tensors across 2 GPUs and run both partitions concurrently.
     "tensor_partition_count": 2,
     "tensor_partition_index": None,
-    "partition_worker_count": 1,
+    "partition_worker_count": 2,
 }
 
 
