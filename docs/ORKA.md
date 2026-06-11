@@ -63,20 +63,28 @@ tensors/
   <safe tensor name>.s{i}.indices    # multi-stage indices, per stage
   <safe tensor name>.codebook.f32    # per-tensor mode, single-stage
   <safe tensor name>.s{i}.codebook.f32  # per-tensor mode, multi-stage
-  <safe tensor name>.row_l2_scale.f32   # row-l2 normalization
-  <safe tensor name>.col_l2_scale.f32   # col-l2 normalization
+  <safe tensor name>.block_max_scale.f32 # block-max / channel-block-max / slrq-block / awq-block-max scales
+  <safe tensor name>.awq_col_scale.f32   # awq-block-max column scales, when calibration exists
   <safe tensor name>.outliers.idx       # outlier escape: uint32 positions
   <safe tensor name>.outliers.val       # outlier escape: float16 values
+  <safe tensor name>.salient.idx        # slrq-block salient local indices
+  <safe tensor name>.salient.val        # slrq-block salient weights
+  <safe tensor name>.pillars.idx        # frequency-aware protected positions
+  <safe tensor name>.pillars.f2         # frequency-aware protected values
+passthrough.safetensors              # skipped tensors such as norms and biases
 ```
 
 Stage-suffixed files (`.s0`, `.s1`, ...) appear only when N-stage RVQ is used (more than one codebook per tensor). Single-stage VQ keeps the legacy unsuffixed names.
 
 `codebooks/<key>.codebook.f32` exists only when global or family codebook mode is used.
 Per-tensor mode stores each tensor codebook next to its index file.
-`row_l2_scale.f32` / `col_l2_scale.f32` exist only when the corresponding `--normalization` is used.
+`block_max_scale.f32` exists for `block-max`, `channel-block-max`, `slrq-block`, and `awq-block-max`.
+`awq_col_scale.f32` exists for `awq-block-max` when AWQ calibration data exists.
+`salient.idx` + `salient.val` exist when `slrq-block` salient extraction is enabled.
+`pillars.idx` + `pillars.f2` exist when a sensitivity map provides protected top tokens.
 `outliers.idx` + `outliers.val` exist only when `--outlier-frac > 0`.
 
-Index files are stored as fixed-width little-endian unsigned integers, sized by stage bits: uint8 (≤8 bits), uint16 (≤16), uint32 (≤32), uint64 (≤64).
+Index files are bit-packed when the stage bit width is not byte-aligned. Byte-aligned stages are stored as little-endian unsigned integers sized by stage bits: uint8 (<=8 bits), uint16 (<=16), uint32 (<=32), uint64 (<=64).
 
 The manifest must include:
 
@@ -87,10 +95,10 @@ The manifest must include:
 - N stages (1 = pure VQ, ≥2 = RVQ).
 - Codebook mode (per-tensor / global / family).
 - Family stages map (only when `rvq-mixed` is used).
-- Normalization (none / row-l2 / col-l2).
+- Normalization (`none`, `block-max`, `channel-block-max`, `awq`, `awq-block-max`, or `slrq-block`).
 - Outlier fraction.
-- Rotation type (none / orthogonal) + global seed.
-- Per-tensor entries: shape, packed/padded values, vector count, training vector count, group size, codebook size (stage 0), index bits (stage 0), index bytes (sum across stages), `n_stages`, `stages: [...]` list with per-stage codebook + index paths and bits, `total_bits_per_vector`, error metrics (MSE/RMSE/MAE/relative_rmse/cosine_similarity/source_l2_sq/reconstructed_l2_sq), normalization, scale path + count + bytes, outlier metadata (count/positions/values/bytes), rotation seed.
+- Rotation type (`none`, `orthogonal`, or `hadamard`) + global seed.
+- Per-tensor entries: shape, packed/padded values, vector count, training vector count, group size, codebook size (stage 0), index bits (stage 0), index bytes (sum across stages), `n_stages`, `stages: [...]` list with per-stage codebook + index paths and bits, `total_bits_per_vector`, error metrics (MSE/RMSE/MAE/relative_rmse/cosine_similarity/source_l2_sq/reconstructed_l2_sq), normalization, scale path + count + bytes, outlier metadata, salient metadata, pillar metadata, and rotation seed.
 
 Codebooks are written as raw little-endian float32 values in row-major order.
 The manifest owns the dimensions and meaning of the file.
@@ -111,7 +119,6 @@ Orka has two GPU paths:
 The default compiler path is still CPU-first:
 
 - `--backend auto` and `--backend numpy` use CPU NumPy for packing.
-- `--backend python` uses only the Python standard library path and is intended for small tests.
 - `--backend torch --device cpu` uses PyTorch on CPU.
 - `--backend torch --device auto` uses CUDA when `torch.cuda.is_available()` is true, otherwise CPU.
 
@@ -158,32 +165,34 @@ CUDA support requires a working PyTorch CUDA install. If CUDA is requested and u
 - `sweep`: run a matrix of pack/report experiments and write one JSON comparison file.
 - `eval`: reconstruct an `.orka` artifact into a temporary Hugging Face model directory and compare prompt loss against the original model.
 - `eval-sweep`: run `eval` across artifacts recorded in a sweep JSON and rank candidates by loss delta, perplexity ratio, and artifact bytes.
-- `selftest`: run built-in behavior tests without requiring third-party model libraries.
 
 The compiler does not claim model IQ or tokens per second. `report`, `verify`, and `sweep` measure reconstruction error. `eval` and `eval-sweep` can measure prompt loss/perplexity when optional Hugging Face dependencies and a causal language model directory are available.
 
 ## Normalization Modes
 
-`pack` supports three normalization modes:
+`pack` supports these normalization modes:
 
 - `none`: quantizes raw flattened tensor values.
-- `row-l2`: L2-normalizes each row before vector quantization, stores one float32 row scale per source row, and multiplies decoded rows by those scales during verify/reconstruct.
-- `col-l2`: L2-normalizes each column (axis 0) before vector quantization, stores one float32 col scale per source column, and multiplies decoded cols by those scales during verify/reconstruct.
+- `block-max`: divides each block by its max absolute value, stores one float32 block scale, and multiplies by that scale during decode.
+- `channel-block-max`: aligns block-max scaling to the tensor's inner channel dimension when possible, with flat block-max fallback for unsupported shapes.
+- `slrq-block`: keeps a power-of-two block anchor, optionally extracts one salient value per block, and restores salient values after decode scaling.
+- `awq`: activation-aware column scaling. It is feature-gated behind `ORKA_ENABLE_AWQ=1`.
+- `awq-block-max`: torch-only AWQ column scaling followed by block-max scaling. If a tensor has no AWQ activation entry, it falls back to block-max for that tensor.
 
-Row-l2 is meant for tensors where row direction matters more than raw magnitude, especially embeddings. It adds `4 * row_count` bytes per tensor.
-Col-l2 is mirror logic for tensors whose output (column) direction carries scale information, e.g., GPTQ-style per-channel scaling on weight matrices. It adds `4 * col_count` bytes per tensor. Pick row-l2 OR col-l2, not both, per pack invocation.
+`block-max`, `channel-block-max`, and `slrq-block` add `4 * block_count` bytes per tensor for block scales. `slrq-block` also stores salient sidecars unless disabled with `--no-slrq-salient`.
+Use `awq` and `awq-block-max` only when calibration activations are available and AWQ is explicitly enabled.
 
 Example:
 
 ```bash
 python3 orka.py pack model.safetensors \
-  --out model-row-l2.orka \
+  --out model-slrq.orka \
   --group-size 8 \
   --codebook-size 256 \
-  --codebook-mode global \
+  --codebook-mode per-tensor \
   --backend numpy \
   --sample-vectors 65536 \
-  --normalization row-l2
+  --normalization slrq-block
 ```
 
 ## Quality Metrics
@@ -245,7 +254,7 @@ python3 orka.py sweep model.safetensors \
   --group-sizes 4 8 16 \
   --codebook-sizes 256 \
   --codebook-modes global family per-tensor \
-  --normalizations none row-l2 \
+  --normalizations none block-max channel-block-max slrq-block \
   --backend torch \
   --device cuda \
   --sample-vectors 65536 \
@@ -257,7 +266,7 @@ The sweep summary records every artifact path plus artifact size, index bytes, c
 Use `eval` after sweep has identified one candidate artifact:
 
 ```bash
-python3 orka.py eval /tmp/orka-sweep.artifacts/g8-k256-global-row-l2.orka \
+python3 orka.py eval /tmp/orka-sweep.artifacts/g8-k256-global-block-max.orka \
   --prompts prompts.txt \
   --out /tmp/orka-eval.json \
   --model-dir /path/to/hf-model-dir \
@@ -306,9 +315,9 @@ python3 orka.py pack model.safetensors --out model-family.orka --group-size 8 --
 
 Quantization layouts use compositional spec strings:
 
-- `vq-{bits}` — single-stage VQ. Codebook size = `2^bits`. E.g., `vq-8` (k=256), `vq-16` (k=65536).
-- `rvq-{b1}-{b2}-...{bn}` — N-stage Residual VQ. Each stage learns a codebook on the residual of previous stages. Decode = sum of stage centroid lookups. E.g., `rvq-16-8` (stage 1 k=65536, stage 2 k=256), `rvq-16-16-16-16` (4 stages of k=65536).
-- `rvq-mixed` — preset for mixed precision per family: embedding gets `rvq-16-16-16` (6 bpw), attention `rvq-16-8` (3 bpw), mlp `rvq-16-8` (3 bpw), other `vq-16` (2 bpw). Forces `--codebook-mode per-tensor`.
+- `vq-{bits}` - single-stage VQ. Codebook size = `2^bits`. E.g., `vq-8` (k=256), `vq-16` (k=65536).
+- `rvq-{b1}-{b2}-...{bn}` - N-stage Residual VQ. Each stage learns a codebook on the residual of previous stages. Decode = sum of stage centroid lookups. E.g., `rvq-16-8` (stage 1 k=65536, stage 2 k=256), `rvq-16-16-16-16` (4 stages of k=65536).
+- `rvq-mixed` - preset for mixed precision per family: embedding gets `rvq-16-16-16` (6 bpw), attention `rvq-16-8` (3 bpw), mlp `rvq-16-8` (3 bpw), other `vq-16` (2 bpw). Forces `--codebook-mode per-tensor`.
 
 Constraints: per-stage bits 1..64, total bits/vector ≤ 64. Stages > 1 require the `rvq-` prefix; single stage requires the `vq-` prefix. Practical sweet spot remains 8-16 bits per stage; beyond 16, k-means training cost grows fast for marginal quality gain (extra stages cheaper).
 
@@ -316,23 +325,25 @@ Constraints: per-stage bits 1..64, total bits/vector ≤ 64. Stages > 1 require 
 
 ## Outlier Escape
 
-`--outlier-frac F` extracts the top-F-fraction of weights by magnitude per tensor and stores them as a fp16 sidecar with uint32 positions. The corresponding positions are zeroed in the source before VQ training, so the codebook is not pulled by extreme values. At decode time outliers are re-injected at their saved positions before normalization is undone.
+`--outlier-frac F` extracts the top-F-fraction of weights by magnitude per tensor and stores them as a fp16 sidecar with compact integer positions. The corresponding positions are zeroed in the source before VQ training, so the codebook is not pulled by extreme values. At decode time outliers are re-injected at their saved positions before normalization is undone.
 
-Recommended values: 0.001 (0.1%) to 0.005 (0.5%). Storage overhead is `count * 6 B` per tensor (4 B position + 2 B fp16 value). Critical for low-bpw modes — a few outliers per tensor dominate matmul output and stretch VQ centroids if not escaped.
+Recommended values: 0.001 (0.1%) to 0.005 (0.5%). Storage overhead depends on the selected position dtype plus the value dtype. Critical for low-bpw modes - a few outliers per tensor dominate matmul output and stretch VQ centroids if not escaped.
 
 ## Rotation
 
-`--rotation orthogonal` applies a per-tensor random orthogonal rotation along the inner axis (cols) before VQ. The rotation is generated deterministically from `--rotation-seed` xor blake2b hash of the tensor name, so no rotation matrices are stored — the manifest only carries the global seed and per-tensor seed for reproducibility.
+`--rotation orthogonal` applies a per-tensor random orthogonal rotation along the inner axis (cols) before VQ. The rotation is generated deterministically from `--rotation-seed` xor blake2b hash of the tensor name, so no rotation matrices are stored - the manifest only carries the global seed and per-tensor seed for reproducibility.
 
 Effect: rotation smears outliers across all dimensions, making post-rotation distributions closer to gaussian. VQ centroids fit a near-isotropic distribution more tightly. Storage overhead: 8 bytes per tensor (seed). Compute overhead: one QR factorization per tensor at pack time + one rotation matmul; a second matmul at decode time. Inspired by SpinQuant / QuaRot.
 
+`--rotation hadamard` applies a block-diagonal FWHT along the inner axis. It uses the full axis when the inner dimension is a power of two, otherwise the largest usable power-of-two divisor.
+
 Pipeline applied during `pack`:
-1. Optional normalization (`--normalization row-l2 | col-l2`).
-2. Optional rotation (`--rotation orthogonal`).
+1. Optional normalization (`none`, `block-max`, `channel-block-max`, `awq`, `awq-block-max`, or `slrq-block`).
+2. Optional rotation (`none`, `orthogonal`, or `hadamard`).
 3. Optional outlier escape (`--outlier-frac F`).
 4. RVQ stages (one or more codebooks).
 
-Decode reverses the pipeline: VQ stages → re-inject outliers → un-rotate → un-normalize.
+Decode reverses the pipeline: VQ stages -> re-inject outliers -> un-rotate -> un-normalize.
 
 ## Memory Cap
 
@@ -341,13 +352,13 @@ Decode reverses the pipeline: VQ stages → re-inject outliers → un-rotate →
 ## Non-Goals v0
 
 - No runtime inference engine.
-- No GGUF writer yet.
+- No production GGUF runtime quantization type yet.
 - No quantization-aware training loop.
 - No public performance claims.
 
 Previously listed non-goals that are now implemented:
 
-- Orthogonal rotation (`--rotation orthogonal`) — replaces "no SpinQuant rotation" item.
+- Orthogonal rotation (`--rotation orthogonal`) - replaces "no SpinQuant rotation" item.
 
 ## Open Research Questions
 

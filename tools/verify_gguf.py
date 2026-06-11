@@ -104,7 +104,7 @@ def decompress_gguf_tensor(tmeta, gguf_tensors, reader, cb_map, obfuscate=False)
 
     # 4. Apply scales
     norm = tmeta.get("normalization", "none")
-    if norm in ("block-max", "awq-block-max", "slrq-block"):
+    if norm in ("block-max", "channel-block-max", "awq-block-max", "slrq-block"):
         scales_tensor_name = f"t.{base_name}.s" if obfuscate else f"{name}.orka.scales"
         scales_tensor = gguf_tensors[scales_tensor_name]
         if obfuscate:

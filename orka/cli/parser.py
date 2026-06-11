@@ -76,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
         p.add_argument(
             "--normalization",
-            choices=["none", "block-max", "awq", "awq-block-max", "slrq-block"],
+            choices=["none", "block-max", "channel-block-max", "awq", "awq-block-max", "slrq-block"],
             default="none",
         )
         p.add_argument(
@@ -304,7 +304,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sweep.add_argument(
         "--normalizations",
-        choices=["none", "block-max", "awq", "awq-block-max", "slrq-block"],
+        choices=["none", "block-max", "channel-block-max", "awq", "awq-block-max", "slrq-block"],
         nargs="+",
         default=["none"],
     )
@@ -531,15 +531,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sem_map.set_defaults(func=cmd_sem_map)
 
-    def _run_tests(_args):
-        import unittest
-
-        loader = unittest.defaultTestLoader
-        suite = loader.discover("tests", top_level_dir=".")
-        result = unittest.TextTestRunner(verbosity=2).run(suite)
-        return 0 if result.wasSuccessful() else 1
-
-
     sem_calc = sub.add_parser(
         "sem-calc", help="Pre-calculate AWQ activations and linguistic pillars"
     )
@@ -547,7 +538,4 @@ def build_parser() -> argparse.ArgumentParser:
     add_pack_args(sem_calc)
     sem_calc.add_argument("--out", required=True, help="output JSON for the calculated data")
     sem_calc.set_defaults(func=cmd_sem_calc)
-
-    selftest = sub.add_parser("selftest", help="run built-in tests")
-    selftest.set_defaults(func=_run_tests)
     return parser

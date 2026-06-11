@@ -50,10 +50,11 @@ if __name__ == "__main__":
         print(f"=== ORKA GPU PROBE: torch.cuda.device_count()={n} ===", flush=True)
         for i in range(n):
             print(f"    cuda:{i} = {torch.cuda.get_device_name(i)}", flush=True)
-        if n < 2:
+        if n < 1:
+            print("WARNING: no GPUs visible. Check accelerator setting.", flush=True)
+        elif n < 2:
             print(
-                "WARNING: fewer than 2 GPUs visible. Dual-GPU partition run will "
-                "abort at the partition guard. Set Accelerator to 'GPU T4 x2'.",
+                "INFO: single GPU detected; running in non-partitioned mode.",
                 flush=True,
             )
     except Exception as exc:
