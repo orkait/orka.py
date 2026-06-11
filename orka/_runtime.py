@@ -68,10 +68,11 @@ def _monitor_ram_task(cap_gb: float, stop_event: threading.Event, interval: floa
         try:
             used = process.memory_info().rss
             if used > cap_bytes:
+                # Keep polling: _check_ram_cap clears the flag when it raises,
+                # so a long job stays protected after the first overage.
                 _set_ram_exceeded(
                     f"Process RAM usage ({used / (1024 ** 3):.2f} GB) exceeded cap ({cap_gb:.2f} GB)"
                 )
-                break
         except Exception:
             pass
         time.sleep(interval)

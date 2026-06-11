@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from orka._checkpoint import _load_tensors
-from orka._tensor import _flatten_float_values
+from orka._tensor import _numpy_float32_array
 from orka.metrics import _quality_from_totals, quality_metrics_from_flat
 from orka.pipeline.decode import _decode_tensor
 
@@ -38,9 +38,9 @@ def verify_artifact(out_dir: Path) -> dict:
         print(f"  Validating tensor {name} ({i+1}/{len(tensors_list)})...", flush=True)
         if name not in source_tensors:
             raise KeyError(f"source tensor missing during verification: {name}")
-        original = _flatten_float_values(
-            source_tensors[name], int(tensor_meta["packed_values"])
-        )
+        original = _numpy_float32_array(source_tensors[name]).reshape(-1)[
+            : int(tensor_meta["packed_values"])
+        ]
         decoded = _decode_tensor(out_dir, tensor_meta)
         if len(original) != len(decoded):
             raise ValueError(f"decoded value count mismatch for {name}")
@@ -77,13 +77,14 @@ def verify_artifact(out_dir: Path) -> dict:
         for name, tensor in passthrough_tensors.items():
             if name not in source_tensors:
                 raise KeyError(f"source passthrough tensor missing during verification: {name}")
-            original = _flatten_float_values(source_tensors[name])
-            reconstructed = _flatten_float_values(tensor)
-            if len(original) != len(reconstructed):
+            import numpy as np
+
+            original = _numpy_float32_array(source_tensors[name]).reshape(-1)
+            reconstructed = _numpy_float32_array(tensor).reshape(-1)
+            if original.shape[0] != reconstructed.shape[0]:
                 raise ValueError(f"passthrough value count mismatch for {name}")
-            for src, rec in zip(original, reconstructed):
-                if src != rec:
-                    raise ValueError(f"passthrough tensor mismatch for {name}")
+            if not np.array_equal(original, reconstructed):
+                raise ValueError(f"passthrough tensor mismatch for {name}")
             verified_passthrough += 1
 
     worst_tensors.sort(key=lambda item: item["mse"], reverse=True)
