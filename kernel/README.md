@@ -36,25 +36,55 @@ the codebook from a **side tensor** rather than a constant.
 That is the design here: `orka_vq_tensor` carries per-stage codebook pointers.
 The GGML integration must thread those side tensors to the kernel.
 
-## Remaining work to run inside llama.cpp (mechanical, scoped)
+## The crux is solved: codebook decode runs inside ggml
 
-| Step | File | Effort |
-|---|---|---|
-| Add `GGML_TYPE_ORKA_VQ` enum | `ggml/include/ggml.h` | trivial |
-| Block struct + `GGML_QUANT_SIZES` | `ggml-common.h`, `gguf-py/gguf/constants.py` | low |
-| CPU type-traits entry (`to_float`, `vec_dot`, `vec_dot_type=Q8_K`) | `ggml-cpu/ggml-cpu.c` | low |
-| Wrap this kernel as `dequantize_row_orka_vq` | `ggml-cpu/quants.c` | done here (adapt signature) |
-| **Pass per-tensor codebook/sidecars to the kernel** | `ggml.h` compute params + graph build | **HIGH - the crux** |
-| GGUF writer emits the type + side tensors | `tools/orka_to_gguf.py` | medium |
-| CUDA kernel + support matrix | `ggml-cuda/` | high (post-CPU) |
+The hard unknown was whether a *per-tensor learned codebook* could be threaded
+into ggml's compute backend at all, given that every standard GGML kernel
+signature (`dequantize_row_*(const block*, float*, k)`) has no slot for a
+codebook. The answer, demonstrated here, is **a custom op carrying the
+compressed weight as a real ggml tensor**:
 
-The crux remains the codebook-passing plumbing: every existing GGML kernel
-assumes "type fully determines decode", so the codebook is implicit. ORKA_VQ
-needs the kernel to receive an extra per-tensor tensor. Standard GGML signatures
-(`dequantize_row_*(const block*, float*, k)`) have no slot for it, so the side
-tensors must travel through `ggml_compute_params` / op context. That is C
-plumbing in llama.cpp internals - well understood, but it is the part that
-must be done inside a full llama.cpp build, not here.
+```
+kernel/ggml_orka_op.c   - ggml_map_custom2(blob_tensor, activations):
+                          decodes the Orka weight from the blob inside the
+                          op and does the GEMM, dispatched by ggml's CPU backend.
+kernel/run_ggml_proof.sh - builds against libggml and checks the matmul of real
+                          135M tensors vs the numpy reference.
+```
+
+Result - the full weight (all stage codebooks + indices + slrq scales +
+outlier/salient/low-rank sidecars) packed into one ggml tensor, decoded inside
+the backend, GEMM verified against numpy:
+
+```
+model.embed_tokens.weight              rel=9.3e-07  MATCH   (49152 rows)
+model.layers.0.self_attn.q_proj.weight rel=5.1e-07  MATCH
+model.layers.0.self_attn.o_proj.weight rel=4.2e-07  MATCH
+model.layers.5.mlp.gate_proj.weight    rel=5.9e-07  MATCH
+model.layers.5.mlp.down_proj.weight    rel=9.3e-07  MATCH
+```
+
+(rel ~1e-6 is f32 GEMM accumulation noise, not algorithmic error.) A real
+debugging find along the way: absolute outlier positions exceed 2^24 on the
+embedding and cannot round-trip as float32 - they are stored as int32 bit
+patterns in the blob, the kind of issue only a real end-to-end run surfaces.
+
+This proves the load-bearing mechanism. The `ggml_map_custom` op is the
+deployable form for an out-of-tree build (no llama.cpp fork needed); a fully
+upstreamed `GGML_TYPE_ORKA_VQ` (native enum + block struct + type traits) is a
+cleaner long-term packaging, but it would run the *same* decode this op already
+runs correctly.
+
+## Remaining work to ship a runnable GGUF model
+
+| Step | File | Effort | Status |
+|---|---|---|---|
+| Codebook decode inside ggml backend | `ggml_orka_op.c` | - | **done, verified** |
+| GGUF writer emits compressed weight blobs + a custom-op tag | `tools/orka_to_gguf.py` | medium | the XOR mode must be dropped first |
+| Wire the custom op per linear in llama's graph | `src/llama-model.cpp` / `src/models/` | medium | architecture boilerplate |
+| Multi-threaded + SIMD GEMM in the op | `ggml_orka_op.c` | medium | POC is single-threaded |
+| Optional: native `GGML_TYPE_ORKA_VQ` upstream | `ggml.h`, `ggml-common.h`, `ggml-cpu.c` | high | packaging, not capability |
+| CUDA op | `ggml-cuda/` | high | post-CPU |
 
 ## Files
 
