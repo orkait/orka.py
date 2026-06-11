@@ -100,7 +100,7 @@ class GGUFOrkaLinear(nn.Module):
 
         # Apply scales
         norm = self.tensor_meta.get("normalization", "none")
-        if norm in ("block-max", "awq-block-max", "slrq-block"):
+        if norm in ("block-max", "channel-block-max", "awq-block-max", "slrq-block"):
             scales_tensor_name = f"{name}.orka.scales"
             scales_tensor = self.gguf_tensors[scales_tensor_name]
             if scales_tensor.tensor_type == GGMLQuantizationType.Q8_0:

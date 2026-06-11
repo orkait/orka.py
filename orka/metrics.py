@@ -240,7 +240,7 @@ def _denorm_metrics_from_flat(candidate: dict, source_flat, decoded_flat) -> dic
             decoded_flat, candidate["shape"], candidate["row_scales"]
         )
         return quality_metrics_from_flat(candidate["source_flat"], denorm)
-    if norm in ("block-max", "slrq-block"):
+    if norm in ("block-max", "channel-block-max", "slrq-block"):
         block_size = candidate.get("block_scale_size") or 32
         if _is_numpy_array(decoded_flat):
             import numpy as np

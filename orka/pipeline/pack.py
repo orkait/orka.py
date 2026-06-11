@@ -112,7 +112,7 @@ def _persist_tensor_sidecars(c: dict, tensor_dir: Path, out_dir: Path) -> tuple:
         _write_f32_vector(scale_path, c["row_scales"])
         scale_bytes = scale_path.stat().st_size
         scale_count = len(c["row_scales"])
-    elif norm in ("block-max", "slrq-block", "awq-block-max"):
+    elif norm in ("block-max", "channel-block-max", "slrq-block", "awq-block-max"):
         scale_path = tensor_dir / f"{safe}.block_max_scale.f32"
         _write_f32_vector(scale_path, c["row_scales"])
         scale_bytes = scale_path.stat().st_size
@@ -237,9 +237,12 @@ def _build_tensor_manifest_entry(
         "scales": str(scale_path.relative_to(out_dir)) if scale_path else None,
         "scale_count": scale_count,
         "scale_bytes": scale_bytes,
-        "block_scale_size": block_scale_size
-        if c["normalization"] in ("block-max", "awq-block-max", "slrq-block")
-        else None,
+        "block_scale_size": (
+            block_scale_size
+            if c["normalization"]
+            in ("block-max", "channel-block-max", "awq-block-max", "slrq-block")
+            else None
+        ),
         "awq_col_scales": awq_col_meta,
         "outliers": outlier_meta,
         "pillars": pillar_meta,
@@ -444,7 +447,7 @@ def _run_em_aq_refinement(
                         training, min(k, len(training)), 2, backend, resolved_device,
                         vector_weights=vw, initial_codebook=sd["cb"],
                     )
-                    indices, _ = quantize_vectors_auto(target_train, cb, backend, resolved_device)
+                    indices, _ = quantize_vectors_auto(target_train, cb, backend, resolved_device, vector_weights=vw)
 
                     new_dec_raw = _decode_to_vectors_format(
                         target_train, cb, indices, backend, resolved_device
@@ -534,12 +537,13 @@ def pack_checkpoint(
     if normalization not in {
         "none",
         "block-max",
+        "channel-block-max",
         "awq",
         "awq-block-max",
         "slrq-block",
     }:
         raise ValueError(
-            "normalization must be 'none', 'block-max', 'awq', 'awq-block-max', or 'slrq-block'"
+            "normalization must be 'none', 'block-max', 'channel-block-max', 'awq', 'awq-block-max', or 'slrq-block'"
         )
     if (
         normalization in {"awq", "awq-block-max"} or awq_activations is not None
@@ -716,7 +720,13 @@ def pack_checkpoint(
                 awq_col_scales = None
                 salient_weights = None
                 salient_indices = None
-                if normalization in {"block-max", "awq", "awq-block-max", "slrq-block"}:
+                if normalization in {
+                    "block-max",
+                    "channel-block-max",
+                    "awq",
+                    "awq-block-max",
+                    "slrq-block",
+                }:
                     (
                         tensor, row_scales, source_flat, awq_col_scales,
                         salient_weights, salient_indices
@@ -744,14 +754,22 @@ def pack_checkpoint(
                     )
                     tensor_rotation = rotation
 
-                # --- DYNAMIC GROUP SIZING ---
-                # Vocabulary layers (embeddings) need smaller groups for high fidelity.
+                # --- DYNAMIC FAMILY-AWARE GROUP SIZING ---
+                # Different layer types have different sensitivity to group size.
+                # Attention: phase-sensitive, needs tight groups.
+                # MLP: high channel redundancy, tolerates larger groups.
+                # Embedding: linguistic pillars, needs high fidelity.
                 family = classify_tensor_family(name)
                 resolved_group_size = group_size
                 if family == "embedding":
-                    # Force a high-fidelity group size for the linguistic core.
-                    # 8 is the 'Goldilocks' size for 2-4 bpw embeddings.
                     resolved_group_size = min(group_size, 8)
+                elif family == "attention":
+                    # Attention projections are phase-sensitive; use tighter groups
+                    resolved_group_size = max(4, group_size // 2) if group_size > 4 else group_size
+                elif family in ("mlp", "expert", "shared_expert"):
+                    # MLP/expert layers have high channel redundancy; relax group size
+                    resolved_group_size = min(group_size * 2, 32)
+                # router/other: keep the user-specified group_size
 
                 if backend == "torch":
                     packed_values, padded_values, vectors = _torch_vectors_from_tensor(
@@ -773,7 +791,13 @@ def pack_checkpoint(
                     "packed_values": packed_values, "padded_values": padded_values,
                     "vectors": vectors, "row_scales": row_scales, "awq_col_scales": awq_col_scales,
                     "salient_weights": salient_weights, "salient_indices": salient_indices,
-                    "normalization": normalization, "block_scale_size": block_scale_size if normalization in ("block-max", "awq-block-max", "slrq-block") else None,
+                    "normalization": normalization,
+                    "block_scale_size": (
+                        block_scale_size
+                        if normalization
+                        in ("block-max", "channel-block-max", "awq-block-max", "slrq-block")
+                        else None
+                    ),
                     "family": family, "rotation_seed": tensor_seed,
                     "rotation": tensor_rotation,
                     "group_size": resolved_group_size,
@@ -879,7 +903,7 @@ def pack_checkpoint(
             )
             _write_codebook(cb_path, cb)
 
-            indices, _ = quantize_vectors_auto(v_res, cb, backend, resolved_device)
+            indices, _ = quantize_vectors_auto(v_res, cb, backend, resolved_device, vector_weights=vw)
             c["stages_data"][stage_i] = {
                 "cb": cb,
                 "indices": indices,
@@ -1283,7 +1307,7 @@ def pack_checkpoint(
                 _write_codebook(cb_path, cb)
 
             indices, _ = quantize_vectors_auto(
-                v_res, cb, backend, resolved_device
+                v_res, cb, backend, resolved_device, vector_weights=vw
             )
             
             # Cache for joint refinement

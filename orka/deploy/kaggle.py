@@ -269,7 +269,7 @@ def _run_partitioned_pack(
         for offset, i in enumerate(batch):
             part_dir = part_dirs[i]
             env = os.environ.copy()
-            gpu_id = cuda_ids[offset]
+            gpu_id = cuda_ids[i % len(cuda_ids)]
             env["CUDA_VISIBLE_DEVICES"] = gpu_id
             env["PYTHONPATH"] = orka_parent + os.pathsep + env.get("PYTHONPATH", "")
             cmd = _build_partition_pack_cmd(
@@ -575,24 +575,23 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
 
 
 _KAGGLE_CONFIG = {
-    "repo_id":         "Qwen/Qwen3-0.6B",
+    "repo_id":         "MerlinSafety/HybridIntelligence-0.5B",
     "upload_repo":     None,
-    "quant_mode":      "rvq-16-8",
+    "quant_mode":      "rvq-mixed",
     "codebook_mode":   "per-tensor",
     "normalization":   "slrq-block",
     "rotation":        "orthogonal",
     "rotation_seed":   42,
     "backend":         "torch",
     "device":          "cuda",
-    # Per-child caps (one child process per GPU). On Kaggle 2x T4 (16 GB each,
-    # ~30 GB host RAM) two concurrent workers must each stay well under half of host RAM.
+    # 0.5B model (1 GB) fits on a single T4 - no partitioning needed.
     "max_gpu_mem_gb":  14.0,
-    "max_system_ram_gb": 12.0,
-    "workload_budget_gb": 9.0,
+    "max_system_ram_gb": 28.0,
+    "workload_budget_gb": 20.0,
     "max_cpu_threads": 2,
-    "sample_vectors":  200000,
+    "sample_vectors":  65536,
     "iterations":      8,
-    "outlier_frac":    0.01,
+    "outlier_frac":    0.005,
     "group_size":      8,
     "codebook_size":   256,
     "awq_calibration": False,
@@ -604,10 +603,9 @@ _KAGGLE_CONFIG = {
     "eval_max_prompts": 50,
     "eval_max_length":  128,
     "em_aq_passes":    3,
-    # Dual-GPU: split tensors across 2 GPUs and run both partitions concurrently.
-    "tensor_partition_count": 2,
+    "tensor_partition_count": 1,
     "tensor_partition_index": None,
-    "partition_worker_count": 2,
+    "partition_worker_count": 1,
 }
 
 

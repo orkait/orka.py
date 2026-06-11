@@ -6,8 +6,12 @@ from __future__ import annotations
 def classify_tensor_family(name: str) -> str:
     lowered = name.lower()
     
-    # 1. Linguistic/LAVA Pillars
-    if any(marker in lowered for marker in ("embed", "embedding", "wte", "wpe")):
+    # 1. Linguistic/LAVA Pillars & Output Heads
+    if (
+        any(marker in lowered for marker in ("embed", "embedding", "wte", "wpe", "lm_head", "embed_out"))
+        or lowered == "output.weight"
+        or (lowered.endswith(".output.weight") and not any(x in lowered for x in ("attn", "attention", "mlp", "layer")))
+    ):
         return "embedding"
     
     # 2. MoE Specialized Structure (Checked before generic MLP)
@@ -16,6 +20,26 @@ def classify_tensor_family(name: str) -> str:
     
     if any(marker in lowered for marker in (".experts.", "experts/")):
         return "expert"
+
+    if any(
+        marker in lowered
+        for marker in (
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+            "c_fc",
+            "fc1",
+            "fc2",
+            "fc_in",
+            "fc_out",
+            ".wi",
+            ".wo",
+            ".w1",
+            ".w2",
+            ".w3",
+        )
+    ):
+        return "mlp"
     
     if any(marker in lowered for marker in (".gate", ".router", ".gating")):
         return "router"
@@ -23,7 +47,10 @@ def classify_tensor_family(name: str) -> str:
     # 3. Standard Logic Components
     if any(
         marker in lowered
-        for marker in (".mlp.", "mlp", "gate_proj", "up_proj", "down_proj", "c_fc")
+        for marker in (
+            ".mlp.", "mlp", "gate_proj", "up_proj", "down_proj", "c_fc",
+            "fc1", "fc2", "fc_in", "fc_out", ".wi", ".wo", ".w1", ".w2", ".w3"
+        )
     ):
         return "mlp"
     
@@ -36,7 +63,11 @@ def classify_tensor_family(name: str) -> str:
             "k_proj",
             "v_proj",
             "o_proj",
+            "qkv",
+            "query_key_value",
             "c_attn",
+            "c_proj",
+            "out_proj",
         )
     ):
         return "attention"
