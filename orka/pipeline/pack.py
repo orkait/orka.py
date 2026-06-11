@@ -334,6 +334,7 @@ def _release_candidate_payload(c: dict) -> None:
         "pillar_values",
         "vector_weights",
         "sample_weights",
+        "col_importance",
     ):
         if key in c:
             c[key] = None
@@ -613,6 +614,7 @@ def pack_checkpoint(
     slrq_salient: bool = True,
     tensor_partition_count: int | None = None,
     tensor_partition_index: int | None = None,
+    error_compensation: bool = False,
 ) -> dict:
     if codebook_mode not in {"per-tensor", "global", "family"}:
         raise ValueError(
@@ -750,6 +752,7 @@ def pack_checkpoint(
         "rotation_seed": rotation_seed,
         "awq_enabled": awq_activations is not None,
         "hessian_weighted": awq_activations is not None,
+        "error_compensation": error_compensation,
         "em_aq_passes": em_aq_passes,
         "slrq_salient": slrq_salient,
         "tensor_partition_count": (
@@ -912,10 +915,17 @@ def pack_checkpoint(
                 #                     column groups in the Lloyd update.
                 vw = None
                 sw = None
+                col_importance = None
                 if (awq_activations is not None and name in awq_activations and shape[-1] % resolved_group_size == 0):
                     import torch
                     H_diag = torch.as_tensor(awq_activations[name], dtype=torch.float32).pow(2).mean(dim=0)
                     cols = int(shape[-1])
+                    # Column importance is in ORIGINAL column space; rotation
+                    # mixes columns, so salience-guided escape is rotation-off only.
+                    if tensor_rotation == "none":
+                        col_importance = (
+                            H_diag if backend == "torch" else H_diag.numpy()
+                        )
                     groups_per_row = cols // resolved_group_size
                     h_groups = H_diag.reshape(groups_per_row, resolved_group_size)
                     vw = h_groups.mean(dim=0).clamp(min=1e-6).tolist()
@@ -944,7 +954,8 @@ def pack_checkpoint(
                     "family": family, "rotation_seed": tensor_seed,
                     "rotation": tensor_rotation,
                     "group_size": resolved_group_size,
-                    "vector_weights": vw, "sample_weights": sw, "stages_data": {},
+                    "vector_weights": vw, "sample_weights": sw,
+                    "col_importance": col_importance, "stages_data": {},
                 })
                 tensors_emitted += 1
 
@@ -973,6 +984,80 @@ def pack_checkpoint(
         if stage_i >= len(stages_spec):
             return None
         return stages_spec[stage_i]
+
+    def _maybe_compensate_candidate(c: dict) -> bool:
+        """GPTQ-style block-OBS re-assignment with frozen codebooks.
+
+        Returns True when applied (EM-AQ is then skipped: it would re-learn
+        codebooks against uncompensated residuals and undo the compensation).
+        """
+        if backend != "torch":
+            return False
+        if awq_activations is None or c["name"] not in awq_activations:
+            return False
+        if c.get("rotation", "none") != "none":
+            return False
+        shape = c["shape"]
+        if len(shape) < 2:
+            return False
+        rows = int(shape[0])
+        cols = 1
+        for s in shape[1:]:
+            cols *= int(s)
+        group = int(c["group_size"])
+        if (
+            cols % group != 0
+            or int(c["packed_values"]) != rows * cols
+            or int(c["padded_values"]) != int(c["packed_values"])
+        ):
+            return False
+        if any(
+            sd.get("group_size", group) != group
+            for sd in c["stages_data"].values()
+        ):
+            return False  # scalar stages use a different vector layout
+
+        import numpy as np
+        import torch
+
+        from orka.compensation import compensated_assign
+
+        X = torch.as_tensor(awq_activations[c["name"]], dtype=torch.float32)
+        if X.dim() != 2 or int(X.shape[1]) != cols:
+            return False
+
+        W = c["vectors_orig"]
+        W = (
+            W if _is_torch_tensor(W) else torch.as_tensor(np.asarray(W))
+        ).to(device=resolved_device, dtype=torch.float32).reshape(rows, cols)
+        stage_keys = sorted(c["stages_data"].keys())
+        cbs = []
+        for s_key in stage_keys:
+            cb = c["stages_data"][s_key]["cb"]
+            cbs.append(
+                (
+                    cb
+                    if _is_torch_tensor(cb)
+                    else torch.as_tensor(np.asarray(cb), dtype=torch.float32)
+                ).to(resolved_device)
+            )
+        _report_progress(
+            progress_file, f"  Error-compensated re-assignment: {c['name']}"
+        )
+        idxs, decoded = compensated_assign(W, cbs, group, X)
+        for s_key, idx in zip(stage_keys, idxs):
+            stage_meta = c["stages_meta"][s_key]
+            _write_indices(
+                out_dir / stage_meta["indices"],
+                idx.cpu(),
+                stage_meta["index_bits"],
+                stage_meta.get("encoding", "raw"),
+            )
+            c["stages_data"][s_key]["indices"] = idx
+        c["decoded_sum"] = decoded.reshape(-1, group)
+        c["vectors_residual"] = None
+        c["refined_metrics"] = None
+        return True
 
     def _process_streamed_per_tensor_candidate(c: dict, stream_index: int) -> None:
         nonlocal total_index_bytes
@@ -1118,7 +1203,11 @@ def pack_checkpoint(
                 }
             )
 
-        if n_stages > 1 and em_aq_passes > 0:
+        compensated = False
+        if error_compensation:
+            compensated = _maybe_compensate_candidate(c)
+
+        if n_stages > 1 and em_aq_passes > 0 and not compensated:
             _run_em_aq_refinement(
                 candidates=[c],
                 n_stages=n_stages,
@@ -1201,8 +1290,13 @@ def pack_checkpoint(
                     c["vectors"] = flat.reshape(c["vectors"].shape)
 
         # --- Standard Outlier Extraction ---
-        # If freq-aware didn't run, or if we want to extract additional magnitude outliers
-        positions, values, new_vectors = _extract_outliers(c["vectors"], outlier_frac, c["packed_values"])
+        # Salience-guided (h_col * w^2) when calibration importance is present,
+        # magnitude otherwise.
+        positions, values, new_vectors = _extract_outliers(
+            c["vectors"], outlier_frac, c["packed_values"],
+            col_importance=c.get("col_importance"),
+            cols=int(c["shape"][-1]) if len(c["shape"]) > 1 else None,
+        )
         # Round escape values to their fp16 storage grid so the metrics the
         # pipeline reports match what decode reads back from the sidecars.
         from orka._format import _fp16_storage_roundtrip

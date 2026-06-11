@@ -253,6 +253,24 @@ def _column_importance(activations, name: str, cols: int, device):
     return (h / h.mean()).to(device)
 
 
+def _output_loss_matrix(activations, name: str, cols: int, device, max_samples: int = 512):
+    """X^T (subsampled, RMS-normalized) for the true output-space loss
+    ||(W_hat - W) @ X^T||^2 = tr(dW H dW^T) - the full-Hessian objective,
+    versus the diagonal proxy of ``_column_importance``."""
+    import torch
+
+    if not activations or name not in activations:
+        return None
+    acts = torch.as_tensor(activations[name], dtype=torch.float32)
+    if acts.dim() != 2 or int(acts.shape[1]) != cols:
+        return None
+    if int(acts.shape[0]) > max_samples:
+        step = max(1, int(acts.shape[0]) // max_samples)
+        acts = acts[::step][:max_samples]
+    rms = acts.pow(2).mean().sqrt().clamp(min=1e-8)
+    return (acts / rms).T.contiguous().to(device)
+
+
 def _distill_tensor(
     out_dir: Path,
     tm: dict,
@@ -263,6 +281,7 @@ def _distill_tensor(
     device: str,
     activations: dict | None,
     patience: int = 25,
+    output_space: bool = True,
 ) -> dict:
     import numpy as np
     import torch
@@ -272,42 +291,80 @@ def _distill_tensor(
     target = torch.from_numpy(
         _numpy_float32_array(source_tensor).reshape(-1)[:packed].copy()
     ).to(device)
-    h = _column_importance(activations, tm["name"], consts["cols"], device)
+    full_matrix = packed == consts["rows"] * consts["cols"]
 
-    def loss_fn(decoded):
+    # Candidate objectives. Which one generalizes is layer-dependent (full-H
+    # wins on o_proj/mlp inputs, the diagonal proxy on highly anisotropic
+    # q/k inputs - measured on SmolLM2), so with activations available BOTH
+    # run and an internal held-out split picks the winner per tensor.
+    xt_fit = None
+    x_val = None
+    h = None
+    if activations and tm["name"] in activations and full_matrix:
+        acts = torch.as_tensor(activations[tm["name"]], dtype=torch.float32)
+        if acts.dim() == 2 and int(acts.shape[1]) == consts["cols"] and int(acts.shape[0]) >= 64:
+            n = int(acts.shape[0])
+            val = acts[3::4][: max(16, n // 4)]
+            fit = {tm["name"]: torch.cat([acts[0::4], acts[1::4], acts[2::4]], dim=0)}
+            if output_space:
+                xt_fit = _output_loss_matrix(fit, tm["name"], consts["cols"], device)
+            h = _column_importance(fit, tm["name"], consts["cols"], device)
+            x_val = val.to(device)
+        else:
+            h = _column_importance(activations, tm["name"], consts["cols"], device)
+
+    def _diag_loss(decoded):
         diff = decoded - target
-        if h is not None and packed == consts["rows"] * consts["cols"]:
+        if h is not None and full_matrix:
             return (
                 diff.reshape(consts["rows"], consts["cols"]).pow(2) * h[None, :]
             ).mean()
         return diff.pow(2).mean()
 
-    params = [
-        torch.nn.Parameter(stage["codebook"].clone()) for stage in consts["stages"]
-    ]
-    opt = torch.optim.Adam(params, lr=lr)
+    def _output_loss(decoded):
+        # Damped full-Hessian objective (GPTQ-style damping): the isotropic
+        # term regularizes directions absent from the calibration sample.
+        mat = (decoded - target).reshape(consts["rows"], consts["cols"])
+        return (mat @ xt_fit).pow(2).mean() + 0.01 * consts["cols"] * mat.pow(2).mean()
 
-    with torch.no_grad():
-        initial_loss = float(loss_fn(_differentiable_decode(params, consts)).item())
-    best_loss = initial_loss
-    best_state = [p.detach().clone() for p in params]
-    since_best = 0
-
-    for _step in range(steps):
-        opt.zero_grad()
-        loss = loss_fn(_differentiable_decode(params, consts))
-        loss.backward()
-        opt.step()
+    def _val_error(state):
         with torch.no_grad():
-            cur = float(loss_fn(_differentiable_decode(params, consts)).item())
-        if cur < best_loss - 1e-12:
-            best_loss = cur
-            best_state = [p.detach().clone() for p in params]
-            since_best = 0
-        else:
-            since_best += 1
-            if since_best >= patience:
-                break
+            decoded = _differentiable_decode(state, consts)
+            mat = (decoded - target).reshape(consts["rows"], consts["cols"])
+            return float((x_val @ mat.T).pow(2).mean().item())
+
+    def _optimize(loss_fn):
+        params = [
+            torch.nn.Parameter(stage["codebook"].clone()) for stage in consts["stages"]
+        ]
+        opt = torch.optim.Adam(params, lr=lr)
+        with torch.no_grad():
+            init = float(loss_fn(_differentiable_decode(params, consts)).item())
+        best = init
+        state = [p.detach().clone() for p in params]
+        since = 0
+        for _step in range(steps):
+            opt.zero_grad()
+            loss = loss_fn(_differentiable_decode(params, consts))
+            loss.backward()
+            opt.step()
+            with torch.no_grad():
+                cur = float(loss_fn(_differentiable_decode(params, consts)).item())
+            if cur < best - 1e-12:
+                best, state, since = cur, [p.detach().clone() for p in params], 0
+            else:
+                since += 1
+                if since >= patience:
+                    break
+        return state, init, best
+
+    chosen_objective = "diag" if h is not None else "plain"
+    best_state, initial_loss, best_loss = _optimize(_diag_loss)
+    if xt_fit is not None and x_val is not None:
+        out_state, out_init, out_best = _optimize(_output_loss)
+        if _val_error(out_state) < _val_error(best_state):
+            best_state, initial_loss, best_loss = out_state, out_init, out_best
+            chosen_objective = "output"
 
     for stage, cb in zip(consts["stages"], best_state):
         cast_cb, actual_dtype = _cast_codebook_storage(cb.cpu(), dtype=stage["dtype"])
@@ -333,6 +390,7 @@ def _distill_tensor(
         "final_loss": best_loss,
         "mse": metrics["mse"],
         "improved": best_loss < initial_loss,
+        "objective": chosen_objective,
     }
 
 
@@ -345,6 +403,7 @@ def distill_artifact(
     activations: dict | None = None,
     max_tensors: int | None = None,
     progress: bool = True,
+    output_space: bool = True,
 ) -> dict:
     try:
         import torch  # noqa: F401
@@ -376,6 +435,7 @@ def distill_artifact(
                 lr=lr,
                 device=device,
                 activations=activations,
+                output_space=output_space,
             )
         )
         done += 1
@@ -385,6 +445,7 @@ def distill_artifact(
         "lr": lr,
         "tensor_count": len(results),
         "weighted": activations is not None,
+        "output_space": output_space and activations is not None,
     }
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
