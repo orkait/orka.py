@@ -496,6 +496,25 @@ and stores the top-r factors as fp16 sidecars, applied as the last decode
 step. Costs `(rows + cols) * r * 2` bytes per tensor. Run after `distill`;
 sidecars that do not reduce error are dropped automatically.
 
+## Serving Exports
+
+```bash
+python3 orka.py export-vllm model.orka --out model-hf \
+  --model-dir /path/to/hf-model-dir --dtype bfloat16
+```
+
+Writes a standard Hugging Face model directory (safetensors + config +
+tokenizer) loadable by vLLM, transformers, or any HF-compatible engine -
+dequantization happens once at export. Low-rank correction sidecars are
+emitted as a standard PEFT LoRA adapter (`correction-adapter/`,
+`lora_alpha = r` so the delta equals A@B^T exactly); engines with fused
+LoRA kernels apply the correction at runtime unmerged, and one artifact
+serves both the plain quantized and the corrected model. Use
+`--merge-correction` to fold corrections into the dense weights instead.
+
+The `.orka` directory remains the compact distribution form; the export is
+the serving form.
+
 ## Memory Cap
 
 `--max-gpu-mem-gb GB` (pack and sweep) calls `torch.cuda.set_per_process_memory_fraction` to cap PyTorch's per-process allocator. Exceeding the cap raises `CappedOutOfMemoryError` (subclass of `RuntimeError`) instead of crashing the kernel or exceeding the user's budget. The `--backend torch` cdist chunking is adaptive: `chunk = max(256, min(default, (1 << 28) // k))` so the squared-distance matrix never exceeds ~256 MB. This keeps single allocations safely under the cap regardless of `k`.
