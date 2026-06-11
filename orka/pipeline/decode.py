@@ -7,13 +7,13 @@ from pathlib import Path
 from typing import Sequence
 
 from orka._format import (
-    _index_bit_spec,
-    _read_f32_vector,
+    _float_value_dtype,
+    _read_codebook,
+    _read_float_vector,
     _read_indices,
     _read_outliers,
     _read_pillars,
     _read_salient,
-    _unpack_indices,
 )
 from orka.transforms.normalize import (
     _apply_block_max_scales_numpy,
@@ -49,10 +49,15 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict):
     for stage in stages:
         s_group_size = int(stage.get("group_size", group_size))
         s_index_count = math.ceil(padded_values / s_group_size)
-        cb = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, s_group_size)
+        cb = _read_codebook(
+            out_dir / stage["codebook"],
+            s_group_size,
+            stage.get("codebook_dtype", "float32"),
+        )
         idxs = _read_indices(
             out_dir / stage["indices"], int(stage["index_bits"]), s_index_count,
             packed=bool(stage.get("packed", False)),
+            encoding=stage.get("encoding", "raw"),
         )
         decoded_np += cb[idxs.astype(np.int64, copy=False)].reshape(-1)
 
@@ -83,27 +88,29 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict):
         decoded = _unrotate_flat(decoded, tensor_meta["shape"], rotation, seed)
 
     norm = tensor_meta.get("normalization", "none")
+    scale_dtype = tensor_meta.get("scale_dtype") or "float32"
     if norm == "awq":
-        scales = _read_f32_vector(
-            out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"])
+        scales = _read_float_vector(
+            out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"]), scale_dtype
         )
         decoded = _apply_col_l2_scales_numpy(decoded, tensor_meta["shape"], scales)
     elif norm in ("block-max", "channel-block-max", "slrq-block"):
-        scales = _read_f32_vector(
-            out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"])
+        scales = _read_float_vector(
+            out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"]), scale_dtype
         )
         block_size = int(tensor_meta.get("block_scale_size") or 32)
         decoded = _apply_block_max_scales_numpy(decoded, scales, block_size)
     elif norm == "awq-block-max":
-        block_scales = _read_f32_vector(
-            out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"])
+        block_scales = _read_float_vector(
+            out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"]), scale_dtype
         )
         block_size = int(tensor_meta.get("block_scale_size") or 32)
         decoded = _apply_block_max_scales_numpy(decoded, block_scales, block_size)
         awq_meta = tensor_meta.get("awq_col_scales")
         if awq_meta:
-            awq_scales = _read_f32_vector(
-                out_dir / awq_meta["path"], int(awq_meta["count"])
+            awq_scales = _read_float_vector(
+                out_dir / awq_meta["path"], int(awq_meta["count"]),
+                awq_meta.get("dtype") or "float32",
             )
             decoded = _apply_col_l2_scales_numpy(decoded, tensor_meta["shape"], awq_scales)
 
@@ -148,17 +155,18 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
         s_group_size = int(stage.get("group_size", group_size))
         s_index_count = math.ceil(padded_values / s_group_size)
 
-        cb_np = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, s_group_size)
-        if bool(stage.get("packed", False)):
-            raw = np.fromfile(str(out_dir / stage["indices"]), dtype=np.uint8)
-            idxs_np = np.asarray(
-                _unpack_indices(raw, int(stage["index_bits"]), s_index_count), dtype=np.int64
-            )
-        else:
-            idxs_np = np.frombuffer(
-                (out_dir / stage["indices"]).read_bytes(),
-                dtype=_index_bit_spec(int(stage["index_bits"]))[1],
-            ).astype(np.int64)
+        cb_np = _read_codebook(
+            out_dir / stage["codebook"], s_group_size,
+            stage.get("codebook_dtype", "float32"),
+        )
+        idxs_np = np.asarray(
+            _read_indices(
+                out_dir / stage["indices"], int(stage["index_bits"]), s_index_count,
+                packed=bool(stage.get("packed", False)),
+                encoding=stage.get("encoding", "raw"),
+            ),
+            dtype=np.int64,
+        )
         cb = torch.from_numpy(cb_np).to(device)
         idxs = torch.from_numpy(idxs_np).to(device)
         decoded.add_(cb[idxs].reshape(-1))
@@ -202,10 +210,11 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
         decoded = unrotated.reshape(-1)
 
     norm = tm.get("normalization", "none")
+    scale_np_dtype = _float_value_dtype(tm.get("scale_dtype") or "float32")
     if norm in ("block-max", "channel-block-max", "awq-block-max", "slrq-block"):
         scales = np.fromfile(
-            str(out_dir / tm["scales"]), dtype="<f4", count=int(tm["scale_count"])
-        )
+            str(out_dir / tm["scales"]), dtype=scale_np_dtype, count=int(tm["scale_count"])
+        ).astype(np.float32)
         block_size = int(tm.get("block_scale_size") or 32)
         scales_t = torch.from_numpy(scales).to(device)
         n = decoded.numel()
@@ -219,16 +228,18 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
             awq_meta = tm.get("awq_col_scales")
             if awq_meta:
                 awq_scales = np.fromfile(
-                    str(out_dir / awq_meta["path"]), dtype="<f4", count=int(awq_meta["count"])
-                )
+                    str(out_dir / awq_meta["path"]),
+                    dtype=_float_value_dtype(awq_meta.get("dtype") or "float32"),
+                    count=int(awq_meta["count"]),
+                ).astype(np.float32)
                 awq_t = torch.from_numpy(awq_scales).to(device)
                 cols = shape[-1]
                 rows = decoded.numel() // cols
                 decoded = (decoded[:rows * cols].reshape(rows, cols) * awq_t[None, :]).reshape(-1)
     elif norm == "awq":
         scales = np.fromfile(
-            str(out_dir / tm["scales"]), dtype="<f4", count=int(tm["scale_count"])
-        )
+            str(out_dir / tm["scales"]), dtype=scale_np_dtype, count=int(tm["scale_count"])
+        ).astype(np.float32)
         scales_t = torch.from_numpy(scales).to(device)
         cols = scales_t.numel()
         rows = decoded.numel() // cols
