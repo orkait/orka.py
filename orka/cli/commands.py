@@ -267,6 +267,28 @@ def cmd_sem_calc(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_correct(args: argparse.Namespace) -> int:
+    from orka.correct import correct_artifact
+
+    result = correct_artifact(
+        Path(args.artifact),
+        rank=args.rank,
+        device=args.device,
+        max_tensors=args.max_tensors,
+    )
+    print(
+        json.dumps(
+            {
+                "artifact": result["artifact"],
+                "tensor_count": result["tensor_count"],
+                "improved_count": result["improved_count"],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def cmd_distill(args: argparse.Namespace) -> int:
     from orka.distill import distill_artifact
 

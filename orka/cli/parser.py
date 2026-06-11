@@ -10,6 +10,7 @@ import argparse
 from orka.allocate import DEFAULT_CANDIDATE_SPECS, cmd_allocate
 from orka.cli.commands import (
     cmd_calc,
+    cmd_correct,
     cmd_distill,
     cmd_eval,
     cmd_eval_sweep,
@@ -283,6 +284,17 @@ def build_parser() -> argparse.ArgumentParser:
     allocate.add_argument("--max-tensors", type=int, default=None)
     allocate.add_argument("--progress-file", default=None)
     allocate.set_defaults(func=cmd_allocate)
+
+    correct = sub.add_parser(
+        "correct",
+        help="add low-rank correction sidecars: W ~ decode(W) + A@B^T (fp16, "
+             "rank r) fitted to the post-pack residual",
+    )
+    correct.add_argument("artifact")
+    correct.add_argument("--rank", type=int, default=8)
+    correct.add_argument("--device", default="cpu")
+    correct.add_argument("--max-tensors", type=int, default=None)
+    correct.set_defaults(func=cmd_correct)
 
     distill = sub.add_parser(
         "distill",

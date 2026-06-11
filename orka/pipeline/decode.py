@@ -27,6 +27,28 @@ from orka.transforms.rotate import (
 )
 
 
+def _read_lowrank(out_dir: Path, lr_meta: dict):
+    import numpy as np
+
+    dtype = _float_value_dtype(lr_meta.get("dtype", "float16"))
+    rank = int(lr_meta["rank"])
+    a = np.fromfile(str(out_dir / lr_meta["a"]), dtype=dtype).astype(np.float32)
+    b = np.fromfile(str(out_dir / lr_meta["b"]), dtype=dtype).astype(np.float32)
+    return a.reshape(-1, rank), b.reshape(-1, rank)
+
+
+def _apply_lowrank_numpy(decoded, shape, lr_meta, out_dir: Path):
+    import numpy as np
+
+    rows = int(shape[0])
+    cols = 1
+    for s in shape[1:]:
+        cols *= int(s)
+    a, b = _read_lowrank(out_dir, lr_meta)
+    mat = np.asarray(decoded, dtype=np.float32)[: rows * cols].reshape(rows, cols)
+    return (mat + a @ b.T).reshape(-1)
+
+
 def _decode_tensor(out_dir: Path, tensor_meta: dict):
     import numpy as np
 
@@ -128,6 +150,10 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict):
             flat_indices = np.arange(b_count, dtype=np.int64) * block_size + s_idx.astype(np.int64, copy=False)
             mask = flat_indices < decoded.shape[0]
             decoded[flat_indices[mask]] = s_val[mask]
+
+    lr_meta = tensor_meta.get("lowrank")
+    if lr_meta:
+        decoded = _apply_lowrank_numpy(decoded, tensor_meta["shape"], lr_meta, out_dir)
 
     return decoded
 
@@ -266,5 +292,16 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
         # Guard against padding
         mask = flat_indices < decoded.numel()
         decoded[flat_indices[mask]] = s_val[mask]
+
+    lr_meta = tm.get("lowrank")
+    if lr_meta:
+        a_np, b_np = _read_lowrank(out_dir, lr_meta)
+        a_t = torch.from_numpy(a_np).to(device)
+        b_t = torch.from_numpy(b_np).to(device)
+        rows = shape[0]
+        cols = decoded.numel() // rows
+        decoded = (
+            decoded[: rows * cols].reshape(rows, cols) + a_t @ b_t.T
+        ).reshape(-1)
 
     return decoded.reshape(shape)
