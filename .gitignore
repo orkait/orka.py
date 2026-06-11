@@ -23,3 +23,6 @@ test_model.json
 .local_runs/
 llama.cpp/
 *.log
+kernel/*.so
+kernel/test_orka_vq
+kernel/test_orka_vq_ci
