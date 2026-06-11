@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 
 from orka.allocate import DEFAULT_CANDIDATE_SPECS, cmd_allocate
+from orka.export import cmd_export_vllm
 from orka.cli.commands import (
     cmd_calc,
     cmd_correct,
@@ -293,6 +294,29 @@ def build_parser() -> argparse.ArgumentParser:
     allocate.add_argument("--max-tensors", type=int, default=None)
     allocate.add_argument("--progress-file", default=None)
     allocate.set_defaults(func=cmd_allocate)
+
+    export_cmd = sub.add_parser(
+        "export-vllm",
+        help="export to a Hugging Face model directory loadable by vLLM / "
+             "transformers; low-rank corrections become a PEFT LoRA adapter",
+    )
+    export_cmd.add_argument("artifact")
+    export_cmd.add_argument("--out", required=True)
+    export_cmd.add_argument(
+        "--model-dir", default=None,
+        help="HF dir for config/tokenizer sidecars (default: source's directory)",
+    )
+    export_cmd.add_argument(
+        "--dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16"
+    )
+    export_cmd.add_argument(
+        "--merge-correction",
+        action="store_true",
+        help="merge low-rank corrections into the dense weights instead of "
+             "emitting a PEFT adapter",
+    )
+    export_cmd.add_argument("--device", default="cpu")
+    export_cmd.set_defaults(func=cmd_export_vllm)
 
     correct = sub.add_parser(
         "correct",
