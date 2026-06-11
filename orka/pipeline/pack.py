@@ -334,6 +334,7 @@ def _release_candidate_payload(c: dict) -> None:
         "pillar_values",
         "vector_weights",
         "sample_weights",
+        "col_importance",
     ):
         if key in c:
             c[key] = None
@@ -912,10 +913,17 @@ def pack_checkpoint(
                 #                     column groups in the Lloyd update.
                 vw = None
                 sw = None
+                col_importance = None
                 if (awq_activations is not None and name in awq_activations and shape[-1] % resolved_group_size == 0):
                     import torch
                     H_diag = torch.as_tensor(awq_activations[name], dtype=torch.float32).pow(2).mean(dim=0)
                     cols = int(shape[-1])
+                    # Column importance is in ORIGINAL column space; rotation
+                    # mixes columns, so salience-guided escape is rotation-off only.
+                    if tensor_rotation == "none":
+                        col_importance = (
+                            H_diag if backend == "torch" else H_diag.numpy()
+                        )
                     groups_per_row = cols // resolved_group_size
                     h_groups = H_diag.reshape(groups_per_row, resolved_group_size)
                     vw = h_groups.mean(dim=0).clamp(min=1e-6).tolist()
@@ -944,7 +952,8 @@ def pack_checkpoint(
                     "family": family, "rotation_seed": tensor_seed,
                     "rotation": tensor_rotation,
                     "group_size": resolved_group_size,
-                    "vector_weights": vw, "sample_weights": sw, "stages_data": {},
+                    "vector_weights": vw, "sample_weights": sw,
+                    "col_importance": col_importance, "stages_data": {},
                 })
                 tensors_emitted += 1
 
@@ -1201,8 +1210,13 @@ def pack_checkpoint(
                     c["vectors"] = flat.reshape(c["vectors"].shape)
 
         # --- Standard Outlier Extraction ---
-        # If freq-aware didn't run, or if we want to extract additional magnitude outliers
-        positions, values, new_vectors = _extract_outliers(c["vectors"], outlier_frac, c["packed_values"])
+        # Salience-guided (h_col * w^2) when calibration importance is present,
+        # magnitude otherwise.
+        positions, values, new_vectors = _extract_outliers(
+            c["vectors"], outlier_frac, c["packed_values"],
+            col_importance=c.get("col_importance"),
+            cols=int(c["shape"][-1]) if len(c["shape"]) > 1 else None,
+        )
         # Round escape values to their fp16 storage grid so the metrics the
         # pipeline reports match what decode reads back from the sidecars.
         from orka._format import _fp16_storage_roundtrip
