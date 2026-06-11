@@ -42,6 +42,10 @@ def _copy_artifact_files(source: Path, target: Path) -> None:
 
 
 def _check_manifest_compatibility(base: dict, candidate: dict, candidate_dir: Path) -> None:
+    # awq_enabled / hessian_weighted are deliberately NOT required: they
+    # describe how codebooks were learned (sequential packing legitimately
+    # mixes weighted and unweighted blocks), not the on-disk format. The
+    # format-relevant normalization mode is checked below.
     required_fields = [
         "format",
         "version",
@@ -51,7 +55,6 @@ def _check_manifest_compatibility(base: dict, candidate: dict, candidate_dir: Pa
         "normalization",
         "rotation",
         "outlier_frac",
-        "awq_enabled",
         "codebook_mode",
         "n_stages",
     ]

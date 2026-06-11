@@ -83,6 +83,9 @@ def cmd_pack(args: argparse.Namespace) -> int:
     _apply_system_ram_cap(args.max_system_ram_gb, getattr(args, "workload_budget_gb", None))
     _apply_cpu_cap(args.max_cpu_threads)
     try:
+        if getattr(args, "sequential_calibration", False):
+            return _run_sequential_pack(args, source_file)
+
         awq_activations = _load_awq_activations(args)
 
         if is_rvq_mixed_spec(args.quant_mode):
@@ -148,6 +151,79 @@ def cmd_pack(args: argparse.Namespace) -> int:
         _stop_ram_monitor()
 
 
+def _run_sequential_pack(args: argparse.Namespace, source_file: Path) -> int:
+    from orka.pipeline.sequential import pack_checkpoint_sequential
+
+    if not args.awq_model_dir or not args.awq_calibration:
+        print(
+            "Error: --sequential-calibration requires --awq-model-dir and "
+            "--awq-calibration.",
+            file=os.sys.stderr,
+        )
+        return 1
+    if args.codebook_mode != "per-tensor":
+        print(
+            "Error: --sequential-calibration requires --codebook-mode per-tensor.",
+            file=os.sys.stderr,
+        )
+        return 1
+    if is_rvq_mixed_spec(args.quant_mode):
+        print(
+            "Error: --sequential-calibration does not support rvq-mixed yet; "
+            "use an explicit spec like rvq-16-8.",
+            file=os.sys.stderr,
+        )
+        return 1
+
+    sizes = _resolve_quant_stages(
+        args.quant_mode, args.codebook_sizes, args.codebook_size
+    )
+    manifest = _wrap_capped_oom(
+        args.max_gpu_mem_gb,
+        pack_checkpoint_sequential,
+        source=source_file,
+        out_dir=Path(args.out),
+        model_dir=Path(args.awq_model_dir),
+        prompts_path=Path(args.awq_calibration),
+        model_device=args.device if args.backend == "torch" else "cpu",
+        calibration_max_prompts=args.calibration_max_prompts,
+        calibration_max_length=args.calibration_max_length,
+        calibration_max_samples=args.calibration_max_samples,
+        progress_file=Path(args.progress_file) if args.progress_file else None,
+        group_size=args.group_size,
+        codebook_size=sizes[0],
+        codebook_sizes=sizes,
+        iterations=args.iterations,
+        max_values_per_tensor=args.max_values_per_tensor,
+        codebook_mode=args.codebook_mode,
+        sample_vectors=args.sample_vectors,
+        backend=args.backend,
+        normalization=args.normalization,
+        device=args.device,
+        outlier_frac=args.outlier_frac,
+        rotation=args.rotation,
+        rotation_seed=args.rotation_seed,
+        block_scale_size=args.block_scale_size,
+        em_aq_passes=getattr(args, "em_aq_passes", 3),
+        slrq_salient=getattr(args, "slrq_salient", True),
+        codebook_cache_dir=Path(args.codebook_cache).expanduser()
+        if args.codebook_cache
+        else None,
+    )
+    print(
+        json.dumps(
+            {
+                "out": args.out,
+                "tensor_count": manifest["tensor_count"],
+                "total_index_bytes": manifest["total_index_bytes"],
+                "sequential_calibration": True,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def cmd_merge_orka(args: argparse.Namespace) -> int:
     input_artifacts = [Path(path) for path in args.artifacts]
     out_dir = Path(args.out)
@@ -176,6 +252,60 @@ def cmd_sem_calc(args: argparse.Namespace) -> int:
         return 0
     print("Nothing to calculate.")
     return 1
+
+
+def cmd_distill(args: argparse.Namespace) -> int:
+    from orka.distill import distill_artifact
+
+    activations = None
+    if args.activations_file:
+        import torch
+
+        path = Path(args.activations_file)
+        if not path.exists():
+            raise FileNotFoundError(f"activations file not found: {path}")
+        try:
+            with open(path, "r") as f:
+                raw = json.load(f)
+            activations = {
+                k: torch.tensor(v, dtype=torch.float32) for k, v in raw.items()
+            }
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            activations = torch.load(str(path), map_location="cpu")
+    elif args.model_dir and args.prompts:
+        from orka.activations import _collect_activations_hf
+        from orka.eval.prompts import _read_prompt_file
+
+        prompts = _read_prompt_file(
+            Path(args.prompts), max_prompts=args.calibration_max_prompts
+        )
+        activations = _collect_activations_hf(
+            Path(args.model_dir),
+            prompts,
+            max_length=args.calibration_max_length,
+            device=args.device,
+            max_samples_per_layer=args.calibration_max_samples,
+        )
+
+    result = distill_artifact(
+        Path(args.artifact),
+        steps=args.steps,
+        lr=args.lr,
+        device=args.device,
+        activations=activations,
+        max_tensors=args.max_tensors,
+    )
+    print(
+        json.dumps(
+            {
+                "artifact": result["artifact"],
+                "tensor_count": result["tensor_count"],
+                "improved_count": result["improved_count"],
+            },
+            indent=2,
+        )
+    )
+    return 0
 
 
 def cmd_report(args: argparse.Namespace) -> int:

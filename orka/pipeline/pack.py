@@ -66,6 +66,64 @@ from orka.transforms import (
 )
 
 
+def _weights_digest(sample_weights) -> str:
+    """Cache-key component for importance weights. Content-addressed so a
+    cached codebook is never reused when calibration activations changed."""
+    if sample_weights is None:
+        return "unweighted"
+    import hashlib
+
+    arr = (
+        sample_weights.detach().cpu().numpy()
+        if hasattr(sample_weights, "detach")
+        else sample_weights
+    )
+    import numpy as np
+
+    payload = np.asarray(arr, dtype="<f4").tobytes()
+    return "sw-" + hashlib.blake2b(payload, digest_size=8).hexdigest()
+
+
+def _sample_vectors_and_weights(vectors, weights, sample_vectors: int | None):
+    """Sample training rows and their per-sample weights at identical positions.
+
+    Mirrors ``_sample_vector_rows`` (deterministic linspace positions) so the
+    weight of each sampled row stays aligned with the row itself.
+    """
+    if (
+        sample_vectors is None
+        or sample_vectors <= 0
+        or sample_vectors >= len(vectors)
+    ):
+        return vectors, weights
+    if _is_torch_tensor(vectors):
+        import torch
+
+        positions = (
+            torch.linspace(
+                0,
+                len(vectors) - 1,
+                steps=sample_vectors,
+                device=vectors.device,
+                dtype=torch.float64,
+            )
+            .round()
+            .to(dtype=torch.long)
+            .clamp_(max=len(vectors) - 1)
+        )
+        sampled = vectors.index_select(0, positions)
+        if weights is None:
+            return sampled, None
+        if _is_torch_tensor(weights):
+            return sampled, weights.index_select(0, positions.to(weights.device))
+        return sampled, weights[positions.detach().cpu().numpy()]
+    import numpy as np
+
+    positions = np.linspace(0, len(vectors) - 1, sample_vectors, dtype=np.int64)
+    sampled = vectors[positions]
+    return sampled, (weights[positions] if weights is not None else None)
+
+
 def _numpy_vectors_from_tensor(tensor: object, group_size: int, limit: int | None):
     try:
         import numpy as np
@@ -268,6 +326,7 @@ def _release_candidate_payload(c: dict) -> None:
         "pillar_positions",
         "pillar_values",
         "vector_weights",
+        "sample_weights",
     ):
         if key in c:
             c[key] = None
@@ -440,12 +499,16 @@ def _run_em_aq_refinement(
                     if s_group_size == 1 and c["group_size"] > 1:
                         target_train = target.reshape(-1, 1)
 
-                    training = _sample_vector_rows(target_train, sample_vectors)
+                    sw = c.get("sample_weights") if s_group_size > 1 else None
+                    training, sw_train = _sample_vectors_and_weights(
+                        target_train, sw, sample_vectors
+                    )
                     vw = c.get("vector_weights") if s_group_size > 1 else None
 
                     cb, _, _ = learn_codebook_auto(
                         training, min(k, len(training)), 2, backend, resolved_device,
                         vector_weights=vw, initial_codebook=sd["cb"],
+                        sample_weights=sw_train,
                     )
                     indices, _ = quantize_vectors_auto(target_train, cb, backend, resolved_device, vector_weights=vw)
 
@@ -519,6 +582,7 @@ def pack_checkpoint(
     awq_alpha: float = 0.5,
     max_tensors: int | None = None,
     only_tensors: list[str] | None = None,
+    only_tensors_passthrough: bool = True,
     progress_file: Path | None = None,
     sensitivity_map: dict | None = None,
     codebook_cache_dir: Path | None = None,
@@ -545,9 +609,10 @@ def pack_checkpoint(
         raise ValueError(
             "normalization must be 'none', 'block-max', 'channel-block-max', 'awq', 'awq-block-max', or 'slrq-block'"
         )
-    if (
-        normalization in {"awq", "awq-block-max"} or awq_activations is not None
-    ) and not awq_feature_enabled():
+    # The feature gate guards only the legacy AWQ *normalization* modes.
+    # Calibration activations alone are allowed: they feed Hessian-proxy
+    # importance weighting, which changes codebook learning, not the format.
+    if normalization in {"awq", "awq-block-max"} and not awq_feature_enabled():
         raise RuntimeError(AWQ_DISABLED_MESSAGE)
     if rotation not in {"none", "orthogonal", "hadamard"}:
         raise ValueError("rotation must be 'none', 'orthogonal', or 'hadamard'")
@@ -644,6 +709,7 @@ def pack_checkpoint(
         "rotation": rotation,
         "rotation_seed": rotation_seed,
         "awq_enabled": awq_activations is not None,
+        "hessian_weighted": awq_activations is not None,
         "em_aq_passes": em_aq_passes,
         "slrq_salient": slrq_salient,
         "tensor_partition_count": (
@@ -681,19 +747,10 @@ def pack_checkpoint(
             for name, tensor in _load_tensors(source):
                 _check_ram_cap()
 
-                if only_tensors is not None:
-                    base_name = name.replace(".weight", "")
-                    if name not in only_tensors and base_name not in only_tensors:
-                        _passthrough[name] = tensor
-                        continue
-
-                if max_tensors is not None and tensors_emitted >= max_tensors:
-                    break
-
                 shape = _tensor_shape(tensor)
                 name_lower = name.lower()
                 is_candidate = len(shape) >= 2
-                
+
                 # Exclude biases, norms, and architectural sidecars.
                 if any(
                     x in name_lower
@@ -701,9 +758,24 @@ def pack_checkpoint(
                 ):
                     is_candidate = False
 
+                # Non-candidates (norms, biases) always pass through so any
+                # partial artifact stays completable.
                 if not is_candidate:
                     _passthrough[name] = tensor
                     continue
+
+                if only_tensors is not None:
+                    base_name = name.replace(".weight", "")
+                    if name not in only_tensors and base_name not in only_tensors:
+                        # Unlisted candidates: passthrough by default (legacy
+                        # behaviour); skipped entirely for partitioned runs
+                        # (sequential packing) so partial artifacts stay small.
+                        if only_tensors_passthrough:
+                            _passthrough[name] = tensor
+                        continue
+
+                if max_tensors is not None and tensors_emitted >= max_tensors:
+                    break
                 
                 # Skipped tensors stay FP16 in the artifact (passthrough), not quantized.
                 if name.replace(".weight", "") in skipped_tensors or name in skipped_tensors:
@@ -786,11 +858,33 @@ def pack_checkpoint(
                         tensor, resolved_group_size, max_values_per_tensor
                     )
                 
+                # --- HESSIAN-PROXY IMPORTANCE WEIGHTS ---
+                # h_j = E[x_j^2] per input column from calibration activations.
+                # Two weight sets feed weighted k-means:
+                #   vector_weights  - within-group dimension pattern (global average),
+                #                     scales the distance metric per dimension.
+                #   sample_weights  - per-vector scalar = mean importance of the columns
+                #                     that vector covers, tiled across rows (row-major
+                #                     flatten). Pulls centroids toward high-energy
+                #                     column groups in the Lloyd update.
                 vw = None
+                sw = None
                 if (awq_activations is not None and name in awq_activations and shape[-1] % resolved_group_size == 0):
                     import torch
                     H_diag = torch.as_tensor(awq_activations[name], dtype=torch.float32).pow(2).mean(dim=0)
-                    vw = H_diag.reshape(-1, resolved_group_size).mean(dim=0).clamp(min=1e-6).tolist()
+                    cols = int(shape[-1])
+                    groups_per_row = cols // resolved_group_size
+                    h_groups = H_diag.reshape(groups_per_row, resolved_group_size)
+                    vw = h_groups.mean(dim=0).clamp(min=1e-6).tolist()
+                    rows_count = padded_values // cols
+                    if rows_count * cols == padded_values:
+                        sw_row = h_groups.mean(dim=1).clamp(min=1e-6)
+                        sw_row = sw_row / sw_row.mean()
+                        sw_full = sw_row.repeat(rows_count)
+                        if backend == "torch":
+                            sw = sw_full
+                        else:
+                            sw = sw_full.numpy()
 
                 prefetch_queue.put({
                     "name": name, "shape": shape, "source_flat": source_flat,
@@ -807,7 +901,7 @@ def pack_checkpoint(
                     "family": family, "rotation_seed": tensor_seed,
                     "rotation": tensor_rotation,
                     "group_size": resolved_group_size,
-                    "vector_weights": vw, "stages_data": {},
+                    "vector_weights": vw, "sample_weights": sw, "stages_data": {},
                 })
                 tensors_emitted += 1
 
@@ -875,19 +969,20 @@ def pack_checkpoint(
                         outlier_frac,
                         max_tensors,
                         stage_i,
-                        "awq-weighted" if awq_activations else "unweighted",
+                        _weights_digest(c.get("sample_weights")),
                     ]
                 )
                 if stage_i == 0
                 else None
             )
             vw = c.get("vector_weights") if not is_scalar_stage else None
+            sw = c.get("sample_weights") if not is_scalar_stage else None
             cached = _codebook_cache_load(codebook_cache_dir, cache_key) if cache_key else None
             if cached is not None:
                 cb = cached
                 training_count = sample_vectors or len(v_res)
             else:
-                training = _sample_vector_rows(v_res, sample_vectors)
+                training, sw_train = _sample_vectors_and_weights(v_res, sw, sample_vectors)
                 cb_seed = _derive_seed(
                     ["per-tensor", src_sig, c["name"], c_group_size, k, stage_i]
                 )
@@ -899,6 +994,7 @@ def pack_checkpoint(
                     resolved_device,
                     vector_weights=vw,
                     seed=cb_seed,
+                    sample_weights=sw_train,
                 )
                 training_count = len(training)
                 if cache_key:
@@ -1276,7 +1372,7 @@ def pack_checkpoint(
                             outlier_frac,
                             max_tensors,
                             stage_i,
-                            "awq-weighted" if awq_activations else "unweighted",
+                            _weights_digest(c.get("sample_weights")),
                         ]
                     )
                     if stage_i == 0
@@ -1291,7 +1387,10 @@ def pack_checkpoint(
                     cb = cached
                     training_count = sample_vectors or len(v_res)
                 else:
-                    training = _sample_vector_rows(v_res, sample_vectors)
+                    sw = c.get("sample_weights") if not is_scalar_stage else None
+                    training, sw_train = _sample_vectors_and_weights(
+                        v_res, sw, sample_vectors
+                    )
                     cb_seed = _derive_seed(
                         ["per-tensor", src_sig, c["name"], c_group_size, k, stage_i]
                     )
@@ -1303,6 +1402,7 @@ def pack_checkpoint(
                         resolved_device,
                         vector_weights=vw,
                         seed=cb_seed,
+                        sample_weights=sw_train,
                     )
                     training_count = len(training)
                     if cache_key:

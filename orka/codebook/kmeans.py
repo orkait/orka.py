@@ -254,7 +254,7 @@ def _numpy_assign(vectors, codebook, chunk_size: int = 65536, r_norm_sq=None, ve
     return indices, total / (rows.shape[0] * width)
 
 
-def _numpy_centroid_sums(rows, indices, k: int):
+def _numpy_centroid_sums(rows, indices, k: int, sample_weights=None):
     import numpy as np
 
     vectors = np.asarray(rows, dtype=np.float32)
@@ -263,6 +263,11 @@ def _numpy_centroid_sums(rows, indices, k: int):
         raise ValueError("indices length must match rows")
     if assignments.size and (assignments.min() < 0 or assignments.max() >= k):
         raise IndexError("centroid index out of bounds")
+    if sample_weights is not None:
+        sw = np.asarray(sample_weights, dtype=np.float32).reshape(-1)
+        if sw.shape[0] != vectors.shape[0]:
+            raise ValueError("sample_weights length must match rows")
+        vectors = vectors * sw[:, None]
 
     sums = np.empty((k, vectors.shape[1]), dtype=np.float32)
     for dim in range(vectors.shape[1]):
@@ -346,7 +351,7 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_nor
 
 def _learn_codebook_numpy(
     vectors, codebook_size: int, iterations: int, seed: int | None = None,
-    initial_codebook=None, vector_weights=None,
+    initial_codebook=None, vector_weights=None, sample_weights=None,
 ):
     import numpy as np
 
@@ -383,8 +388,15 @@ def _learn_codebook_numpy(
             rows, codebook, r_norm_sq=r_norm_sq if vector_weights is None else None,
             vector_weights=vector_weights
         )
-        sums = _numpy_centroid_sums(rows, indices, k)
-        counts = np.bincount(indices, minlength=k).astype(np.float32)
+        sums = _numpy_centroid_sums(rows, indices, k, sample_weights=sample_weights)
+        if sample_weights is None:
+            counts = np.bincount(indices, minlength=k).astype(np.float32)
+        else:
+            counts = np.bincount(
+                indices,
+                weights=np.asarray(sample_weights, dtype=np.float32).reshape(-1),
+                minlength=k,
+            ).astype(np.float32)
         nonzero = counts > 0
         codebook[nonzero] = sums[nonzero] / counts[nonzero, None]
 
@@ -403,6 +415,7 @@ def _learn_codebook_torch(
     vector_weights=None,
     seed: int | None = None,
     initial_codebook=None,
+    sample_weights=None,
 ):
     try:
         import torch
@@ -428,6 +441,11 @@ def _learn_codebook_torch(
 
     rows_dtype = rows.to(dtype)
     r_norm_sq = torch.sum(rows.to(torch.float32) * rows.to(torch.float32), dim=1, keepdim=True).to(dtype)
+    sw_t = None
+    if sample_weights is not None:
+        sw_t = torch.as_tensor(sample_weights, dtype=torch.float32, device=rows.device).reshape(-1)
+        if int(sw_t.shape[0]) != n:
+            raise ValueError("sample_weights length must match rows")
 
     with torch.no_grad():
         if initial_codebook is not None:
@@ -465,8 +483,12 @@ def _learn_codebook_torch(
             sums.zero_()
             counts.zero_()
 
-            sums.index_add_(0, chosen, rows)
-            counts.index_put_((chosen,), torch.ones(len(chosen), device=rows.device), accumulate=True)
+            if sw_t is None:
+                sums.index_add_(0, chosen, rows)
+                counts.index_put_((chosen,), torch.ones(len(chosen), device=rows.device), accumulate=True)
+            else:
+                sums.index_add_(0, chosen, rows * sw_t[:, None])
+                counts.index_put_((chosen,), sw_t, accumulate=True)
 
             nonzero = counts > 0
             codebook[nonzero] = sums[nonzero] / counts[nonzero, None]
@@ -497,6 +519,7 @@ def learn_codebook_auto(
     vector_weights=None,
     seed: int | None = None,
     initial_codebook=None,
+    sample_weights=None,
 ):
     if backend not in {"auto", "numpy", "torch"}:
         raise ValueError("backend must be 'auto', 'numpy', or 'torch'")
@@ -509,6 +532,7 @@ def learn_codebook_auto(
             vector_weights=vector_weights,
             seed=seed,
             initial_codebook=initial_codebook,
+            sample_weights=sample_weights,
         )
     if not _is_numpy_array(vectors):
         raise RuntimeError("NumPy backend requires NumPy array tensors")
@@ -519,6 +543,7 @@ def learn_codebook_auto(
         seed=seed,
         initial_codebook=initial_codebook,
         vector_weights=vector_weights,
+        sample_weights=sample_weights,
     )
 
 
