@@ -89,6 +89,75 @@ def _normalize_tensor_block_max_numpy(tensor, block_size: int):
     return normalized.reshape(arr.shape), scales, arr.reshape(-1)
 
 
+def _normalize_tensor_channel_block_max_torch(tensor, block_size: int, device):
+    """Channel-aware block-max: blocks are aligned to hidden-dim columns.
+
+    For a [rows, cols] weight matrix, we reshape to [rows, cols//block_size, block_size]
+    so each scale factor governs a contiguous slice of channels within a single row.
+    This prevents an outlier in one channel from inflating the scale for unrelated channels.
+    Falls back to standard flat block-max if cols is not divisible by block_size.
+    """
+    import torch
+
+    _, arr = _torch_f32(tensor, device)
+    shape = list(arr.shape)
+    source_flat = arr.reshape(-1).detach().cpu()
+
+    if len(shape) < 2 or shape[-1] % block_size != 0:
+        # Fallback to standard flat block-max for 1D or non-divisible tensors
+        return _normalize_tensor_block_max_torch(tensor, block_size, device)
+
+    rows = _product(shape[:-1])
+    cols = shape[-1]
+    mat = arr.reshape(rows, cols)
+
+    # Reshape so blocks are channel-aligned: [rows, cols // block_size, block_size]
+    blocks_per_row = cols // block_size
+    blocked = mat.reshape(rows, blocks_per_row, block_size)
+    scales = blocked.abs().amax(dim=2)  # [rows, blocks_per_row]
+    safe = torch.where(scales == 0, torch.ones_like(scales), scales)
+    normalized = (blocked / safe.unsqueeze(2)).reshape(rows, cols)
+
+    # Flatten scales in row-major order for compatibility with decode
+    scales_flat = safe.reshape(-1)
+    normalized_flat = normalized.reshape(-1)
+
+    return (
+        normalized_flat.reshape(arr.shape),
+        scales_flat.detach().cpu(),
+        source_flat,
+    )
+
+
+def _normalize_tensor_channel_block_max_numpy(tensor, block_size: int):
+    """Channel-aware block-max (NumPy): blocks aligned to hidden-dim columns."""
+    import numpy as np
+
+    arr = _numpy_float32_array(tensor)
+    shape = list(arr.shape)
+    source_flat = arr.reshape(-1).copy()
+
+    if len(shape) < 2 or shape[-1] % block_size != 0:
+        return _normalize_tensor_block_max_numpy(tensor, block_size)
+
+    rows = 1
+    for s in shape[:-1]:
+        rows *= int(s)
+    cols = shape[-1]
+    mat = arr.reshape(rows, cols)
+
+    blocks_per_row = cols // block_size
+    blocked = mat.reshape(rows, blocks_per_row, block_size)
+    scales = np.abs(blocked).max(axis=2).astype(np.float32)  # [rows, blocks_per_row]
+    safe = np.where(scales == 0, 1.0, scales).astype(np.float32)
+    normalized = (blocked / safe[:, :, None]).reshape(rows, cols)
+
+    scales_flat = safe.reshape(-1)
+    normalized_flat = normalized.reshape(-1)
+
+    return normalized_flat.reshape(arr.shape), scales_flat, source_flat
+
+
 def _normalize_tensor_slrq_block_torch(tensor, block_size: int, device, salient_enabled: bool = True):
     import torch
 
@@ -274,6 +343,12 @@ def _apply_normalization(
             tensor, row_scales, source_flat, awq_col_scales = _normalize_tensor_awq_block_max_torch(
                 tensor, awq_activations[name], awq_alpha, block_scale_size, device)
                 
+    elif normalization == "channel-block-max":
+        if is_torch:
+            tensor, row_scales, source_flat = _normalize_tensor_channel_block_max_torch(tensor, block_scale_size, device)
+        else:
+            tensor, row_scales, source_flat = _normalize_tensor_channel_block_max_numpy(tensor, block_scale_size)
+
     elif normalization == "block-max":
         if is_torch:
             tensor, row_scales, source_flat = _normalize_tensor_block_max_torch(tensor, block_scale_size, device)

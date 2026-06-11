@@ -30,6 +30,10 @@ def _kmeans_pp_init_torch(
     if seed is not None:
         gen.manual_seed(int(seed) & ((1 << 63) - 1))
 
+    if k > 2048:
+        perm = torch.randperm(n, generator=gen, device=rows.device)
+        return rows[perm[:k]].clone()
+
     # Use FP16 on CUDA for 2× faster distance computation (ranking is identical)
     use_half = rows.device.type == "cuda"
     dist_dtype = torch.float16 if use_half else torch.float32
@@ -135,6 +139,10 @@ def _kmeans_parallel_init_numpy(rows, k: int, seed: int | None = None, oversampl
         else np.random.default_rng()
     )
 
+    if k > 2048:
+        idx = rng.choice(n, size=k, replace=False)
+        return rows[idx].copy()
+
     first = int(rng.integers(n))
     min_d2 = np.sum((rows - rows[first]) ** 2, axis=1, dtype=np.float64)
     candidate_chunks = [rows[[first]]]
@@ -199,11 +207,18 @@ def _kmeans_parallel_init_numpy(rows, k: int, seed: int | None = None, oversampl
 
     return centroids[:k].astype(np.float32).copy()
 
-def _numpy_assign(vectors, codebook, chunk_size: int = 65536, r_norm_sq=None):
+def _numpy_assign(vectors, codebook, chunk_size: int = 65536, r_norm_sq=None, vector_weights=None):
     import numpy as np
 
     rows = np.asarray(vectors, dtype=np.float32)
     centroids = np.asarray(codebook, dtype=np.float32)
+    if vector_weights is not None:
+        W = np.asarray(vector_weights, dtype=np.float32)
+        sqrt_W = np.sqrt(W)
+        rows = rows * sqrt_W
+        centroids = centroids * sqrt_W
+        r_norm_sq = np.sum(rows * rows, axis=1, dtype=np.float32)
+
     row_norms = None
     if r_norm_sq is not None:
         row_norms = np.asarray(r_norm_sq, dtype=np.float32).reshape(-1)
@@ -259,7 +274,7 @@ def _numpy_centroid_sums(rows, indices, k: int):
     return sums
 
 
-def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_norm_sq=None):
+def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_norm_sq=None, vector_weights=None):
     try:
         import torch
     except Exception as exc:
@@ -272,6 +287,13 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_nor
 
     rows = _torch_float32_matrix(vectors, device).to(dtype)
     centroids = _torch_float32_matrix(codebook, device).to(dtype)
+
+    if vector_weights is not None:
+        W = torch.as_tensor(vector_weights, dtype=torch.float32, device=resolved)
+        sqrt_W = torch.sqrt(W).to(dtype)
+        rows = rows * sqrt_W
+        centroids = centroids * sqrt_W
+        r_norm_sq = torch.sum(rows.to(torch.float32) * rows.to(torch.float32), dim=1, keepdim=True).to(dtype)
 
     indices_parts = []
     total = 0.0
@@ -324,7 +346,7 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_nor
 
 def _learn_codebook_numpy(
     vectors, codebook_size: int, iterations: int, seed: int | None = None,
-    initial_codebook=None,
+    initial_codebook=None, vector_weights=None,
 ):
     import numpy as np
 
@@ -357,13 +379,19 @@ def _learn_codebook_numpy(
         if (iter_i + 1) % report_interval == 0 or iter_i == 0 or iter_i == effective_iters - 1:
             print(f"      [Lloyd] Iteration {iter_i + 1}/{effective_iters}", flush=True)
         _check_ram_cap()
-        indices, _ = _numpy_assign(rows, codebook, r_norm_sq=r_norm_sq)
+        indices, _ = _numpy_assign(
+            rows, codebook, r_norm_sq=r_norm_sq if vector_weights is None else None,
+            vector_weights=vector_weights
+        )
         sums = _numpy_centroid_sums(rows, indices, k)
         counts = np.bincount(indices, minlength=k).astype(np.float32)
         nonzero = counts > 0
         codebook[nonzero] = sums[nonzero] / counts[nonzero, None]
 
-    indices, mse = _numpy_assign(rows, codebook, r_norm_sq=r_norm_sq)
+    indices, mse = _numpy_assign(
+        rows, codebook, r_norm_sq=r_norm_sq if vector_weights is None else None,
+        vector_weights=vector_weights
+    )
     return codebook, indices, float(mse)
 
 
@@ -423,15 +451,13 @@ def _learn_codebook_torch(
             # Save old codebook to monitor convergence shift
             old_codebook = codebook.clone()
 
-            if vector_weights is not None:
-                W = torch.as_tensor(
-                    vector_weights, dtype=torch.float32, device=rows.device
-                )
-                weighted_rows = rows * torch.sqrt(W)
-                weighted_cb = codebook * torch.sqrt(W)
-                indices, _ = _torch_assign(weighted_rows, weighted_cb, str(rows.device))
-            else:
-                indices, _ = _torch_assign(rows_dtype, codebook, str(rows.device), r_norm_sq=r_norm_sq)
+            indices, _ = _torch_assign(
+                rows_dtype,
+                codebook,
+                str(rows.device),
+                r_norm_sq=r_norm_sq if vector_weights is None else None,
+                vector_weights=vector_weights,
+            )
 
             chosen = indices.to(device=rows.device, dtype=torch.long)
 
@@ -452,7 +478,13 @@ def _learn_codebook_torch(
                     print(f"      [Lloyd] Converged early at iteration {iter_i + 1} (max diff: {max_diff:.2e})", flush=True)
                     break
 
-        indices, mse = _torch_assign(rows_dtype, codebook, str(rows.device), r_norm_sq=r_norm_sq)
+        indices, mse = _torch_assign(
+            rows_dtype,
+            codebook,
+            str(rows.device),
+            r_norm_sq=r_norm_sq if vector_weights is None else None,
+            vector_weights=vector_weights,
+        )
     return codebook.detach().cpu(), indices, float(mse)
 
 
@@ -480,15 +512,23 @@ def learn_codebook_auto(
         )
     if not _is_numpy_array(vectors):
         raise RuntimeError("NumPy backend requires NumPy array tensors")
-    return _learn_codebook_numpy(vectors, codebook_size, iterations, seed=seed,
-                                 initial_codebook=initial_codebook)
+    return _learn_codebook_numpy(
+        vectors,
+        codebook_size,
+        iterations,
+        seed=seed,
+        initial_codebook=initial_codebook,
+        vector_weights=vector_weights,
+    )
 
 
-def quantize_vectors_auto(vectors, codebook, backend: str, device: str = "cpu"):
+def quantize_vectors_auto(
+    vectors, codebook, backend: str, device: str = "cpu", vector_weights=None
+):
     if backend not in {"auto", "numpy", "torch"}:
         raise ValueError("backend must be 'auto', 'numpy', or 'torch'")
     if backend == "torch":
-        return _torch_assign(vectors, codebook, device)
+        return _torch_assign(vectors, codebook, device, vector_weights=vector_weights)
     if not _is_numpy_array(vectors):
         raise RuntimeError("NumPy backend requires NumPy array tensors")
-    return _numpy_assign(vectors, codebook)
+    return _numpy_assign(vectors, codebook, vector_weights=vector_weights)

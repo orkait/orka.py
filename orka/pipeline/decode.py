@@ -88,7 +88,7 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict):
             out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"])
         )
         decoded = _apply_col_l2_scales_numpy(decoded, tensor_meta["shape"], scales)
-    elif norm in ("block-max", "slrq-block"):
+    elif norm in ("block-max", "channel-block-max", "slrq-block"):
         scales = _read_f32_vector(
             out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"])
         )
@@ -202,7 +202,7 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
         decoded = unrotated.reshape(-1)
 
     norm = tm.get("normalization", "none")
-    if norm in ("block-max", "awq-block-max", "slrq-block"):
+    if norm in ("block-max", "channel-block-max", "awq-block-max", "slrq-block"):
         scales = np.fromfile(
             str(out_dir / tm["scales"]), dtype="<f4", count=int(tm["scale_count"])
         )

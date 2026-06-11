@@ -123,6 +123,8 @@ def sweep_checkpoint(
     max_tensors: int | None = None,
     progress_file: Path | None = None,
     sensitivity_map: dict | None = None,
+    em_aq_passes: int = 3,
+    codebook_cache_dir: Path | None = None,
 ) -> dict:
     _require_non_empty("group_sizes", group_sizes)
     _require_non_empty("codebook_modes", codebook_modes)
@@ -203,6 +205,10 @@ def sweep_checkpoint(
                             awq_activations=awq_activations,
                             awq_alpha=cur_alpha,
                             max_tensors=max_tensors,
+                            sensitivity_map=sensitivity_map,
+                            progress_file=progress_file,
+                            em_aq_passes=em_aq_passes,
+                            codebook_cache_dir=codebook_cache_dir,
                         )
                         report = report_artifact(artifact_dir)
                         run = _sweep_run_summary(

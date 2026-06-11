@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 import math
 import shutil
 import argparse
@@ -72,61 +71,16 @@ def main():
 
     print("All workers finished successfully. Merging artifacts...")
 
-    # 4. Merge artifacts
+    # 4. Merge artifacts via the canonical merge (compat checks + conflict detection)
+    from orka.merge import merge_orka_artifacts
+
     out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "tensors").mkdir(parents=True, exist_ok=True)
-
-    merged_manifest = None
-    merged_passthrough = {}
-    total_index_bytes = 0
-
-    for i, tmp_out in enumerate(tmp_outs):
-        tmp_path = Path(tmp_out)
-
-        # Merge tensors
-        for file in (tmp_path / "tensors").iterdir():
-            shutil.move(str(file), str(out_dir / "tensors" / file.name))
-
-        # Merge codebooks
-        if (tmp_path / "codebooks").exists():
-            (out_dir / "codebooks").mkdir(parents=True, exist_ok=True)
-            for file in (tmp_path / "codebooks").iterdir():
-                dest = out_dir / "codebooks" / file.name
-                if not dest.exists():
-                    shutil.copy(str(file), str(dest))
-
-        # Merge manifest
-        with open(tmp_path / "manifest.json", "r") as f:
-            manifest = json.load(f)
-            if merged_manifest is None:
-                merged_manifest = manifest
-                merged_manifest["tensors"] = []
-            merged_manifest["tensors"].extend(manifest["tensors"])
-            total_index_bytes += manifest.get("total_index_bytes", 0)
-
-        # Merge true passthrough tensors
-        # A tensor is true passthrough only if it was NOT in the global candidates list
-        from safetensors import safe_open
-        pt_file = tmp_path / "passthrough.safetensors"
-        if pt_file.exists():
-            with safe_open(str(pt_file), framework="np") as handle:
-                for key in handle.keys():
-                    if key not in candidates and key not in merged_passthrough:
-                        merged_passthrough[key] = handle.get_tensor(key)
-
-        # Clean up tmp
-        shutil.rmtree(tmp_path)
-
-    if merged_passthrough:
-        from orka._format import _write_passthrough_tensors
-        _write_passthrough_tensors(out_dir / "passthrough.safetensors", merged_passthrough)
-        merged_manifest["passthrough_count"] = len(merged_passthrough)
-
-    merged_manifest["total_index_bytes"] = total_index_bytes
-
-    with open(out_dir / "manifest.json", "w") as f:
-        json.dump(merged_manifest, f, indent=2)
+    if len(tmp_outs) == 1:
+        shutil.move(tmp_outs[0], str(out_dir))
+    else:
+        merge_orka_artifacts([Path(t) for t in tmp_outs], out_dir)
+        for tmp_out in tmp_outs:
+            shutil.rmtree(tmp_out, ignore_errors=True)
 
     print(f"Successfully created parallel artifact at {args.out}")
 
