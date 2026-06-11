@@ -9,6 +9,7 @@ import argparse
 
 from orka.cli.commands import (
     cmd_calc,
+    cmd_distill,
     cmd_eval,
     cmd_eval_sweep,
     cmd_inspect,
@@ -221,6 +222,13 @@ def build_parser() -> argparse.ArgumentParser:
     pack.add_argument("source")
     pack.add_argument("--out", required=True)
     add_pack_args(pack)
+    pack.add_argument(
+        "--sequential-calibration",
+        action="store_true",
+        help="pack blocks in forward order, recapturing calibration activations "
+             "from the partially quantized model (GPTQ-style error propagation). "
+             "Requires --awq-model-dir and --awq-calibration; per-tensor mode only.",
+    )
     pack.set_defaults(func=cmd_pack)
 
     kp = sub.add_parser(
@@ -245,6 +253,34 @@ def build_parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report", help="summarize an .orka artifact")
     report.add_argument("artifact")
     report.set_defaults(func=cmd_report)
+
+    distill = sub.add_parser(
+        "distill",
+        help="post-pack codebook distillation: indices frozen, codebooks optimized "
+             "against the source weights (optionally activation-weighted)",
+    )
+    distill.add_argument("artifact")
+    distill.add_argument("--steps", type=int, default=200)
+    distill.add_argument("--lr", type=float, default=1e-3)
+    distill.add_argument("--device", default="cpu")
+    distill.add_argument("--max-tensors", type=int, default=None)
+    distill.add_argument(
+        "--activations-file",
+        default=None,
+        help="JSON/pt activations for column-importance weighting (E[x^2])",
+    )
+    distill.add_argument(
+        "--model-dir",
+        default=None,
+        help="HF model dir to collect fresh calibration activations",
+    )
+    distill.add_argument(
+        "--prompts", default=None, help="prompts file for fresh calibration"
+    )
+    distill.add_argument("--calibration-max-prompts", type=int, default=32)
+    distill.add_argument("--calibration-max-length", type=int, default=256)
+    distill.add_argument("--calibration-max-samples", type=int, default=4096)
+    distill.set_defaults(func=cmd_distill)
 
     merge = sub.add_parser(
         "merge-orka",
