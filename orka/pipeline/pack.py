@@ -16,8 +16,9 @@ from typing import Sequence
 
 from orka._format import (
     ORKA_VERSION,
+    _cast_codebook_storage,
     _write_codebook,
-    _write_f32_vector,
+    _write_float_vector,
     _write_indices,
     _write_outliers,
     _write_passthrough_tensors,
@@ -165,26 +166,31 @@ def _persist_tensor_sidecars(c: dict, tensor_dir: Path, out_dir: Path) -> tuple:
     scale_bytes = 0
     scale_count = 0
     norm = c["normalization"]
+    scale_dtype = None
     if norm == "awq":
         scale_path = tensor_dir / f"{safe}.col_l2_scale.f32"
-        _write_f32_vector(scale_path, c["row_scales"])
+        scale_dtype = _write_float_vector(scale_path, c["row_scales"], dtype="float16")
         scale_bytes = scale_path.stat().st_size
         scale_count = len(c["row_scales"])
     elif norm in ("block-max", "channel-block-max", "slrq-block", "awq-block-max"):
         scale_path = tensor_dir / f"{safe}.block_max_scale.f32"
-        _write_f32_vector(scale_path, c["row_scales"])
+        scale_dtype = _write_float_vector(scale_path, c["row_scales"], dtype="float16")
         scale_bytes = scale_path.stat().st_size
         scale_count = len(c["row_scales"])
 
     awq_col_meta = None
     if norm == "awq-block-max" and c.get("awq_col_scales") is not None:
         awq_col_path = tensor_dir / f"{safe}.awq_col_scale.f32"
-        _write_f32_vector(awq_col_path, c["awq_col_scales"])
+        awq_col_dtype = _write_float_vector(
+            awq_col_path, c["awq_col_scales"], dtype="float16"
+        )
         awq_col_meta = {
             "path": str(awq_col_path.relative_to(out_dir)),
             "count": len(c["awq_col_scales"]),
             "bytes": awq_col_path.stat().st_size,
+            "dtype": awq_col_dtype,
         }
+    c["scale_dtype"] = scale_dtype
 
     outlier_meta = None
     if c.get("outlier_positions") is not None and len(c["outlier_positions"]) > 0:
@@ -295,6 +301,7 @@ def _build_tensor_manifest_entry(
         "scales": str(scale_path.relative_to(out_dir)) if scale_path else None,
         "scale_count": scale_count,
         "scale_bytes": scale_bytes,
+        "scale_dtype": c.get("scale_dtype"),
         "block_scale_size": (
             block_scale_size
             if c["normalization"]
@@ -348,6 +355,12 @@ def _finalize_tensor_manifest_entry(
     out_dir: Path,
     tensor_dir: Path,
 ) -> dict:
+    # EM-AQ rewrites index streams asynchronously; compressed sizes can differ
+    # from the greedy pass, so refresh byte counts from disk.
+    for stage_meta in c.get("stages_meta", []):
+        stage_path = out_dir / stage_meta["indices"]
+        if stage_path.exists():
+            stage_meta["index_bytes"] = stage_path.stat().st_size
     scale_path, scale_bytes, scale_count, awq_col_meta, outlier_meta, salient_meta, pillar_meta = (
         _persist_tensor_sidecars(c, tensor_dir, out_dir)
     )
@@ -407,7 +420,9 @@ def _persist_manifest(
             )
         )
 
-    manifest["total_index_bytes"] = total_index_bytes
+    manifest["total_index_bytes"] = sum(
+        int(t.get("index_bytes", 0)) for t in manifest["tensors"]
+    )
     manifest["tensor_count"] = len(manifest["tensors"])
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -510,6 +525,11 @@ def _run_em_aq_refinement(
                         vector_weights=vw, initial_codebook=sd["cb"],
                         sample_weights=sw_train,
                     )
+                    stage_meta = c["stages_meta"][stage_i]
+                    cb, _cb_dtype = _cast_codebook_storage(
+                        cb, dtype=stage_meta.get("codebook_dtype", "float32")
+                    )
+                    stage_meta["codebook_dtype"] = _cb_dtype
                     indices, _ = quantize_vectors_auto(target_train, cb, backend, resolved_device, vector_weights=vw)
 
                     new_dec_raw = _decode_to_vectors_format(
@@ -529,13 +549,14 @@ def _run_em_aq_refinement(
 
                     safe = _safe_tensor_name(c["name"])
                     cb_path = tensor_dir / f"{safe}.s{stage_i}.codebook.f32"
-                    _BG_WRITER.submit(_write_codebook, cb_path, cb)
+                    _BG_WRITER.submit(_write_codebook, cb_path, cb, _cb_dtype)
                     idx_path = tensor_dir / f"{safe}.s{stage_i}.indices"
                     _BG_WRITER.submit(
                         _write_indices,
                         idx_path,
                         indices.cpu() if hasattr(indices, "cpu") else indices,
-                        c["stages_meta"][stage_i]["index_bits"],
+                        stage_meta["index_bits"],
+                        stage_meta.get("encoding", "raw"),
                     )
                     
                     del old_dec_raw, old_dec, target, target_train, training, cb, indices, new_dec_raw, new_dec
@@ -575,6 +596,7 @@ def pack_checkpoint(
     device: str = "cpu",
     codebook_sizes: Sequence[int] | None = None,
     family_stages_map: dict[str, Sequence[int]] | None = None,
+    tensor_stages_map: dict[str, Sequence] | None = None,
     outlier_frac: float = 0.0,
     rotation: str = "none",
     rotation_seed: int | None = None,
@@ -684,6 +706,23 @@ def pack_checkpoint(
         if n_stages < 1:
             raise ValueError("at least one codebook stage is required")
 
+    tensor_stages_resolved = None
+    if tensor_stages_map is not None:
+        if codebook_mode != "per-tensor":
+            raise ValueError(
+                "tensor_stages_map (measured allocation) requires codebook_mode='per-tensor'"
+            )
+        tensor_stages_resolved = {
+            name: [
+                int(k) if not (isinstance(k, str) and k.startswith("s")) else k
+                for k in stages
+            ]
+            for name, stages in tensor_stages_map.items()
+        }
+        n_stages = max(
+            n_stages, max(len(s) for s in tensor_stages_resolved.values())
+        )
+
     tensor_dir = out_dir / "tensors"
     tensor_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -696,6 +735,7 @@ def pack_checkpoint(
         else None,
         "codebook_sizes": list(stages_spec) if family_stages_resolved is None else None,
         "family_stages_map": family_stages_resolved,
+        "tensor_allocation": tensor_stages_map is not None,
         "n_stages": n_stages,
         "codebook_mode": codebook_mode,
         # Per-tensor mode adapts group size by family; per-tensor entries carry
@@ -836,9 +876,12 @@ def pack_checkpoint(
                 # Embedding: linguistic pillars, needs high fidelity.
                 # Shared codebooks (global/family) require one vector width across
                 # all tensors they cover, so the override only applies per-tensor.
+                # Measured allocation (tensor_stages_map) plans bits at one
+                # uniform group size; family overrides would silently change
+                # the achieved bpw, so they are disabled in that mode.
                 family = classify_tensor_family(name)
                 resolved_group_size = group_size
-                if codebook_mode == "per-tensor":
+                if codebook_mode == "per-tensor" and tensor_stages_resolved is None:
                     if family == "embedding":
                         resolved_group_size = min(group_size, 8)
                     elif family == "attention":
@@ -914,6 +957,14 @@ def pack_checkpoint(
     streamed_tensor_count = 0
 
     def _stage_spec_for_candidate(c: dict, stage_i: int):
+        if tensor_stages_resolved is not None:
+            stages_for_c = tensor_stages_resolved.get(
+                c["name"]
+            ) or tensor_stages_resolved.get(c["name"].replace(".weight", ""))
+            if stages_for_c is not None:
+                if stage_i >= len(stages_for_c):
+                    return None
+                return stages_for_c[stage_i]
         if family_stages_resolved is not None:
             stages_for_c = family_stages_resolved[c["family"]]
             if stage_i >= len(stages_for_c):
@@ -1000,10 +1051,13 @@ def pack_checkpoint(
                 if cache_key:
                     _codebook_cache_save(codebook_cache_dir, cache_key, cb)
 
+            # Round centroids to storage precision BEFORE assignment so the
+            # indices, metrics, and on-disk codebook all agree exactly.
+            cb, cb_dtype = _cast_codebook_storage(cb)
             cb_path = tensor_dir / (
                 f"{safe}.codebook.f32" if n_stages == 1 else f"{safe}.s{stage_i}.codebook.f32"
             )
-            _write_codebook(cb_path, cb)
+            _write_codebook(cb_path, cb, dtype=cb_dtype)
 
             indices, _ = quantize_vectors_auto(v_res, cb, backend, resolved_device, vector_weights=vw)
             c["stages_data"][stage_i] = {
@@ -1015,7 +1069,7 @@ def pack_checkpoint(
             idx_path = tensor_dir / (
                 f"{safe}.indices" if n_stages == 1 else f"{safe}.s{stage_i}.indices"
             )
-            _write_indices(idx_path, indices, index_bits)
+            _, idx_encoding = _write_indices(idx_path, indices, index_bits)
             stage_bytes = idx_path.stat().st_size
             total_index_bytes += stage_bytes
 
@@ -1052,8 +1106,10 @@ def pack_checkpoint(
                     "stage": stage_i,
                     "codebook": str(cb_path.relative_to(out_dir)),
                     "codebook_size": len(cb),
+                    "codebook_dtype": cb_dtype,
                     "index_bits": index_bits,
                     "packed": index_bits % 8 != 0,
+                    "encoding": idx_encoding,
                     "indices": str(idx_path.relative_to(out_dir)),
                     "index_bytes": stage_bytes,
                     "training_vector_count": training_count,
@@ -1122,12 +1178,15 @@ def pack_checkpoint(
                     p_pos.extend(range(start, start + hidden_dim))
 
             if p_pos:
+                from orka._format import _fp16_storage_roundtrip
                 if _is_torch_tensor(c["vectors"]):
                     import torch
                     import numpy as np
                     flat = c["vectors"].reshape(-1)
                     pillar_positions = np.array(p_pos, dtype=np.int64)
-                    pillar_values = flat[pillar_positions].detach().cpu().numpy().astype(np.float32)
+                    pillar_values = _fp16_storage_roundtrip(
+                        flat[pillar_positions].detach().cpu().numpy().astype(np.float32)
+                    )
                     mask = torch.ones_like(flat)
                     mask[pillar_positions] = 0
                     c["vectors"] = (flat * mask).reshape(c["vectors"].shape)
@@ -1135,13 +1194,19 @@ def pack_checkpoint(
                     import numpy as np
                     flat = c["vectors"].reshape(-1)
                     pillar_positions = np.array(p_pos, dtype=np.int64)
-                    pillar_values = flat[pillar_positions].astype(np.float32)
+                    pillar_values = _fp16_storage_roundtrip(
+                        flat[pillar_positions].astype(np.float32)
+                    )
                     flat[pillar_positions] = 0
                     c["vectors"] = flat.reshape(c["vectors"].shape)
 
         # --- Standard Outlier Extraction ---
         # If freq-aware didn't run, or if we want to extract additional magnitude outliers
         positions, values, new_vectors = _extract_outliers(c["vectors"], outlier_frac, c["packed_values"])
+        # Round escape values to their fp16 storage grid so the metrics the
+        # pipeline reports match what decode reads back from the sidecars.
+        from orka._format import _fp16_storage_roundtrip
+        values = _fp16_storage_roundtrip(values)
 
         if pillar_positions is not None:
             # Combine freq-aware pillars with magnitude outliers
@@ -1200,7 +1265,9 @@ def pack_checkpoint(
 
     if codebook_mode == "per-tensor":
         _BG_WRITER.wait()
-        manifest["total_index_bytes"] = total_index_bytes
+        manifest["total_index_bytes"] = sum(
+            int(t.get("index_bytes", 0)) for t in manifest["tensors"]
+        )
         manifest["tensor_count"] = len(manifest["tensors"])
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -1298,12 +1365,13 @@ def pack_checkpoint(
                     )
                     if cache_key:
                         _codebook_cache_save(codebook_cache_dir, cache_key, cb)
+                cb, cb_dtype = _cast_codebook_storage(cb)
                 if n_stages == 1:
                     cb_path = out_dir / "codebooks" / f"{key}.codebook.f32"
                 else:
                     cb_path = out_dir / "codebooks" / f"{key}.s{stage_i}.codebook.f32"
-                _write_codebook(cb_path, cb)
-                stage_codebooks[key] = (cb, cb_path)
+                _write_codebook(cb_path, cb, dtype=cb_dtype)
+                stage_codebooks[key] = (cb, cb_path, cb_dtype)
 
         for i, c in enumerate(candidates):
             _check_ram_cap()
@@ -1351,7 +1419,7 @@ def pack_checkpoint(
                 # Shared codebooks are learned unweighted; assign unweighted too.
                 vw = None
                 key = "global" if codebook_mode == "global" else c["family"]
-                cb, cb_path = stage_codebooks[key]
+                cb, cb_path, cb_dtype = stage_codebooks[key]
                 training_count = sample_vectors or len(v_res)
             else:
                 vw = c.get("vector_weights") if not is_scalar_stage else None
@@ -1407,9 +1475,10 @@ def pack_checkpoint(
                     training_count = len(training)
                     if cache_key:
                         _codebook_cache_save(codebook_cache_dir, cache_key, cb)
-                
+
+                cb, cb_dtype = _cast_codebook_storage(cb)
                 cb_path = tensor_dir / f"{safe}.s{stage_i}.codebook.f32"
-                _write_codebook(cb_path, cb)
+                _write_codebook(cb_path, cb, dtype=cb_dtype)
 
             indices, _ = quantize_vectors_auto(
                 v_res, cb, backend, resolved_device, vector_weights=vw
@@ -1423,7 +1492,7 @@ def pack_checkpoint(
             }
             index_bits = _index_bits_for_size(len(cb))
             idx_path = tensor_dir / f"{safe}.s{stage_i}.indices"
-            _write_indices(idx_path, indices, index_bits)
+            _, idx_encoding = _write_indices(idx_path, indices, index_bits)
             stage_bytes = idx_path.stat().st_size
             total_index_bytes += stage_bytes
 
@@ -1470,8 +1539,10 @@ def pack_checkpoint(
                     "stage": stage_i,
                     "codebook": str(cb_path.relative_to(out_dir)),
                     "codebook_size": len(cb),
+                    "codebook_dtype": cb_dtype,
                     "index_bits": index_bits,
                     "packed": index_bits % 8 != 0,
+                    "encoding": idx_encoding,
                     "indices": str(idx_path.relative_to(out_dir)),
                     "index_bytes": stage_bytes,
                     "training_vector_count": training_count,

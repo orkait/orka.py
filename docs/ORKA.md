@@ -162,7 +162,9 @@ CUDA support requires a working PyTorch CUDA install. If CUDA is requested and u
 - `report`: summarize a packed `.orka` artifact, including index size, codebook size, weighted MSE, and worst tensors.
 - `verify`: decode a packed `.orka` artifact against its source checkpoint and recompute MSE from stored indices and codebooks.
 - `reconstruct`: decode a packed `.orka` artifact to JSON or safetensors tensors for inspection and downstream experiments.
+- `allocate`: measure per-tensor rate-distortion and solve a bit allocation for a target bpw budget.
 - `distill`: post-pack codebook optimization with frozen indices (see Output-Aware Quantization).
+- `correct`: low-rank fp16 correction sidecars fitted to the post-pack residual.
 - `sweep`: run a matrix of pack/report experiments and write one JSON comparison file.
 - `eval`: reconstruct an `.orka` artifact into a temporary Hugging Face model directory and compare prompt loss against the original model.
 - `eval-sweep`: run `eval` across artifacts recorded in a sweep JSON and rank candidates by loss delta, perplexity ratio, and artifact bytes.
@@ -404,6 +406,54 @@ codebook bytes are rewritten and manifest metrics refreshed. Multi-stage RVQ
 artifacts improve strictly (greedy stages are jointly suboptimal); converged
 single-stage plain-MSE artifacts are already Lloyd-optimal given indices, so
 distillation pays off most with RVQ, transforms, or weighting in play.
+
+## Rate-Side Format (v2)
+
+Format v2 attacks artifact bytes at zero quality cost:
+
+- Codebooks and scales are stored fp16 (f32 fallback on overflow). All values
+  are rounded to the storage grid IN MEMORY before use - the value that
+  divides at pack equals the value that multiplies at decode, and indices are
+  assigned against the exact centroids on disk - so reported metrics are
+  byte-true.
+- Index streams are zlib-compressed per stage when that shrinks them; the
+  manifest records `encoding` per stage. Entropy coding trades random access
+  for size: a stream must be decoded whole, which fits load-once inference.
+- v1 artifacts read unchanged (missing fields default to float32 / raw).
+
+## Measured Bit Allocation
+
+```bash
+python3 orka.py allocate model.safetensors --out alloc.json --target-bpw 3.0 \
+  --candidates vq-8 vq-12 rvq-8-8 rvq-12-8 rvq-12-12 \
+  --backend torch --device cuda
+python3 orka.py pack model.safetensors --out model.orka \
+  --allocation-map alloc.json --codebook-mode per-tensor ...
+```
+
+`allocate` probes every candidate tensor with quick k-means at each candidate
+spec on a vector sample, then greedily upgrades whichever tensor buys the most
+distortion reduction per extra bit until the bits-per-weight budget is spent
+(discrete water-filling). This replaces name-based family heuristics with
+measurement. Under an allocation map, family group-size overrides are
+disabled so planned and achieved bpw match.
+
+Codebook overhead warning: per-tensor codebook bytes are `k * group * 2`
+per stage and do NOT shrink with the model. `rvq-mixed` (k up to 65536) is
+sized for multi-billion-parameter models; on a 135M model its codebooks
+exceed the index payload and compression goes negative. Keep `k <= 4096`
+for small models, or use measured allocation with small-k candidates.
+
+## Low-Rank Correction
+
+```bash
+python3 orka.py correct model.orka --rank 8 --device cuda
+```
+
+Factors each tensor's post-pack residual `W - decode(W)` with truncated SVD
+and stores the top-r factors as fp16 sidecars, applied as the last decode
+step. Costs `(rows + cols) * r * 2` bytes per tensor. Run after `distill`;
+sidecars that do not reduce error are dropped automatically.
 
 ## Memory Cap
 
