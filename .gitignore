@@ -22,3 +22,4 @@ test_model.json
 .local_models/
 .local_runs/
 llama.cpp/
+*.log

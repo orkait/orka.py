@@ -297,6 +297,8 @@ Orka v0 supports three codebook modes:
 - `global`: learns one shared codebook across all packed tensors. This reduces codebook overhead and is easier to reason about as a runtime format, but can raise reconstruction error.
 - `family`: learns one shared codebook per tensor family. This is the middle-ground mode for testing whether a few runtime-friendly codebooks can retain most of the quality of per-tensor mode.
 
+Per-tensor mode adapts group size by tensor family (embedding capped at 8, attention halved to a floor of 4, MLP/expert doubled up to 32). Shared codebooks need one vector width, so `global` and `family` modes always use the requested `--group-size`. The manifest records this under `dynamic_group_sizing`, and each tensor entry carries its resolved `group_size`.
+
 Family mode uses deterministic name-based routing:
 
 - `embedding`: tensor names containing `embed`, `embedding`, `wte`, or `wpe`.

@@ -1,4 +1,0 @@
-[{"stream_name":"stdout","time":12.83237211,"data":"=== ORKA GPU PROBE: torch.cuda.device_count()=2 ===\n"}
-,{"stream_name":"stdout","time":13.084979954,"data":"    cuda:0 = Tesla T4\n"}
-,{"stream_name":"stdout","time":13.085026961,"data":"    cuda:1 = Tesla T4\n"}
-]
