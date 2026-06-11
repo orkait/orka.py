@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument(
             "--quant-mode",
             default=None,
-            help="compositional spec like vq-8 or vq-16-8 (per-stage bits, 1..16, total ≤ 64)",
+            help="compositional spec like vq-8 or rvq-16-8 (per-stage bits 1..64, total <= 64; multi-stage requires the rvq- prefix)",
         )
         p.add_argument(
             "--codebook-mode",

@@ -69,11 +69,12 @@ def cmd_pack(args: argparse.Namespace) -> int:
         try:
             from huggingface_hub import snapshot_download
             model_dir = Path(snapshot_download(source_input))
-            candidates = list(model_dir.glob("*.safetensors"))
+            candidates = sorted(model_dir.glob("*.safetensors"))
             if not candidates:
                 raise FileNotFoundError(f"no .safetensors found in {model_dir}")
-            source_file = candidates[0]
-            print(f"  Using source: {source_file.name}", flush=True)
+            # Sharded checkpoints: pass the directory so _load_tensors walks all shards.
+            source_file = candidates[0] if len(candidates) == 1 else model_dir
+            print(f"  Using source: {source_file.name} ({len(candidates)} shard(s))", flush=True)
         except Exception as exc:
             print(f"Error resolving source: {exc}")
             return 1
@@ -244,6 +245,10 @@ def cmd_sweep(args: argparse.Namespace) -> int:
             max_tensors=args.max_tensors,
             sensitivity_map=smap,
             progress_file=Path(args.progress_file) if args.progress_file else None,
+            em_aq_passes=getattr(args, "em_aq_passes", 3),
+            codebook_cache_dir=Path(args.codebook_cache).expanduser()
+            if getattr(args, "codebook_cache", None)
+            else None,
         )
         print(
             json.dumps(

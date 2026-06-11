@@ -355,12 +355,14 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
             allow_patterns=["*.safetensors", "*.json", "*.model", "tokenizer*"],
         )
 
-        source_file = next(src_dir.glob("*.safetensors"), None)
-        if not source_file:
+        shards = sorted(src_dir.glob("*.safetensors"))
+        if not shards:
             print(f"Error: no .safetensors found in {args.repo_id}", file=os.sys.stderr)
             return 1
+        # Sharded checkpoints: pass the directory so _load_tensors walks all shards.
+        source_file = shards[0] if len(shards) == 1 else src_dir
 
-        print(f"--- Packing {source_file.name} ---", flush=True)
+        print(f"--- Packing {source_file.name} ({len(shards)} shard(s)) ---", flush=True)
 
         if is_rvq_mixed_spec(args.quant_mode):
             _kp_family_map = rvq_mixed_family_stages()
@@ -413,11 +415,14 @@ def cmd_kaggle_pack(args: argparse.Namespace) -> int:
                 emb = None
                 # framework="pt" so bf16/fp16 embeddings load (numpy cannot represent bfloat16);
                 # cast to float32 numpy for the norm computation below.
-                with safe_open(str(source_file), framework="pt") as f:
-                    for k in f.keys():
-                        if "embed_tokens" in k or "wte" in k or "word_embeddings" in k:
-                            emb = f.get_tensor(k).to(torch.float32).cpu().numpy()
-                            break
+                for shard in shards:
+                    with safe_open(str(shard), framework="pt") as f:
+                        for k in f.keys():
+                            if "embed_tokens" in k or "wte" in k or "word_embeddings" in k:
+                                emb = f.get_tensor(k).to(torch.float32).cpu().numpy()
+                                break
+                    if emb is not None:
+                        break
                 if emb is None:
                     raise RuntimeError("Could not find embedding tensor in safetensors file")
                     

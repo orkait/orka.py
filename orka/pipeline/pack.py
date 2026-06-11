@@ -633,6 +633,9 @@ def pack_checkpoint(
         "family_stages_map": family_stages_resolved,
         "n_stages": n_stages,
         "codebook_mode": codebook_mode,
+        # Per-tensor mode adapts group size by family; per-tensor entries carry
+        # the resolved value. Top-level group_size is the requested baseline.
+        "dynamic_group_sizing": codebook_mode == "per-tensor",
         "sample_vectors": sample_vectors,
         "backend": backend,
         "device": resolved_device,
@@ -754,22 +757,25 @@ def pack_checkpoint(
                     )
                     tensor_rotation = rotation
 
-                # --- DYNAMIC FAMILY-AWARE GROUP SIZING ---
+                # --- DYNAMIC FAMILY-AWARE GROUP SIZING (per-tensor mode only) ---
                 # Different layer types have different sensitivity to group size.
                 # Attention: phase-sensitive, needs tight groups.
                 # MLP: high channel redundancy, tolerates larger groups.
                 # Embedding: linguistic pillars, needs high fidelity.
+                # Shared codebooks (global/family) require one vector width across
+                # all tensors they cover, so the override only applies per-tensor.
                 family = classify_tensor_family(name)
                 resolved_group_size = group_size
-                if family == "embedding":
-                    resolved_group_size = min(group_size, 8)
-                elif family == "attention":
-                    # Attention projections are phase-sensitive; use tighter groups
-                    resolved_group_size = max(4, group_size // 2) if group_size > 4 else group_size
-                elif family in ("mlp", "expert", "shared_expert"):
-                    # MLP/expert layers have high channel redundancy; relax group size
-                    resolved_group_size = min(group_size * 2, 32)
-                # router/other: keep the user-specified group_size
+                if codebook_mode == "per-tensor":
+                    if family == "embedding":
+                        resolved_group_size = min(group_size, 8)
+                    elif family == "attention":
+                        # Attention projections are phase-sensitive; use tighter groups
+                        resolved_group_size = max(4, group_size // 2) if group_size > 4 else group_size
+                    elif family in ("mlp", "expert", "shared_expert"):
+                        # MLP/expert layers have high channel redundancy; relax group size
+                        resolved_group_size = min(group_size * 2, 32)
+                    # router/other: keep the user-specified group_size
 
                 if backend == "torch":
                     packed_values, padded_values, vectors = _torch_vectors_from_tensor(
@@ -875,13 +881,13 @@ def pack_checkpoint(
                 if stage_i == 0
                 else None
             )
+            vw = c.get("vector_weights") if not is_scalar_stage else None
             cached = _codebook_cache_load(codebook_cache_dir, cache_key) if cache_key else None
             if cached is not None:
                 cb = cached
                 training_count = sample_vectors or len(v_res)
             else:
                 training = _sample_vector_rows(v_res, sample_vectors)
-                vw = c.get("vector_weights") if not is_scalar_stage else None
                 cb_seed = _derive_seed(
                     ["per-tensor", src_sig, c["name"], c_group_size, k, stage_i]
                 )
@@ -1246,11 +1252,13 @@ def pack_checkpoint(
             
             # Learn or Load Codebook
             if codebook_mode in {"global", "family"}:
-                # Note: shared codebooks with mixed group sizes not yet supported in this turn
+                # Shared codebooks are learned unweighted; assign unweighted too.
+                vw = None
                 key = "global" if codebook_mode == "global" else c["family"]
                 cb, cb_path = stage_codebooks[key]
                 training_count = sample_vectors or len(v_res)
             else:
+                vw = c.get("vector_weights") if not is_scalar_stage else None
                 cache_key = (
                     _codebook_cache_key(
                         [
@@ -1284,9 +1292,6 @@ def pack_checkpoint(
                     training_count = sample_vectors or len(v_res)
                 else:
                     training = _sample_vector_rows(v_res, sample_vectors)
-                    # Weights only apply to vector stage
-                    vw = c.get("vector_weights") if not is_scalar_stage else None
-
                     cb_seed = _derive_seed(
                         ["per-tensor", src_sig, c["name"], c_group_size, k, stage_i]
                     )
