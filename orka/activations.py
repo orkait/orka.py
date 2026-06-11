@@ -69,9 +69,12 @@ import argparse
 
 
 def _load_awq_activations(args: argparse.Namespace):
-    if getattr(args, "awq_activations_file", None) or getattr(
-        args, "awq_calibration", None
-    ):
+    # Gate only the legacy AWQ normalization modes. Activations used purely for
+    # Hessian-proxy importance weighting are always allowed.
+    if (
+        getattr(args, "awq_activations_file", None)
+        or getattr(args, "awq_calibration", None)
+    ) and getattr(args, "normalization", "none") in {"awq", "awq-block-max"}:
         ensure_awq_feature_enabled()
 
     if getattr(args, "awq_activations_file", None):
