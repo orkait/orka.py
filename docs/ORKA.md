@@ -162,6 +162,7 @@ CUDA support requires a working PyTorch CUDA install. If CUDA is requested and u
 - `report`: summarize a packed `.orka` artifact, including index size, codebook size, weighted MSE, and worst tensors.
 - `verify`: decode a packed `.orka` artifact against its source checkpoint and recompute MSE from stored indices and codebooks.
 - `reconstruct`: decode a packed `.orka` artifact to JSON or safetensors tensors for inspection and downstream experiments.
+- `distill`: post-pack codebook optimization with frozen indices (see Output-Aware Quantization).
 - `sweep`: run a matrix of pack/report experiments and write one JSON comparison file.
 - `eval`: reconstruct an `.orka` artifact into a temporary Hugging Face model directory and compare prompt loss against the original model.
 - `eval-sweep`: run `eval` across artifacts recorded in a sweep JSON and rank candidates by loss delta, perplexity ratio, and artifact bytes.
@@ -346,6 +347,63 @@ Pipeline applied during `pack`:
 4. RVQ stages (one or more codebooks).
 
 Decode reverses the pipeline: VQ stages -> re-inject outliers -> un-rotate -> un-normalize.
+
+## Output-Aware Quantization
+
+Plain k-means minimizes weight-space MSE, but the network only feels output
+error: `||XW - XW'||`. Three mechanisms close that gap. They compose: weighting
+fixes WHERE bits go, sequential calibration stops errors compounding ACROSS
+layers, distillation recovers the remaining gap WITHIN the frozen artifact.
+
+### Hessian-Proxy Importance Weighting
+
+When calibration activations are available (`--awq-calibration` plus
+`--awq-model-dir`, or a pre-computed `--awq-activations-file`), codebook
+learning is importance-weighted by `h_j = E[x_j^2]` per input column:
+
+- per-vector sample weights (mean importance of the columns the vector covers)
+  pull Lloyd centroid updates toward high-energy column groups;
+- within-group dimension weights scale the assignment distance metric.
+
+This needs no feature gate: `ORKA_ENABLE_AWQ=1` now guards only the legacy
+`awq` / `awq-block-max` normalization modes. The manifest records
+`hessian_weighted`. Codebook caching is content-addressed over the weights, so
+changed calibration data never reuses a stale cached codebook.
+
+### Sequential Calibration Packing
+
+```bash
+python3 orka.py pack model.safetensors \
+  --out model-seq.orka \
+  --sequential-calibration \
+  --awq-model-dir /path/to/hf-model-dir \
+  --awq-calibration prompts.txt \
+  --codebook-mode per-tensor \
+  --group-size 8 --codebook-size 256
+```
+
+Blocks pack in forward order (embeddings, then layers 0..N, then lm_head).
+Before each block, the calibration prompts run through the live model whose
+earlier blocks already carry quantized weights, so each block calibrates
+against the inputs the quantized network actually produces and absorbs the
+accumulated upstream error instead of compounding it. Per-tensor codebook mode
+is required; the manifest records `sequential_calibration`.
+
+### Post-Pack Codebook Distillation
+
+```bash
+python3 orka.py distill model.orka --steps 200 --lr 1e-3 \
+  --model-dir /path/to/hf-model-dir --prompts prompts.txt
+```
+
+Indices stay frozen; stage codebooks are continuous parameters of a
+differentiable decode chain, optimized with Adam against the source weights
+(optionally column-weighted by calibration `E[x^2]`). Best-state tracking
+guarantees the artifact never gets worse; the format is unchanged - only
+codebook bytes are rewritten and manifest metrics refreshed. Multi-stage RVQ
+artifacts improve strictly (greedy stages are jointly suboptimal); converged
+single-stage plain-MSE artifacts are already Lloyd-optimal given indices, so
+distillation pays off most with RVQ, transforms, or weighting in play.
 
 ## Memory Cap
 
