@@ -614,6 +614,7 @@ def pack_checkpoint(
     slrq_salient: bool = True,
     tensor_partition_count: int | None = None,
     tensor_partition_index: int | None = None,
+    error_compensation: bool = False,
 ) -> dict:
     if codebook_mode not in {"per-tensor", "global", "family"}:
         raise ValueError(
@@ -751,6 +752,7 @@ def pack_checkpoint(
         "rotation_seed": rotation_seed,
         "awq_enabled": awq_activations is not None,
         "hessian_weighted": awq_activations is not None,
+        "error_compensation": error_compensation,
         "em_aq_passes": em_aq_passes,
         "slrq_salient": slrq_salient,
         "tensor_partition_count": (
@@ -983,6 +985,80 @@ def pack_checkpoint(
             return None
         return stages_spec[stage_i]
 
+    def _maybe_compensate_candidate(c: dict) -> bool:
+        """GPTQ-style block-OBS re-assignment with frozen codebooks.
+
+        Returns True when applied (EM-AQ is then skipped: it would re-learn
+        codebooks against uncompensated residuals and undo the compensation).
+        """
+        if backend != "torch":
+            return False
+        if awq_activations is None or c["name"] not in awq_activations:
+            return False
+        if c.get("rotation", "none") != "none":
+            return False
+        shape = c["shape"]
+        if len(shape) < 2:
+            return False
+        rows = int(shape[0])
+        cols = 1
+        for s in shape[1:]:
+            cols *= int(s)
+        group = int(c["group_size"])
+        if (
+            cols % group != 0
+            or int(c["packed_values"]) != rows * cols
+            or int(c["padded_values"]) != int(c["packed_values"])
+        ):
+            return False
+        if any(
+            sd.get("group_size", group) != group
+            for sd in c["stages_data"].values()
+        ):
+            return False  # scalar stages use a different vector layout
+
+        import numpy as np
+        import torch
+
+        from orka.compensation import compensated_assign
+
+        X = torch.as_tensor(awq_activations[c["name"]], dtype=torch.float32)
+        if X.dim() != 2 or int(X.shape[1]) != cols:
+            return False
+
+        W = c["vectors_orig"]
+        W = (
+            W if _is_torch_tensor(W) else torch.as_tensor(np.asarray(W))
+        ).to(device=resolved_device, dtype=torch.float32).reshape(rows, cols)
+        stage_keys = sorted(c["stages_data"].keys())
+        cbs = []
+        for s_key in stage_keys:
+            cb = c["stages_data"][s_key]["cb"]
+            cbs.append(
+                (
+                    cb
+                    if _is_torch_tensor(cb)
+                    else torch.as_tensor(np.asarray(cb), dtype=torch.float32)
+                ).to(resolved_device)
+            )
+        _report_progress(
+            progress_file, f"  Error-compensated re-assignment: {c['name']}"
+        )
+        idxs, decoded = compensated_assign(W, cbs, group, X)
+        for s_key, idx in zip(stage_keys, idxs):
+            stage_meta = c["stages_meta"][s_key]
+            _write_indices(
+                out_dir / stage_meta["indices"],
+                idx.cpu(),
+                stage_meta["index_bits"],
+                stage_meta.get("encoding", "raw"),
+            )
+            c["stages_data"][s_key]["indices"] = idx
+        c["decoded_sum"] = decoded.reshape(-1, group)
+        c["vectors_residual"] = None
+        c["refined_metrics"] = None
+        return True
+
     def _process_streamed_per_tensor_candidate(c: dict, stream_index: int) -> None:
         nonlocal total_index_bytes
         for stage_i in range(n_stages):
@@ -1127,7 +1203,11 @@ def pack_checkpoint(
                 }
             )
 
-        if n_stages > 1 and em_aq_passes > 0:
+        compensated = False
+        if error_compensation:
+            compensated = _maybe_compensate_candidate(c)
+
+        if n_stages > 1 and em_aq_passes > 0 and not compensated:
             _run_em_aq_refinement(
                 candidates=[c],
                 n_stages=n_stages,

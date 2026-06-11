@@ -137,6 +137,7 @@ def cmd_pack(args: argparse.Namespace) -> int:
             slrq_salient=getattr(args, "slrq_salient", True),
             tensor_partition_count=args.tensor_partition_count,
             tensor_partition_index=args.tensor_partition_index,
+            error_compensation=getattr(args, "error_compensation", False),
         )
         print(
             json.dumps(

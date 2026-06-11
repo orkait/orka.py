@@ -218,6 +218,15 @@ def build_parser() -> argparse.ArgumentParser:
             help="dir to cache stage-0 codebooks (zero-loss reuse on identical configs)",
         )
         p.add_argument(
+            "--error-compensation",
+            action="store_true",
+            help="GPTQ-style block-OBS error compensation: column groups are "
+                 "re-assigned left-to-right with committed error propagated into "
+                 "remaining columns via the calibration Hessian inverse. Needs "
+                 "--awq-calibration activations, torch backend, rotation none; "
+                 "replaces EM-AQ on compensated tensors.",
+        )
+        p.add_argument(
             "--allocation-map",
             default=None,
             help="JSON from 'orka allocate': per-tensor measured stage specs "
