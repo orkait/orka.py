@@ -391,6 +391,43 @@ against the inputs the quantized network actually produces and absorbs the
 accumulated upstream error instead of compounding it. Per-tensor codebook mode
 is required; the manifest records `sequential_calibration`.
 
+### Error-Compensated Assignment (GPTVQ-lite)
+
+```bash
+python3 orka.py pack model.safetensors --out model.orka \
+  --error-compensation \
+  --awq-calibration calib.txt --awq-model-dir /path/to/hf-model-dir \
+  --codebook-mode per-tensor --backend torch --device cuda ...
+```
+
+After greedy stage learning, column groups are re-assigned left to right
+with frozen codebooks; each group's committed quantization error is pushed
+into the not-yet-quantized columns through the block Optimal Brain Surgeon
+update (`H = X^T X` from calibration, 1% damping). Later groups quantize
+against compensated weights, so errors cancel in output space instead of
+accumulating. Requires torch backend, rotation none, uniform stage group
+size; EM-AQ is skipped on compensated tensors. Measured 1.14-1.48x lower
+layer output error than greedy on SmolLM2 tensors at identical bits.
+
+EXPERIMENTAL - per-layer wins did not survive full-model evaluation on
+SmolLM2-135M (neutral-prompt KL 0.30 without vs 0.38 with): the codebooks
+are frozen from uncompensated vectors, so the sweep drifts off codebook
+support and commit errors compound across layers. Keep it OFF the default
+recipe until online codebook updates land (true GPTVQ).
+
+Outlier escape is salience-guided under calibration: selection by
+`h_col * w^2` (contribution to output error) instead of magnitude.
+
+Calibration data quality matters more than any single lever: short prompt
+files produce tens of activation rows and actively mislead the weighted
+objectives. Use a few thousand rows (e.g. 32 wikitext lines at 256 tokens),
+and never evaluate on the calibration text - it flatters KL substantially.
+
+Recommended recipe (best measured on SmolLM2-135M, neutral-prompt KL 0.298
+at 2.0x vs fp16): measured allocation at 4 bpw, slrq-block, salience
+outlier escape via wikitext calibration, auto-objective distill, rank-8
+low-rank correction. No rotation, no error compensation.
+
 ### Post-Pack Codebook Distillation
 
 ```bash
@@ -399,10 +436,14 @@ python3 orka.py distill model.orka --steps 200 --lr 1e-3 \
 ```
 
 Indices stay frozen; stage codebooks are continuous parameters of a
-differentiable decode chain, optimized with Adam against the source weights
-(optionally column-weighted by calibration `E[x^2]`). Best-state tracking
-guarantees the artifact never gets worse; the format is unchanged - only
-codebook bytes are rewritten and manifest metrics refreshed. Multi-stage RVQ
+differentiable decode chain, optimized with Adam against the source weights.
+With calibration activations, TWO objectives run per tensor - the diagonal
+proxy (`E[x^2]` column weighting) and the damped full-Hessian output-space
+loss `||(W_hat - W) X^T||^2` - and an internal held-out split keeps the
+winner (output-space wins most layers with good calibration; the diagonal
+proxy wins when calibration is thin). Best-state tracking guarantees the
+artifact never gets worse; the format is unchanged - only codebook bytes
+are rewritten and manifest metrics refreshed. Multi-stage RVQ
 artifacts improve strictly (greedy stages are jointly suboptimal); converged
 single-stage plain-MSE artifacts are already Lloyd-optimal given indices, so
 distillation pays off most with RVQ, transforms, or weighting in play.
