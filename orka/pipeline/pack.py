@@ -596,6 +596,7 @@ def pack_checkpoint(
     device: str = "cpu",
     codebook_sizes: Sequence[int] | None = None,
     family_stages_map: dict[str, Sequence[int]] | None = None,
+    tensor_stages_map: dict[str, Sequence] | None = None,
     outlier_frac: float = 0.0,
     rotation: str = "none",
     rotation_seed: int | None = None,
@@ -705,6 +706,23 @@ def pack_checkpoint(
         if n_stages < 1:
             raise ValueError("at least one codebook stage is required")
 
+    tensor_stages_resolved = None
+    if tensor_stages_map is not None:
+        if codebook_mode != "per-tensor":
+            raise ValueError(
+                "tensor_stages_map (measured allocation) requires codebook_mode='per-tensor'"
+            )
+        tensor_stages_resolved = {
+            name: [
+                int(k) if not (isinstance(k, str) and k.startswith("s")) else k
+                for k in stages
+            ]
+            for name, stages in tensor_stages_map.items()
+        }
+        n_stages = max(
+            n_stages, max(len(s) for s in tensor_stages_resolved.values())
+        )
+
     tensor_dir = out_dir / "tensors"
     tensor_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -717,6 +735,7 @@ def pack_checkpoint(
         else None,
         "codebook_sizes": list(stages_spec) if family_stages_resolved is None else None,
         "family_stages_map": family_stages_resolved,
+        "tensor_allocation": tensor_stages_map is not None,
         "n_stages": n_stages,
         "codebook_mode": codebook_mode,
         # Per-tensor mode adapts group size by family; per-tensor entries carry
@@ -857,9 +876,12 @@ def pack_checkpoint(
                 # Embedding: linguistic pillars, needs high fidelity.
                 # Shared codebooks (global/family) require one vector width across
                 # all tensors they cover, so the override only applies per-tensor.
+                # Measured allocation (tensor_stages_map) plans bits at one
+                # uniform group size; family overrides would silently change
+                # the achieved bpw, so they are disabled in that mode.
                 family = classify_tensor_family(name)
                 resolved_group_size = group_size
-                if codebook_mode == "per-tensor":
+                if codebook_mode == "per-tensor" and tensor_stages_resolved is None:
                     if family == "embedding":
                         resolved_group_size = min(group_size, 8)
                     elif family == "attention":
@@ -935,6 +957,14 @@ def pack_checkpoint(
     streamed_tensor_count = 0
 
     def _stage_spec_for_candidate(c: dict, stage_i: int):
+        if tensor_stages_resolved is not None:
+            stages_for_c = tensor_stages_resolved.get(
+                c["name"]
+            ) or tensor_stages_resolved.get(c["name"].replace(".weight", ""))
+            if stages_for_c is not None:
+                if stage_i >= len(stages_for_c):
+                    return None
+                return stages_for_c[stage_i]
         if family_stages_resolved is not None:
             stages_for_c = family_stages_resolved[c["family"]]
             if stage_i >= len(stages_for_c):
