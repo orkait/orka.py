@@ -222,6 +222,13 @@ def build_parser() -> argparse.ArgumentParser:
     pack.add_argument("source")
     pack.add_argument("--out", required=True)
     add_pack_args(pack)
+    pack.add_argument(
+        "--sequential-calibration",
+        action="store_true",
+        help="pack blocks in forward order, recapturing calibration activations "
+             "from the partially quantized model (GPTQ-style error propagation). "
+             "Requires --awq-model-dir and --awq-calibration; per-tensor mode only.",
+    )
     pack.set_defaults(func=cmd_pack)
 
     kp = sub.add_parser(

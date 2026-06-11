@@ -582,6 +582,7 @@ def pack_checkpoint(
     awq_alpha: float = 0.5,
     max_tensors: int | None = None,
     only_tensors: list[str] | None = None,
+    only_tensors_passthrough: bool = True,
     progress_file: Path | None = None,
     sensitivity_map: dict | None = None,
     codebook_cache_dir: Path | None = None,
@@ -746,19 +747,10 @@ def pack_checkpoint(
             for name, tensor in _load_tensors(source):
                 _check_ram_cap()
 
-                if only_tensors is not None:
-                    base_name = name.replace(".weight", "")
-                    if name not in only_tensors and base_name not in only_tensors:
-                        _passthrough[name] = tensor
-                        continue
-
-                if max_tensors is not None and tensors_emitted >= max_tensors:
-                    break
-
                 shape = _tensor_shape(tensor)
                 name_lower = name.lower()
                 is_candidate = len(shape) >= 2
-                
+
                 # Exclude biases, norms, and architectural sidecars.
                 if any(
                     x in name_lower
@@ -766,9 +758,24 @@ def pack_checkpoint(
                 ):
                     is_candidate = False
 
+                # Non-candidates (norms, biases) always pass through so any
+                # partial artifact stays completable.
                 if not is_candidate:
                     _passthrough[name] = tensor
                     continue
+
+                if only_tensors is not None:
+                    base_name = name.replace(".weight", "")
+                    if name not in only_tensors and base_name not in only_tensors:
+                        # Unlisted candidates: passthrough by default (legacy
+                        # behaviour); skipped entirely for partitioned runs
+                        # (sequential packing) so partial artifacts stay small.
+                        if only_tensors_passthrough:
+                            _passthrough[name] = tensor
+                        continue
+
+                if max_tensors is not None and tensors_emitted >= max_tensors:
+                    break
                 
                 # Skipped tensors stay FP16 in the artifact (passthrough), not quantized.
                 if name.replace(".weight", "") in skipped_tensors or name in skipped_tensors:

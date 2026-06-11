@@ -83,6 +83,9 @@ def cmd_pack(args: argparse.Namespace) -> int:
     _apply_system_ram_cap(args.max_system_ram_gb, getattr(args, "workload_budget_gb", None))
     _apply_cpu_cap(args.max_cpu_threads)
     try:
+        if getattr(args, "sequential_calibration", False):
+            return _run_sequential_pack(args, source_file)
+
         awq_activations = _load_awq_activations(args)
 
         if is_rvq_mixed_spec(args.quant_mode):
@@ -146,6 +149,79 @@ def cmd_pack(args: argparse.Namespace) -> int:
         return 0
     finally:
         _stop_ram_monitor()
+
+
+def _run_sequential_pack(args: argparse.Namespace, source_file: Path) -> int:
+    from orka.pipeline.sequential import pack_checkpoint_sequential
+
+    if not args.awq_model_dir or not args.awq_calibration:
+        print(
+            "Error: --sequential-calibration requires --awq-model-dir and "
+            "--awq-calibration.",
+            file=os.sys.stderr,
+        )
+        return 1
+    if args.codebook_mode != "per-tensor":
+        print(
+            "Error: --sequential-calibration requires --codebook-mode per-tensor.",
+            file=os.sys.stderr,
+        )
+        return 1
+    if is_rvq_mixed_spec(args.quant_mode):
+        print(
+            "Error: --sequential-calibration does not support rvq-mixed yet; "
+            "use an explicit spec like rvq-16-8.",
+            file=os.sys.stderr,
+        )
+        return 1
+
+    sizes = _resolve_quant_stages(
+        args.quant_mode, args.codebook_sizes, args.codebook_size
+    )
+    manifest = _wrap_capped_oom(
+        args.max_gpu_mem_gb,
+        pack_checkpoint_sequential,
+        source=source_file,
+        out_dir=Path(args.out),
+        model_dir=Path(args.awq_model_dir),
+        prompts_path=Path(args.awq_calibration),
+        model_device=args.device if args.backend == "torch" else "cpu",
+        calibration_max_prompts=args.calibration_max_prompts,
+        calibration_max_length=args.calibration_max_length,
+        calibration_max_samples=args.calibration_max_samples,
+        progress_file=Path(args.progress_file) if args.progress_file else None,
+        group_size=args.group_size,
+        codebook_size=sizes[0],
+        codebook_sizes=sizes,
+        iterations=args.iterations,
+        max_values_per_tensor=args.max_values_per_tensor,
+        codebook_mode=args.codebook_mode,
+        sample_vectors=args.sample_vectors,
+        backend=args.backend,
+        normalization=args.normalization,
+        device=args.device,
+        outlier_frac=args.outlier_frac,
+        rotation=args.rotation,
+        rotation_seed=args.rotation_seed,
+        block_scale_size=args.block_scale_size,
+        em_aq_passes=getattr(args, "em_aq_passes", 3),
+        slrq_salient=getattr(args, "slrq_salient", True),
+        codebook_cache_dir=Path(args.codebook_cache).expanduser()
+        if args.codebook_cache
+        else None,
+    )
+    print(
+        json.dumps(
+            {
+                "out": args.out,
+                "tensor_count": manifest["tensor_count"],
+                "total_index_bytes": manifest["total_index_bytes"],
+                "sequential_calibration": True,
+            },
+            indent=2,
+        )
+    )
+    return 0
 
 
 def cmd_merge_orka(args: argparse.Namespace) -> int:
