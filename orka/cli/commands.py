@@ -178,6 +178,60 @@ def cmd_sem_calc(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_distill(args: argparse.Namespace) -> int:
+    from orka.distill import distill_artifact
+
+    activations = None
+    if args.activations_file:
+        import torch
+
+        path = Path(args.activations_file)
+        if not path.exists():
+            raise FileNotFoundError(f"activations file not found: {path}")
+        try:
+            with open(path, "r") as f:
+                raw = json.load(f)
+            activations = {
+                k: torch.tensor(v, dtype=torch.float32) for k, v in raw.items()
+            }
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            activations = torch.load(str(path), map_location="cpu")
+    elif args.model_dir and args.prompts:
+        from orka.activations import _collect_activations_hf
+        from orka.eval.prompts import _read_prompt_file
+
+        prompts = _read_prompt_file(
+            Path(args.prompts), max_prompts=args.calibration_max_prompts
+        )
+        activations = _collect_activations_hf(
+            Path(args.model_dir),
+            prompts,
+            max_length=args.calibration_max_length,
+            device=args.device,
+            max_samples_per_layer=args.calibration_max_samples,
+        )
+
+    result = distill_artifact(
+        Path(args.artifact),
+        steps=args.steps,
+        lr=args.lr,
+        device=args.device,
+        activations=activations,
+        max_tensors=args.max_tensors,
+    )
+    print(
+        json.dumps(
+            {
+                "artifact": result["artifact"],
+                "tensor_count": result["tensor_count"],
+                "improved_count": result["improved_count"],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     report = report_artifact(Path(args.artifact))
     report["artifact_size"] = _human_bytes(report["artifact_bytes"])
