@@ -71,7 +71,7 @@ def _normalize_tensor_block_max_torch(tensor, block_size: int, device):
         normalized = normalized[:n]
     return (
         normalized.reshape(arr.shape),
-        scales.detach().cpu(),
+        safe.detach().cpu(),
         arr.reshape(-1).detach().cpu(),
     )
 
@@ -91,7 +91,7 @@ def _normalize_tensor_block_max_numpy(tensor, block_size: int):
     normalized = (blocks / safe[:, None]).reshape(-1)
     if pad:
         normalized = normalized[:n]
-    return normalized.reshape(arr.shape), scales, arr.reshape(-1)
+    return normalized.reshape(arr.shape), safe, arr.reshape(-1)
 
 
 def _normalize_tensor_channel_block_max_torch(tensor, block_size: int, device):
