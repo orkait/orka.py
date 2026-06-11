@@ -6,6 +6,7 @@ salient (SLRQ), and FP16 passthrough tensors.
 
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 from typing import Sequence
@@ -13,7 +14,10 @@ from typing import Sequence
 from orka._tensor import _is_torch_tensor
 
 
-ORKA_VERSION = 1
+# v2: fp16 codebooks/scales (with f32 overflow fallback) + optional zlib
+# index streams. v1 artifacts read fine: missing manifest fields default to
+# float32 / raw.
+ORKA_VERSION = 2
 
 
 _FLOAT_VALUE_DTYPES = {
@@ -109,55 +113,169 @@ def _unpack_indices(packed, bits: int, count: int):
     return (bitmat * weights).sum(axis=1).astype(np.int64)
 
 
-def _write_indices(path: Path, indices: Sequence[int], index_bits: int) -> bool:
-    """Write indices to disk. Bit-packs when ``index_bits`` is not byte-aligned
-    (saves the padding waste of fixed-width uint8/16/32). Returns True if packed."""
+def _write_indices(
+    path: Path,
+    indices: Sequence[int],
+    index_bits: int,
+    encoding: str | None = None,
+) -> tuple[bool, str]:
+    """Write indices to disk. Bit-packs when ``index_bits`` is not byte-aligned;
+    then entropy-codes the stream with zlib when that actually shrinks it.
+
+    ``encoding=None`` auto-picks ("zlib" if smaller else "raw"); passing
+    "zlib"/"raw" forces the choice (EM-AQ rewrites must keep the encoding the
+    stage metadata already recorded). Returns (bit_packed, encoding).
+    """
+    import zlib
+
     import numpy as np
+
     if _is_torch_tensor(indices):
         indices = indices.detach().cpu().numpy()
     if index_bits % 8 != 0:
-        path.write_bytes(_pack_indices(indices, index_bits).tobytes())
-        return True
-    _, np_dtype, _ = _index_bit_spec(index_bits)
-    path.write_bytes(np.asarray(indices, dtype=np_dtype).tobytes())
-    return False
+        raw = _pack_indices(indices, index_bits).tobytes()
+        bit_packed = True
+    else:
+        _, np_dtype, _ = _index_bit_spec(index_bits)
+        raw = np.asarray(indices, dtype=np_dtype).tobytes()
+        bit_packed = False
+
+    if encoding is None:
+        compressed = zlib.compress(raw, 6)
+        encoding = "zlib" if len(compressed) < len(raw) else "raw"
+        payload = compressed if encoding == "zlib" else raw
+    elif encoding == "zlib":
+        payload = zlib.compress(raw, 6)
+    elif encoding == "raw":
+        payload = raw
+    else:
+        raise ValueError(f"unknown index encoding: {encoding}")
+    path.write_bytes(payload)
+    return bit_packed, encoding
 
 
-def _write_codebook(path: Path, codebook: Sequence[Sequence[float]]) -> None:
+def _fp16_storage_roundtrip(values):
+    """Round values to the fp16 grid IN MEMORY when they fit (else unchanged).
+
+    Sidecars (scales, outliers, salient, pillars) are stored fp16 with an f32
+    overflow fallback. Rounding at capture time makes the in-memory values the
+    pipeline computes with byte-identical to what decode reads back, so
+    manifest metrics match verify exactly. Mirrors ``_compact_float_dtype``.
+    """
+    if values is None:
+        return None
+    if _is_torch_tensor(values):
+        import torch
+
+        if values.numel() == 0:
+            return values
+        max_abs = float(values.detach().abs().max().item())
+        if not math.isfinite(max_abs) or max_abs > 65504.0:
+            return values
+        return values.detach().to(torch.float16).to(values.dtype)
+    import numpy as np
+
+    arr = np.asarray(values, dtype=np.float32)
+    if _compact_float_dtype(arr, "float16") == "float32":
+        return arr
+    return arr.astype(np.float16).astype(np.float32)
+
+
+def _cast_codebook_storage(codebook, dtype: str = "float16"):
+    """Round a learned codebook to its storage dtype IN MEMORY and return
+    (cast_codebook_f32, actual_dtype).
+
+    Assignment, metrics, and the on-disk file must all see the exact same
+    centroid values, so the fp16 rounding happens before quantization, not at
+    write time. Falls back to float32 when values overflow fp16.
+    """
+    import numpy as np
+
+    if dtype == "float32":
+        return codebook, "float32"
+    if _is_torch_tensor(codebook):
+        import torch
+
+        max_abs = float(codebook.detach().abs().max().item()) if codebook.numel() else 0.0
+        if not math.isfinite(max_abs) or max_abs > 65504.0:
+            return codebook, "float32"
+        return codebook.detach().to(torch.float16).to(torch.float32), "float16"
+    arr = np.asarray(codebook, dtype=np.float32)
+    actual = _compact_float_dtype(arr, dtype)
+    if actual == "float32":
+        return arr, "float32"
+    return arr.astype(np.float16).astype(np.float32), "float16"
+
+
+def _write_codebook(path: Path, codebook: Sequence[Sequence[float]], dtype: str = "float32") -> None:
     import numpy as np
     path.parent.mkdir(parents=True, exist_ok=True)
     if _is_torch_tensor(codebook):
         arr = codebook.detach().cpu().to(dtype=__import__("torch").float32).numpy()
     else:
         arr = np.asarray(codebook, dtype=np.float32)
-    np.ascontiguousarray(arr, dtype="<f4").tofile(str(path))
+    np.ascontiguousarray(arr.astype(_float_value_dtype(dtype))).tofile(str(path))
 
 
-def _write_f32_vector(path: Path, values) -> None:
+def _read_codebook(path: Path, group_size: int, dtype: str = "float32"):
+    import numpy as np
+
+    arr = np.fromfile(str(path), dtype=_float_value_dtype(dtype))
+    return arr.astype(np.float32).reshape(-1, group_size)
+
+
+def _write_float_vector(path: Path, values, dtype: str = "float16") -> str:
+    """Write a float sidecar vector; fp16 by default with f32 overflow
+    fallback. Returns the actual dtype written."""
     import numpy as np
     path.parent.mkdir(parents=True, exist_ok=True)
     if _is_torch_tensor(values):
         values = values.detach().cpu().numpy()
-    path.write_bytes(np.asarray(values, dtype="<f4").tobytes())
+    arr = np.asarray(values, dtype=np.float32)
+    actual = _compact_float_dtype(arr, dtype)
+    path.write_bytes(arr.astype(_float_value_dtype(actual)).tobytes())
+    return actual
 
 
-def _read_f32_vector(path: Path, expected_count: int):
+def _write_f32_vector(path: Path, values) -> None:
+    _write_float_vector(path, values, dtype="float32")
+
+
+def _read_float_vector(path: Path, expected_count: int, dtype: str = "float32"):
     import numpy as np
-    arr = np.fromfile(str(path), dtype="<f4")
+    arr = np.fromfile(str(path), dtype=_float_value_dtype(dtype)).astype(np.float32)
     if arr.shape[0] != expected_count:
         raise ValueError(
-            f"f32 vector size mismatch for {path}: expected {expected_count}, got {arr.shape[0]}"
+            f"float vector size mismatch for {path}: expected {expected_count}, got {arr.shape[0]}"
         )
     return arr
 
 
-def _read_indices(path: Path, index_bits: int, expected_count: int, packed: bool = False):
+def _read_f32_vector(path: Path, expected_count: int):
+    return _read_float_vector(path, expected_count, dtype="float32")
+
+
+def _read_indices(
+    path: Path,
+    index_bits: int,
+    expected_count: int,
+    packed: bool = False,
+    encoding: str = "raw",
+):
     import numpy as np
+
+    data = path.read_bytes()
+    if encoding == "zlib":
+        import zlib
+
+        data = zlib.decompress(data)
+    elif encoding != "raw":
+        raise ValueError(f"unknown index encoding: {encoding}")
     if packed:
-        raw = np.fromfile(str(path), dtype=np.uint8)
+        raw = np.frombuffer(data, dtype=np.uint8)
         return _unpack_indices(raw, index_bits, expected_count)
     _, np_dtype, _ = _index_bit_spec(index_bits)
-    arr = np.fromfile(str(path), dtype=np_dtype)
+    arr = np.frombuffer(data, dtype=np_dtype)
     if arr.shape[0] != expected_count:
         raise ValueError(
             f"index count mismatch for {path}: expected {expected_count}, got {arr.shape[0]}"

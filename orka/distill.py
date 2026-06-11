@@ -18,6 +18,9 @@ from pathlib import Path
 
 from orka._checkpoint import _load_tensors
 from orka._format import (
+    _cast_codebook_storage,
+    _float_value_dtype,
+    _read_codebook,
     _read_indices,
     _read_outliers,
     _read_pillars,
@@ -85,13 +88,16 @@ def _load_decode_consts(out_dir: Path, tm: dict, device: str) -> dict:
     for stage in stages:
         s_g = int(stage.get("group_size", group_size))
         s_count = math.ceil(padded / s_g)
-        cb_np = np.fromfile(str(out_dir / stage["codebook"]), dtype="<f4").reshape(-1, s_g)
+        cb_np = _read_codebook(
+            out_dir / stage["codebook"], s_g, stage.get("codebook_dtype", "float32")
+        )
         idx_np = np.asarray(
             _read_indices(
                 out_dir / stage["indices"],
                 int(stage["index_bits"]),
                 s_count,
                 packed=bool(stage.get("packed", False)),
+                encoding=stage.get("encoding", "raw"),
             ),
             dtype=np.int64,
         )
@@ -100,6 +106,8 @@ def _load_decode_consts(out_dir: Path, tm: dict, device: str) -> dict:
                 "codebook": torch.from_numpy(cb_np.copy()).to(device),
                 "indices": torch.from_numpy(idx_np).to(device),
                 "path": stage["codebook"],
+                "dtype": stage.get("codebook_dtype", "float32"),
+                "meta": stage,
             }
         )
 
@@ -141,22 +149,25 @@ def _load_decode_consts(out_dir: Path, tm: dict, device: str) -> dict:
 
     norm = tm.get("normalization", "none")
     consts["normalization"] = norm
+    scale_np_dtype = _float_value_dtype(tm.get("scale_dtype") or "float32")
     if norm in ("block-max", "channel-block-max", "slrq-block", "awq-block-max"):
         scales = np.fromfile(
-            str(out_dir / tm["scales"]), dtype="<f4", count=int(tm["scale_count"])
-        )
+            str(out_dir / tm["scales"]), dtype=scale_np_dtype, count=int(tm["scale_count"])
+        ).astype(np.float32)
         consts["block_scales"] = torch.from_numpy(scales).to(device)
         consts["block_scale_size"] = int(tm.get("block_scale_size") or 32)
         if norm == "awq-block-max" and tm.get("awq_col_scales"):
             awq_meta = tm["awq_col_scales"]
             awq = np.fromfile(
-                str(out_dir / awq_meta["path"]), dtype="<f4", count=int(awq_meta["count"])
-            )
+                str(out_dir / awq_meta["path"]),
+                dtype=_float_value_dtype(awq_meta.get("dtype") or "float32"),
+                count=int(awq_meta["count"]),
+            ).astype(np.float32)
             consts["awq_col"] = torch.from_numpy(awq).to(device)
     elif norm == "awq":
         scales = np.fromfile(
-            str(out_dir / tm["scales"]), dtype="<f4", count=int(tm["scale_count"])
-        )
+            str(out_dir / tm["scales"]), dtype=scale_np_dtype, count=int(tm["scale_count"])
+        ).astype(np.float32)
         consts["awq_col"] = torch.from_numpy(scales).to(device)
 
     salient = tm.get("salient")
@@ -299,7 +310,10 @@ def _distill_tensor(
                 break
 
     for stage, cb in zip(consts["stages"], best_state):
-        _write_codebook(out_dir / stage["path"], cb.cpu())
+        cast_cb, actual_dtype = _cast_codebook_storage(cb.cpu(), dtype=stage["dtype"])
+        if actual_dtype != stage["dtype"]:
+            stage["meta"]["codebook_dtype"] = actual_dtype
+        _write_codebook(out_dir / stage["path"], cast_cb, dtype=actual_dtype)
 
     # Refresh manifest metrics through the PRODUCTION decoder so verify stays
     # exact - this also cross-checks the differentiable mirror.
