@@ -102,6 +102,7 @@ def cmd_pack(args: argparse.Namespace) -> int:
         if getattr(args, "sensitivity_map", None):
             with open(args.sensitivity_map, "r") as f:
                 smap = json.load(f)
+        tensor_map = _load_allocation_map(args)
         manifest = _wrap_capped_oom(
             args.max_gpu_mem_gb,
             pack_checkpoint,
@@ -118,6 +119,7 @@ def cmd_pack(args: argparse.Namespace) -> int:
             device=args.device,
             codebook_sizes=sizes if family_map is None else None,
             family_stages_map=family_map,
+            tensor_stages_map=tensor_map,
             outlier_frac=args.outlier_frac,
             rotation=args.rotation,
             rotation_seed=args.rotation_seed,
@@ -149,6 +151,16 @@ def cmd_pack(args: argparse.Namespace) -> int:
         return 0
     finally:
         _stop_ram_monitor()
+
+
+def _load_allocation_map(args: argparse.Namespace):
+    if not getattr(args, "allocation_map", None):
+        return None
+    from orka.allocate import allocation_tensor_stages
+
+    with open(args.allocation_map, "r") as f:
+        allocation = json.load(f)
+    return allocation_tensor_stages(allocation)
 
 
 def _run_sequential_pack(args: argparse.Namespace, source_file: Path) -> int:
@@ -193,6 +205,7 @@ def _run_sequential_pack(args: argparse.Namespace, source_file: Path) -> int:
         group_size=args.group_size,
         codebook_size=sizes[0],
         codebook_sizes=sizes,
+        tensor_stages_map=_load_allocation_map(args),
         iterations=args.iterations,
         max_values_per_tensor=args.max_values_per_tensor,
         codebook_mode=args.codebook_mode,
@@ -252,6 +265,28 @@ def cmd_sem_calc(args: argparse.Namespace) -> int:
         return 0
     print("Nothing to calculate.")
     return 1
+
+
+def cmd_correct(args: argparse.Namespace) -> int:
+    from orka.correct import correct_artifact
+
+    result = correct_artifact(
+        Path(args.artifact),
+        rank=args.rank,
+        device=args.device,
+        max_tensors=args.max_tensors,
+    )
+    print(
+        json.dumps(
+            {
+                "artifact": result["artifact"],
+                "tensor_count": result["tensor_count"],
+                "improved_count": result["improved_count"],
+            },
+            indent=2,
+        )
+    )
+    return 0
 
 
 def cmd_distill(args: argparse.Namespace) -> int:

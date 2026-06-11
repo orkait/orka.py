@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from orka._format import _fp16_storage_roundtrip
 from orka._tensor import _numpy_float32_array, _torch_f32
 from orka._util import _product
 
@@ -26,7 +27,7 @@ def _normalize_tensor_awq_block_max_torch(tensor, X, alpha, block_size, device):
 
     act_mag = X_t.abs().mean(dim=0).clamp(min=1e-6)
     s = act_mag**alpha
-    awq_scales = 1.0 / s
+    awq_scales = _fp16_storage_roundtrip(1.0 / s)
     scaled_rows = rows / awq_scales[None, :]
 
     flat = scaled_rows.reshape(-1)
@@ -36,7 +37,9 @@ def _normalize_tensor_awq_block_max_torch(tensor, X, alpha, block_size, device):
         flat = torch.nn.functional.pad(flat, (0, pad))
     blocks = flat.reshape(-1, block_size)
     scales = blocks.abs().amax(dim=1)
-    safe = torch.where(scales == 0, torch.ones_like(scales), scales)
+    safe = _fp16_storage_roundtrip(
+        torch.where(scales == 0, torch.ones_like(scales), scales)
+    )
     normalized = (blocks / safe[:, None]).reshape(-1)
     if pad:
         normalized = normalized[:n]
@@ -60,13 +63,15 @@ def _normalize_tensor_block_max_torch(tensor, block_size: int, device):
         flat = torch.nn.functional.pad(flat, (0, pad))
     blocks = flat.reshape(-1, block_size)
     scales = blocks.abs().amax(dim=1)
-    safe = torch.where(scales == 0, torch.ones_like(scales), scales)
+    safe = _fp16_storage_roundtrip(
+        torch.where(scales == 0, torch.ones_like(scales), scales)
+    )
     normalized = (blocks / safe[:, None]).reshape(-1)
     if pad:
         normalized = normalized[:n]
     return (
         normalized.reshape(arr.shape),
-        scales.detach().cpu(),
+        safe.detach().cpu(),
         arr.reshape(-1).detach().cpu(),
     )
 
@@ -82,11 +87,11 @@ def _normalize_tensor_block_max_numpy(tensor, block_size: int):
         flat = np.pad(flat, (0, pad), mode="constant")
     blocks = flat.reshape(-1, block_size)
     scales = np.abs(blocks).max(axis=1).astype(np.float32)
-    safe = np.where(scales == 0, 1.0, scales).astype(np.float32)
+    safe = _fp16_storage_roundtrip(np.where(scales == 0, 1.0, scales).astype(np.float32))
     normalized = (blocks / safe[:, None]).reshape(-1)
     if pad:
         normalized = normalized[:n]
-    return normalized.reshape(arr.shape), scales, arr.reshape(-1)
+    return normalized.reshape(arr.shape), safe, arr.reshape(-1)
 
 
 def _normalize_tensor_channel_block_max_torch(tensor, block_size: int, device):
@@ -115,7 +120,9 @@ def _normalize_tensor_channel_block_max_torch(tensor, block_size: int, device):
     blocks_per_row = cols // block_size
     blocked = mat.reshape(rows, blocks_per_row, block_size)
     scales = blocked.abs().amax(dim=2)  # [rows, blocks_per_row]
-    safe = torch.where(scales == 0, torch.ones_like(scales), scales)
+    safe = _fp16_storage_roundtrip(
+        torch.where(scales == 0, torch.ones_like(scales), scales)
+    )
     normalized = (blocked / safe.unsqueeze(2)).reshape(rows, cols)
 
     # Flatten scales in row-major order for compatibility with decode
@@ -149,7 +156,7 @@ def _normalize_tensor_channel_block_max_numpy(tensor, block_size: int):
     blocks_per_row = cols // block_size
     blocked = mat.reshape(rows, blocks_per_row, block_size)
     scales = np.abs(blocked).max(axis=2).astype(np.float32)  # [rows, blocks_per_row]
-    safe = np.where(scales == 0, 1.0, scales).astype(np.float32)
+    safe = _fp16_storage_roundtrip(np.where(scales == 0, 1.0, scales).astype(np.float32))
     normalized = (blocked / safe[:, :, None]).reshape(rows, cols)
 
     scales_flat = safe.reshape(-1)
@@ -176,14 +183,16 @@ def _normalize_tensor_slrq_block_torch(tensor, block_size: int, device, salient_
         abs_blocks = blocks.abs()
         salient_indices = abs_blocks.argmax(dim=1)
         row_indices = torch.arange(blocks.shape[0], device=device)
-        salient_weights = blocks[row_indices, salient_indices].clone()
+        salient_weights = _fp16_storage_roundtrip(
+            blocks[row_indices, salient_indices].clone()
+        )
         blocks[row_indices, salient_indices] = 0.0
         max_for_anchor = blocks.abs().amax(dim=1)
     else:
         max_for_anchor = blocks.abs().amax(dim=1)
 
     safe = torch.where(max_for_anchor == 0, torch.ones_like(max_for_anchor), max_for_anchor)
-    safe = torch.exp2(torch.ceil(torch.log2(safe)))
+    safe = _fp16_storage_roundtrip(torch.exp2(torch.ceil(torch.log2(safe))))
 
     normalized = (blocks / safe[:, None]).reshape(-1)
     if pad:
@@ -216,14 +225,16 @@ def _normalize_tensor_slrq_block_numpy(tensor, block_size: int, salient_enabled:
         abs_blocks = np.abs(blocks)
         salient_indices = np.argmax(abs_blocks, axis=1)
         row_indices = np.arange(blocks.shape[0])
-        salient_weights = blocks[row_indices, salient_indices].copy()
+        salient_weights = _fp16_storage_roundtrip(
+            blocks[row_indices, salient_indices].copy()
+        )
         blocks[row_indices, salient_indices] = 0.0
         max_for_anchor = np.abs(blocks).max(axis=1)
     else:
         max_for_anchor = np.abs(blocks).max(axis=1)
 
     safe = np.where(max_for_anchor == 0, 1.0, max_for_anchor).astype(np.float32)
-    safe = np.exp2(np.ceil(np.log2(safe))).astype(np.float32)
+    safe = _fp16_storage_roundtrip(np.exp2(np.ceil(np.log2(safe))).astype(np.float32))
 
     normalized = (blocks / safe[:, np.newaxis]).reshape(-1)
     if pad:
@@ -272,7 +283,7 @@ def _normalize_tensor_awq_torch(tensor, X, alpha, device):
         raise RuntimeError(f"awq calibration shape {tuple(X_t.shape)} mismatches tensor cols {rows.shape[1]}")
     act_mag = X_t.abs().mean(dim=0).clamp(min=1e-6)
     s = act_mag**alpha
-    scales = 1.0 / s
+    scales = _fp16_storage_roundtrip(1.0 / s)
     normalized = (rows / scales[None, :]).reshape(arr.shape)
     return normalized, scales.detach().cpu(), arr.reshape(-1).detach().cpu()
 
@@ -289,7 +300,7 @@ def _normalize_tensor_awq_numpy(tensor, X, alpha):
     act_mag = np.mean(np.abs(X_arr), axis=0)
     act_mag = np.maximum(act_mag, 1e-6)
     s = act_mag**alpha
-    scales = 1.0 / s
+    scales = _fp16_storage_roundtrip(1.0 / s)
     normalized = (rows / scales[None, :]).reshape(arr.shape)
     return normalized, scales.astype(np.float32), arr.reshape(-1)
 

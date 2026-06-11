@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import argparse
 
+from orka.allocate import DEFAULT_CANDIDATE_SPECS, cmd_allocate
 from orka.cli.commands import (
     cmd_calc,
+    cmd_correct,
     cmd_distill,
     cmd_eval,
     cmd_eval_sweep,
@@ -215,6 +217,12 @@ def build_parser() -> argparse.ArgumentParser:
             default=None,
             help="dir to cache stage-0 codebooks (zero-loss reuse on identical configs)",
         )
+        p.add_argument(
+            "--allocation-map",
+            default=None,
+            help="JSON from 'orka allocate': per-tensor measured stage specs "
+                 "(requires --codebook-mode per-tensor; disables family group sizing)",
+        )
 
     pack = sub.add_parser(
         "pack", help="pack candidate weight tensors into an .orka directory"
@@ -253,6 +261,40 @@ def build_parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report", help="summarize an .orka artifact")
     report.add_argument("artifact")
     report.set_defaults(func=cmd_report)
+
+    allocate = sub.add_parser(
+        "allocate",
+        help="measure per-tensor rate-distortion and solve a bit allocation "
+             "(discrete water-filling) for a target bits-per-weight budget",
+    )
+    allocate.add_argument("source")
+    allocate.add_argument("--out", required=True)
+    allocate.add_argument("--target-bpw", type=float, required=True)
+    allocate.add_argument(
+        "--candidates",
+        nargs="+",
+        default=list(DEFAULT_CANDIDATE_SPECS),
+        help="candidate quant specs to probe per tensor",
+    )
+    allocate.add_argument("--group-size", type=int, default=8)
+    allocate.add_argument("--sample-vectors", type=int, default=4096)
+    allocate.add_argument("--iterations", type=int, default=4)
+    allocate.add_argument("--backend", choices=["auto", "numpy", "torch"], default="auto")
+    allocate.add_argument("--device", default="cpu")
+    allocate.add_argument("--max-tensors", type=int, default=None)
+    allocate.add_argument("--progress-file", default=None)
+    allocate.set_defaults(func=cmd_allocate)
+
+    correct = sub.add_parser(
+        "correct",
+        help="add low-rank correction sidecars: W ~ decode(W) + A@B^T (fp16, "
+             "rank r) fitted to the post-pack residual",
+    )
+    correct.add_argument("artifact")
+    correct.add_argument("--rank", type=int, default=8)
+    correct.add_argument("--device", default="cpu")
+    correct.add_argument("--max-tensors", type=int, default=None)
+    correct.set_defaults(func=cmd_correct)
 
     distill = sub.add_parser(
         "distill",
