@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -83,6 +84,17 @@ def main() -> int:
         p.requires_grad_(True)
     opt = torch.optim.AdamW(train_params, lr=args.lr)
 
+    # Warmup + cosine decay - longer runs converge better with a schedule.
+    warmup = max(10, args.steps // 20)
+
+    def lr_at(step):
+        if step < warmup:
+            return step / warmup
+        prog = (step - warmup) / max(1, args.steps - warmup)
+        return 0.5 * (1.0 + math.cos(math.pi * prog))
+
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_at)
+
     corpus = _load_corpus(tok, Path(args.corpus), args.seq_len, args.max_seqs).to(dev)
     print(f"corpus: {corpus.shape[0]} sequences x {args.seq_len} tokens", flush=True)
 
@@ -114,9 +126,10 @@ def main() -> int:
         loss.backward()
         torch.nn.utils.clip_grad_norm_(train_params, 1.0)
         opt.step()
+        sched.step()
 
         if step % 20 == 0 or step == args.steps - 1:
-            print(f"step {step:4d}  kl={kl.item():.4f}  cb={cb_loss.item():.4f}", flush=True)
+            print(f"step {step:4d}  kl={kl.item():.4f}  cb={cb_loss.item():.4f}  lr={sched.get_last_lr()[0]:.2e}", flush=True)
 
     print("materializing quantized weights into a dense HF dir...", flush=True)
     student.eval()
