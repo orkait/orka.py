@@ -610,6 +610,7 @@ def pack_checkpoint(
     sensitivity_map: dict | None = None,
     codebook_cache_dir: Path | None = None,
     block_scale_size: int = 32,
+    codebook_dtype: str = "float16",
     em_aq_passes: int = 3,
     slrq_salient: bool = True,
     tensor_partition_count: int | None = None,
@@ -1138,7 +1139,7 @@ def pack_checkpoint(
 
             # Round centroids to storage precision BEFORE assignment so the
             # indices, metrics, and on-disk codebook all agree exactly.
-            cb, cb_dtype = _cast_codebook_storage(cb)
+            cb, cb_dtype = _cast_codebook_storage(cb, dtype=codebook_dtype)
             cb_path = tensor_dir / (
                 f"{safe}.codebook.f32" if n_stages == 1 else f"{safe}.s{stage_i}.codebook.f32"
             )
@@ -1459,7 +1460,7 @@ def pack_checkpoint(
                     )
                     if cache_key:
                         _codebook_cache_save(codebook_cache_dir, cache_key, cb)
-                cb, cb_dtype = _cast_codebook_storage(cb)
+                cb, cb_dtype = _cast_codebook_storage(cb, dtype=codebook_dtype)
                 if n_stages == 1:
                     cb_path = out_dir / "codebooks" / f"{key}.codebook.f32"
                 else:
@@ -1570,7 +1571,7 @@ def pack_checkpoint(
                     if cache_key:
                         _codebook_cache_save(codebook_cache_dir, cache_key, cb)
 
-                cb, cb_dtype = _cast_codebook_storage(cb)
+                cb, cb_dtype = _cast_codebook_storage(cb, dtype=codebook_dtype)
                 cb_path = tensor_dir / f"{safe}.s{stage_i}.codebook.f32"
                 _write_codebook(cb_path, cb, dtype=cb_dtype)
 
