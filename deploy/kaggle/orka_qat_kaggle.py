@@ -25,23 +25,30 @@ def setup_orka() -> bool:
     base = Path("/kaggle/input")
     if not base.exists():
         return False
-    for ds in base.iterdir():
-        if not ds.is_dir():
-            continue
-        if (ds / "orka").is_dir():
-            sys.path.insert(0, str(ds))
-            return True
-        for zp in ds.glob("*.zip"):
-            import shutil
-            import zipfile
-            ext = Path("/tmp/orka_extracted")
-            if ext.exists():
-                shutil.rmtree(ext)
-            ext.mkdir(parents=True)
-            with zipfile.ZipFile(zp, "r") as z:
-                z.extractall(ext)
+    # Kaggle's mount depth varies (/kaggle/input/<slug> or
+    # /kaggle/input/datasets/<user>/<slug>), so search recursively for the
+    # package marker rather than assume a level.
+    for marker in base.rglob("orka/__init__.py"):
+        pkg_parent = marker.parent.parent
+        sys.path.insert(0, str(pkg_parent))
+        print(f"orka package found at {pkg_parent}", flush=True)
+        return True
+    for zp in base.rglob("*.zip"):
+        import shutil
+        import zipfile
+        ext = Path("/tmp/orka_extracted")
+        if ext.exists():
+            shutil.rmtree(ext)
+        ext.mkdir(parents=True)
+        with zipfile.ZipFile(zp, "r") as z:
+            z.extractall(ext)
+        if (ext / "orka" / "__init__.py").exists():
             sys.path.insert(0, str(ext))
+            print(f"orka package extracted from {zp}", flush=True)
             return True
+    print("=== /kaggle/input tree (no orka found) ===", flush=True)
+    for p in list(base.rglob("*"))[:40]:
+        print(f"  {p}", flush=True)
     return False
 
 
