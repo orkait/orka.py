@@ -1,3 +1,5 @@
+import os
+os.environ.setdefault("QAT_REPO", "HuggingFaceTB/SmolLM2-135M")
 """Kaggle kernel: VQ-QAT 2bpw experiment, end to end.
 
 Downloads SmolLM2-360M, builds a 2bpw measured allocation, fine-tunes the
