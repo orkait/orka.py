@@ -133,6 +133,7 @@ def cmd_pack(args: argparse.Namespace) -> int:
             if args.codebook_cache
             else None,
             block_scale_size=args.block_scale_size,
+            codebook_dtype=getattr(args, "codebook_dtype", "float16"),
             em_aq_passes=getattr(args, "em_aq_passes", 3),
             slrq_salient=getattr(args, "slrq_salient", True),
             tensor_partition_count=args.tensor_partition_count,
@@ -218,6 +219,7 @@ def _run_sequential_pack(args: argparse.Namespace, source_file: Path) -> int:
         rotation=args.rotation,
         rotation_seed=args.rotation_seed,
         block_scale_size=args.block_scale_size,
+        codebook_dtype=getattr(args, "codebook_dtype", "float16"),
         em_aq_passes=getattr(args, "em_aq_passes", 3),
         slrq_salient=getattr(args, "slrq_salient", True),
         codebook_cache_dir=Path(args.codebook_cache).expanduser()
