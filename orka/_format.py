@@ -181,18 +181,48 @@ def _fp16_storage_roundtrip(values):
     return arr.astype(np.float16).astype(np.float32)
 
 
+def _quantize_codebook_int8(cb_f32):
+    """Per-column symmetric int8 quantization of a [k, group] codebook.
+
+    Returns (int8 array [k, group], scales [group] float32). Each column gets
+    one scale = max|col| / 127 so the largest entry maps to +-127 exactly,
+    making the scale losslessly recoverable from the dequantized codebook.
+    """
+    import numpy as np
+
+    arr = np.asarray(cb_f32, dtype=np.float32)
+    col_max = np.abs(arr).max(axis=0)
+    # Scale is stored fp16 on disk; round it here so the dequantized codebook
+    # the assignment/metrics see is byte-identical to what decode reads back.
+    scales = np.where(col_max > 0, col_max / 127.0, 1.0).astype(np.float16).astype(np.float32)
+    q = np.clip(np.round(arr / scales[None, :]), -127, 127).astype(np.int8)
+    return q, scales
+
+
 def _cast_codebook_storage(codebook, dtype: str = "float16"):
     """Round a learned codebook to its storage dtype IN MEMORY and return
     (cast_codebook_f32, actual_dtype).
 
     Assignment, metrics, and the on-disk file must all see the exact same
-    centroid values, so the fp16 rounding happens before quantization, not at
-    write time. Falls back to float32 when values overflow fp16.
+    centroid values, so the rounding happens before quantization, not at write
+    time. fp16 falls back to float32 on overflow; int8 is per-column symmetric.
     """
     import numpy as np
 
     if dtype == "float32":
         return codebook, "float32"
+    if dtype == "int8":
+        if _is_torch_tensor(codebook):
+            cb_np = codebook.detach().cpu().float().numpy()
+        else:
+            cb_np = np.asarray(codebook, dtype=np.float32)
+        q, scales = _quantize_codebook_int8(cb_np)
+        dequant = (q.astype(np.float32) * scales[None, :])
+        if _is_torch_tensor(codebook):
+            import torch
+
+            return torch.from_numpy(dequant).to(codebook.device), "int8"
+        return dequant, "int8"
     if _is_torch_tensor(codebook):
         import torch
 
@@ -214,12 +244,27 @@ def _write_codebook(path: Path, codebook: Sequence[Sequence[float]], dtype: str 
         arr = codebook.detach().cpu().to(dtype=__import__("torch").float32).numpy()
     else:
         arr = np.asarray(codebook, dtype=np.float32)
+    if dtype == "int8":
+        # Self-describing file: [group fp16 scales][k*group int8]. The codebook
+        # is already on the int8 grid (cast happened pre-assignment), so
+        # re-deriving scales here recovers the exact same values.
+        arr = arr.reshape(-1, 1) if arr.ndim == 1 else arr
+        q, scales = _quantize_codebook_int8(arr)
+        with open(path, "wb") as f:
+            f.write(scales.astype("<f2").tobytes())
+            f.write(q.tobytes())
+        return
     np.ascontiguousarray(arr.astype(_float_value_dtype(dtype))).tofile(str(path))
 
 
 def _read_codebook(path: Path, group_size: int, dtype: str = "float32"):
     import numpy as np
 
+    if dtype == "int8":
+        raw = path.read_bytes()
+        scales = np.frombuffer(raw[: group_size * 2], dtype="<f2").astype(np.float32)
+        q = np.frombuffer(raw[group_size * 2 :], dtype=np.int8).reshape(-1, group_size)
+        return q.astype(np.float32) * scales[None, :]
     arr = np.fromfile(str(path), dtype=_float_value_dtype(dtype))
     return arr.astype(np.float32).reshape(-1, group_size)
 
