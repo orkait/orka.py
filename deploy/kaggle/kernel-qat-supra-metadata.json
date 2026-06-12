@@ -1,7 +1,7 @@
 {
-  "id": "superkaiii/orka-qat-2bpw-135m",
-  "title": "Orka QAT 2bpw 135M",
-  "code_file": "orka_qat_135_kaggle.py",
+  "id": "superkaiii/orka-qat-supra-50m",
+  "title": "Orka QAT Supra 50M",
+  "code_file": "orka_qat_supra_kaggle.py",
   "language": "python",
   "kernel_type": "script",
   "is_private": true,
