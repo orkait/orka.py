@@ -219,6 +219,14 @@ def build_parser() -> argparse.ArgumentParser:
             help="dir to cache stage-0 codebooks (zero-loss reuse on identical configs)",
         )
         p.add_argument(
+            "--codebook-dtype",
+            choices=["float16", "int8", "float32"],
+            default="float16",
+            help="on-disk codebook precision. int8 (per-column symmetric) halves "
+                 "codebook bytes - biggest win on small models where codebooks "
+                 "are ~25%% of the artifact",
+        )
+        p.add_argument(
             "--error-compensation",
             action="store_true",
             help="GPTQ-style block-OBS error compensation: column groups are "
