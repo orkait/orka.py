@@ -192,7 +192,13 @@ def _normalize_tensor_slrq_block_torch(tensor, block_size: int, device, salient_
         max_for_anchor = blocks.abs().amax(dim=1)
 
     safe = torch.where(max_for_anchor == 0, torch.ones_like(max_for_anchor), max_for_anchor)
-    safe = _fp16_storage_roundtrip(torch.exp2(torch.ceil(torch.log2(safe))))
+    pow2 = torch.exp2(torch.ceil(torch.log2(safe)))
+    # Floor at fp16 smallest subnormal (2**-24). A block whose anchor-max is tiny
+    # (e.g. unused embedding rows ~1e-8) yields a power-of-2 scale below fp16 range;
+    # the fp16 storage roundtrip would flush it to 0.0, making blocks / safe divide
+    # by zero -> NaN that then poisons the whole tensor.
+    pow2 = torch.clamp(pow2, min=2.0 ** -24)
+    safe = _fp16_storage_roundtrip(pow2)
 
     normalized = (blocks / safe[:, None]).reshape(-1)
     if pad:
@@ -234,7 +240,13 @@ def _normalize_tensor_slrq_block_numpy(tensor, block_size: int, salient_enabled:
         max_for_anchor = np.abs(blocks).max(axis=1)
 
     safe = np.where(max_for_anchor == 0, 1.0, max_for_anchor).astype(np.float32)
-    safe = _fp16_storage_roundtrip(np.exp2(np.ceil(np.log2(safe))).astype(np.float32))
+    pow2 = np.exp2(np.ceil(np.log2(safe))).astype(np.float32)
+    # Floor at fp16 smallest subnormal (2**-24). A block whose anchor-max is tiny
+    # (e.g. unused embedding rows ~1e-8) yields a power-of-2 scale below fp16 range;
+    # the fp16 storage roundtrip would flush it to 0.0, making blocks / safe divide
+    # by zero -> NaN that then poisons the whole tensor.
+    pow2 = np.maximum(pow2, np.float32(2.0 ** -24))
+    safe = _fp16_storage_roundtrip(pow2)
 
     normalized = (blocks / safe[:, np.newaxis]).reshape(-1)
     if pad:
