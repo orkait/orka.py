@@ -27,3 +27,4 @@ kernel/*.so
 kernel/test_orka_vq
 kernel/test_orka_vq_ci
 kernel/ggml_orka_op
+artifacts/
