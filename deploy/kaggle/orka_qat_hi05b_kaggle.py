@@ -88,6 +88,13 @@ def main() -> int:
         print("ERROR: orka source not found", file=sys.stderr)
         return 1
 
+    # 8-bit Adam (bitsandbytes) cuts optimizer m+v 4.2GB -> 1GB so QAT fits a
+    # 16GB T4. Install quietly; --optim8bit below depends on it.
+    import subprocess
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "bitsandbytes"], check=False)
+
+    import os as _os
+    _os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     import torch
     print(f"=== GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NONE'} ===", flush=True)
 
@@ -156,11 +163,14 @@ def main() -> int:
     # full run fits a 16GB P100/T4 at batch 2 + grad-accum 4 (effective 8).
     print(f"--- QAT train {STEPS} steps ---", flush=True)
     qat_hf = WORK / "qat-hf"
+    # Proven-fitting config (3060 fit at 10.2GB; T4 has more room): all three
+    # memory cuts - checkpoint quantize (~8GB graph), 8-bit Adam (~3GB), bf16
+    # backbone (~1GB) - at batch 1 + grad-accum 8 (effective batch 8).
     sys.argv = [
         "qat_train", str(model_dir), str(alloc_path), str(corpus), str(qat_hf),
-        "--steps", str(STEPS), "--seq-len", "256", "--batch", "2", "--grad-accum", "4",
+        "--steps", str(STEPS), "--seq-len", "256", "--batch", "1", "--grad-accum", "8",
         "--lr", "1e-4", "--commit", "0.5", "--cb-weight", "0.5", "--device", "cuda",
-        "--checkpoint-quantize", "--max-seqs", "1200",
+        "--checkpoint-quantize", "--optim8bit", "--student-bf16", "--max-seqs", "1200",
     ]
     import traceback
     from orka.qat_train import main as qat_main
