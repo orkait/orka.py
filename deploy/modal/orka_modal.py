@@ -298,6 +298,184 @@ def pack_ptq(
     return result
 
 
+@app.function(image=image, gpu="H100", volumes=VOLUMES, timeout=6 * 3600,
+              env=ENV, retries=0)
+def qat(
+    repo: str,
+    target_bpw: float = 4.0,
+    steps: int = 600,
+    seq_len: int = 0,        # 0 -> auto-scale to VRAM
+    batch: int = 0,          # 0 -> auto-scale to VRAM
+    lr: float = 1e-4,
+    commit: float = 0.5,
+    cb_weight: float = 0.5,
+    ppl_ctx: int = 512,
+    ppl_maxtok: int = 25600,
+    hf_token: str = "",
+) -> dict:
+    """4bpw VQ-QAT: allocate -> PTQ pack -> qat_train -> wikitext PPL + KL/top1.
+
+    QAT is gradient training (compute-bound). batch/seq_len default to 0 = auto:
+    sized from the GPU's VRAM and the model's param count so the same call
+    naturally fills a T4, A10G, or H100. lr 1e-4 / commit 0.5 (the 3e-4 Supra
+    default diverges on Falcon H1's SSM layers).
+
+    Re-run safe: ptq.orka, ptq-hf, alloc.json, corpus.txt are reused if they
+    already exist in the volume. Only qat-hf is always rebuilt from scratch."""
+    import json as _json
+    import math
+    import sys as _sys
+    import torch
+    from huggingface_hub import login, snapshot_download
+
+    print(f"=== GPU: {torch.cuda.get_device_name(0)} ===", flush=True)
+    if hf_token:
+        login(token=hf_token)
+    model_dir = snapshot_download(
+        repo, allow_patterns=["*.safetensors", "*.json", "*.model", "tokenizer*", "merges*", "vocab*"]
+    )
+    src = next(Path(model_dir).glob("*.safetensors"))
+    slug = repo.split("/")[-1]
+    run = Path("/data") / f"{slug}-qat"
+    run.mkdir(parents=True, exist_ok=True)
+    import shutil as _sh
+    # Only clear qat-hf (always rebuilt); keep ptq.orka/ptq-hf/alloc.json/corpus.txt
+    # from prior runs so PTQ is not redone unnecessarily on timeout-retries.
+    _sh.rmtree(run / "qat-hf", ignore_errors=True)
+
+    from datasets import load_dataset
+    corpus = run / "corpus.txt"
+    if not corpus.exists():
+        train = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
+        tlines = [r["text"].strip() for r in train if len(r["text"].strip()) > 200]
+        corpus.write_text("\n".join(tlines[:900]))
+        print("  corpus built", flush=True)
+    else:
+        print("  corpus reused from volume", flush=True)
+    test = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
+    ppl_text = "\n\n".join(t for t in (r["text"] for r in test) if t.strip())
+
+    alloc_path = run / "alloc.json"
+    if not alloc_path.exists():
+        from orka.allocate import build_allocation
+        alloc = build_allocation(
+            src, target_bpw,
+            candidate_specs=("vq-12", "rvq-12-8", "rvq-12-12", "rvq-12-12-8", "rvq-12-12-12"),
+            group_size=8, sample_vectors=8192, iterations=4, backend="torch", device="cuda",
+        )
+        alloc_path.write_text(_json.dumps(alloc, indent=2))
+        print(f"  alloc built: {alloc['achieved_bpw']:.3f} bpw", flush=True)
+    else:
+        alloc = _json.loads(alloc_path.read_text())
+        print(f"  alloc reused from volume: {alloc['achieved_bpw']:.3f} bpw", flush=True)
+
+    from orka.allocate import allocation_tensor_stages
+    from orka.pipeline.pack import pack_checkpoint
+    from orka.export import export_vllm
+    ptq_art = run / "ptq.orka"
+    ptq_hf = run / "ptq-hf"
+    if not ptq_art.exists():
+        pack_checkpoint(
+            source=src, out_dir=ptq_art, group_size=8, codebook_size=4096,
+            codebook_mode="per-tensor", backend="torch", device="cuda",
+            normalization="slrq-block", outlier_frac=0.005, sample_vectors=131072,
+            iterations=8, em_aq_passes=1, tensor_stages_map=allocation_tensor_stages(alloc),
+        )
+        data_vol.commit()
+        print("  ptq.orka packed and committed", flush=True)
+    else:
+        print("  ptq.orka reused from volume", flush=True)
+    if not ptq_hf.exists():
+        export_vllm(ptq_art, ptq_hf, model_dir=Path(model_dir), dtype="bfloat16")
+        data_vol.commit()
+        print("  ptq-hf exported and committed", flush=True)
+    else:
+        print("  ptq-hf reused from volume", flush=True)
+
+    # --- dynamic VRAM-aware sizing (aggressive estimate + OOM backoff) ---
+    # QAT memory = teacher(bf16,2B) + student(fp32,4B) + grads(4B) + adam(8B)
+    # ~= 18 B/param fixed; the rest of VRAM funds activations (batch x seq).
+    # The estimate targets ~85% VRAM; if it overshoots, the backoff loop below
+    # halves batch on CUDA OOM and retries, so the GPU is filled without guessing.
+    total_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+    nparams = alloc["total_params"]
+    auto_seq = seq_len if seq_len > 0 else (512 if total_gb >= 24 else 256)
+    if batch > 0:
+        auto_batch = batch
+    else:
+        fixed_gb = nparams * 18 / 1e9
+        usable = max(1.0, total_gb * 0.85 - fixed_gb)
+        per_seq_gb = (nparams / 1e9) * (auto_seq / 512) * 1.6
+        auto_batch = int(max(2, min(128, usable / max(0.1, per_seq_gb))))
+    auto_max_seqs = max(700, auto_batch * 100)
+    print(f"=== autoscale: VRAM {total_gb:.0f}GB, {nparams/1e6:.0f}M params -> "
+          f"start batch={auto_batch} seq_len={auto_seq} max_seqs={auto_max_seqs} ===", flush=True)
+
+    qat_hf = run / "qat-hf"
+    from orka.qat_train import main as qat_main
+    cur_batch = auto_batch
+    while True:
+        if qat_hf.exists():
+            _sh.rmtree(qat_hf, ignore_errors=True)
+        _sys.argv = [
+            "qat_train", str(model_dir), str(alloc_path), str(corpus), str(qat_hf),
+            "--steps", str(steps), "--seq-len", str(auto_seq), "--batch", str(cur_batch),
+            "--lr", str(lr), "--commit", str(commit), "--cb-weight", str(cb_weight),
+            "--device", "cuda", "--max-seqs", str(max(700, cur_batch * 100)),
+        ]
+        try:
+            print(f"=== QAT attempt: batch={cur_batch} ===", flush=True)
+            qat_main()
+            break
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
+            if "out of memory" not in str(exc).lower() or cur_batch <= 2:
+                raise
+            torch.cuda.empty_cache()
+            cur_batch = max(2, cur_batch // 2)
+            print(f"=== CUDA OOM at batch={cur_batch * 2}; backing off to batch={cur_batch} ===", flush=True)
+    data_vol.commit()
+
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    import torch.nn.functional as F
+
+    def wikitext_ppl(d):
+        tok = AutoTokenizer.from_pretrained(d, local_files_only=True)
+        ids = tok(ppl_text, return_tensors="pt").input_ids[0][:ppl_maxtok]
+        m = AutoModelForCausalLM.from_pretrained(d, local_files_only=True, dtype=torch.float32).cuda().eval()
+        nll = ntok = 0
+        with torch.no_grad():
+            for i in range(0, len(ids) - 1, ppl_ctx):
+                ch = ids[i:i + ppl_ctx].unsqueeze(0).cuda()
+                if ch.shape[1] < 2: break
+                nll += m(ch, labels=ch).loss.item() * (ch.shape[1] - 1); ntok += ch.shape[1] - 1
+        del m; torch.cuda.empty_cache()
+        return math.exp(nll / ntok), ntok
+
+    ppl = {}
+    for tag, d in (("fp16", model_dir), ("4bpw-PTQ", ptq_hf), ("4bpw-QAT", qat_hf)):
+        pp, n = wikitext_ppl(d); ppl[tag] = {"ppl": pp, "tokens": n}
+        print(f"  PPL {tag}: {pp:.4f} ({n} tok)", flush=True)
+
+    gp = ["The capital of France is", "import numpy as np\ndef softmax(x):", "Q: What is 2+2?\nA:"]
+    tk = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+    gens = {}
+    for tag, d in (("fp16", model_dir), ("4bpw-PTQ", ptq_hf), ("4bpw-QAT", qat_hf)):
+        m = AutoModelForCausalLM.from_pretrained(d, local_files_only=True, dtype=torch.bfloat16).cuda().eval()
+        outs = []
+        with torch.no_grad():
+            for p in gp:
+                ids = {k: v.cuda() for k, v in tk(p, return_tensors="pt").items()}
+                o = m.generate(**ids, max_new_tokens=24, do_sample=False, pad_token_id=tk.eos_token_id)
+                outs.append(tk.decode(o[0], skip_special_tokens=True))
+        gens[tag] = outs; del m; torch.cuda.empty_cache()
+
+    report = {"repo": repo, "achieved_bpw": alloc["achieved_bpw"], "steps": steps,
+              "perplexity": ppl, "generations": gens, "prompts": gp}
+    (run / "qat_report.json").write_text(_json.dumps(report, indent=2)); data_vol.commit()
+    print("=== QAT RESULT ===\n" + _json.dumps({"perplexity": ppl}, indent=2), flush=True)
+    return report
+
+
 @app.function(image=image, volumes=VOLUMES)
 def ls() -> list[str]:
     """List artifacts in the data volume."""
