@@ -182,65 +182,15 @@ def main() -> int:
         (WORK / "qat_error.txt").write_text(traceback.format_exc())
         raise
 
-    # --- wikitext-2 sliding window perplexity (the headline metric) ---
-    print("--- wikitext-2 perplexity eval ---", flush=True)
-    ppl = {}
-    for tag, d in (("fp16", model_dir), ("4bpw-PTQ", ptq_hf), ("4bpw-QAT", qat_hf)):
-        pp, n = _wikitext_ppl(d, ppl_text, PPL_CTX, PPL_MAXTOK)
-        ppl[tag] = {"ppl": pp, "tokens": n}
-        print(f"  {tag}: ppl {pp:.4f} ({n} tokens)", flush=True)
-
-    # --- KL vs fp16 + top-1 ---
-    print("--- KL / top1 eval ---", flush=True)
-    import torch.nn.functional as F
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    prompts = [l.strip() for l in eval_prompts.read_text().splitlines() if l.strip()]
-    tk = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
-
-    def logits(d):
-        m = AutoModelForCausalLM.from_pretrained(d, local_files_only=True, dtype=torch.float32).cuda().eval()
-        out = []
-        with torch.no_grad():
-            for p in prompts:
-                ids = tk(p, return_tensors="pt", truncation=True, max_length=192).input_ids.cuda()
-                out.append(m(ids).logits.float().cpu())
-        del m; torch.cuda.empty_cache(); return out
-
-    ref = logits(model_dir)
-    results = {"fp16": {"kl": 0.0, "top1": 1.0}}
-    for tag, d in (("4bpw-PTQ", ptq_hf), ("4bpw-QAT", qat_hf)):
-        lg = logits(d)
-        kl = tot = match = 0.0
-        for r, l in zip(ref, lg):
-            kl += F.kl_div(F.log_softmax(l, -1), F.softmax(r, -1), reduction="sum").item()
-            match += (r.argmax(-1) == l.argmax(-1)).sum().item(); tot += r.shape[1]
-        results[tag] = {"kl": kl / tot, "top1": match / tot}
-        print(f"  {tag}: KL {kl/tot:.4f}  top1 {match/tot:.4f}", flush=True)
-
-    # --- generation A/B ---
-    gens = {}
-    gp = ["The capital of France is", "The chemical symbol for gold is",
-          "import numpy as np\ndef softmax(x):"]
-    for tag, d in (("fp16", model_dir), ("4bpw-PTQ", ptq_hf), ("4bpw-QAT", qat_hf)):
-        m = AutoModelForCausalLM.from_pretrained(d, local_files_only=True, dtype=torch.bfloat16).cuda().eval()
-        outs = []
-        with torch.no_grad():
-            for p in gp:
-                ids = {k: v.cuda() for k, v in tk(p, return_tensors="pt").items()}
-                o = m.generate(**ids, max_new_tokens=24, do_sample=False, pad_token_id=tk.eos_token_id)
-                outs.append(tk.decode(o[0], skip_special_tokens=True))
-        gens[tag] = outs; del m; torch.cuda.empty_cache()
-
+    # Training only - no benchmark. The 3-model wikitext PPL eval is what blew
+    # past Kaggle's 9h GPU limit on the T4. Deliverable is the trained qat-hf
+    # model; PPL eval runs cheaply afterward (plain inference) on local hardware.
     report = {"repo": REPO, "steps": STEPS, "achieved_bpw": alloc["achieved_bpw"],
-              "perplexity": ppl, "metrics": results, "generations": gens, "prompts": gp}
+              "qat_hf": str(qat_hf), "ptq_hf": str(ptq_hf), "eval": "skipped (run locally)"}
     (WORK / "qat_report.json").write_text(json.dumps(report, indent=2))
-    print("=== QAT REPORT ===", flush=True)
-    print(json.dumps({"perplexity": ppl, "metrics": results}, indent=2), flush=True)
-    for i, p in enumerate(gp):
-        print(f"\n[{i+1}] {p!r}", flush=True)
-        for tag in ("fp16", "4bpw-PTQ", "4bpw-QAT"):
-            print(f"  {tag}: {gens[tag][i][len(p):].strip()[:100]}", flush=True)
-    print("=== QAT KAGGLE DONE ===", flush=True)
+    print("=== QAT TRAIN DONE (no eval) ===", flush=True)
+    print(json.dumps(report, indent=2), flush=True)
+    print(f"qat-hf saved -> {qat_hf}", flush=True)
     return 0
 
 
