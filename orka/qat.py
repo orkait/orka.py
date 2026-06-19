@@ -57,12 +57,17 @@ class QATVQLinear(nn.Module):
     allocation map (e.g. [4096, 16] = rvq-12-4 = 2 bpw at group 8)."""
 
     def __init__(self, weight: torch.Tensor, bias, group_size: int, stages: list[int],
-                 commitment: float = 0.25):
+                 commitment: float = 0.25, checkpoint: bool = False):
         super().__init__()
         self.out_features, self.in_features = weight.shape
         self.group_size = group_size
         self.stages = stages
         self.commitment = commitment
+        # Gradient-checkpoint quantize() on the forward: the straight-through
+        # decode keeps weight-sized fp32 intermediates (sel/decoded) alive for
+        # backward, ~8GB across all layers. Checkpointing frees them on forward
+        # and recomputes (cheap: cdist assign + gather) in backward. Bit-identical.
+        self.checkpoint = checkpoint
         self.bias = nn.Parameter(bias.clone()) if bias is not None else None
 
         self.shadow = nn.Parameter(weight.detach().clone().float())
@@ -78,25 +83,40 @@ class QATVQLinear(nn.Module):
         self.codebooks = nn.ParameterList(cbs)
         self._last_cb_loss = torch.zeros((), device=weight.device)
 
-    def quantize(self) -> torch.Tensor:
-        vecs = self.shadow.reshape(-1, self.group_size)
+    def _quantize_impl(self, shadow: torch.Tensor, *codebooks: torch.Tensor):
+        """Returns (w_q, cb_loss). Pure function of (shadow, codebooks) so it can
+        be gradient-checkpointed - cb_loss is a real graph output, not a side
+        effect, so the codebook gradient survives the recompute."""
+        vecs = shadow.reshape(-1, self.group_size)
         residual = vecs
         decoded = torch.zeros_like(vecs)
         cb_loss = torch.zeros((), device=vecs.device)
-        for cb in self.codebooks:
+        for cb in codebooks:
             with torch.no_grad():
                 assign = _chunked_assign(residual.detach(), cb.detach())
             sel = cb[assign]                       # differentiable in cb
             cb_loss = cb_loss + F.mse_loss(sel, residual.detach())
             decoded = decoded + sel
             residual = vecs - decoded
-        self._last_cb_loss = cb_loss
         # straight-through: forward uses decoded, gradient to shadow is identity
         w_q = vecs + (decoded - vecs).detach()
-        return w_q.reshape(self.out_features, self.in_features)
+        return w_q.reshape(self.out_features, self.in_features), cb_loss
+
+    def quantize(self) -> torch.Tensor:
+        w_q, cb_loss = self._quantize_impl(self.shadow, *self.codebooks)
+        self._last_cb_loss = cb_loss
+        return w_q
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.linear(x, self.quantize().to(x.dtype), self.bias)
+        if self.checkpoint and self.training:
+            import torch.utils.checkpoint as cp
+            w_q, cb_loss = cp.checkpoint(
+                self._quantize_impl, self.shadow, *self.codebooks, use_reentrant=False
+            )
+            self._last_cb_loss = cb_loss
+        else:
+            w_q = self.quantize()
+        return F.linear(x, w_q.to(x.dtype), self.bias)
 
     @torch.no_grad()
     def materialized_weight(self) -> torch.Tensor:
@@ -112,7 +132,7 @@ class QATVQLinear(nn.Module):
 
 
 def build_qat_student(model: nn.Module, allocation: dict, group_size: int = 8,
-                      commitment: float = 0.25) -> dict:
+                      commitment: float = 0.25, checkpoint: bool = False) -> dict:
     """Replace each allocated linear in ``model`` with a QATVQLinear using its
     per-tensor stage list. Embeddings / norms / lm_head stay fp16 (sensitive,
     same as Orka's passthrough). Returns {module_name: QATVQLinear}."""
@@ -132,7 +152,7 @@ def build_qat_student(model: nn.Module, allocation: dict, group_size: int = 8,
         if not stages:
             continue
         qat = QATVQLinear(module.weight.data, module.bias.data if module.bias is not None else None,
-                          group_size, stages, commitment).to(module.weight.device)
+                          group_size, stages, commitment, checkpoint=checkpoint).to(module.weight.device)
         parent = model.get_submodule(full_name.rsplit(".", 1)[0])
         setattr(parent, full_name.rsplit(".", 1)[-1], qat)
         wrapped[full_name] = qat
