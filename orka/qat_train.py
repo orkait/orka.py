@@ -41,6 +41,18 @@ def main() -> int:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--group-size", type=int, default=8)
     ap.add_argument("--max-seqs", type=int, default=256)
+    ap.add_argument("--optim8bit", action="store_true",
+                    help="use bitsandbytes AdamW8bit (m+v in int8) to fit small GPUs")
+    ap.add_argument("--student-bf16", action="store_true",
+                    help="load student backbone in bf16 (shadow weights + codebooks "
+                         "stay fp32); frozen layers are bf16 -> saves ~1GB on small GPUs")
+    ap.add_argument("--checkpoint-quantize", action="store_true",
+                    help="gradient-checkpoint each layer's quantize() - frees the "
+                         "~8GB of weight-sized straight-through intermediates "
+                         "(recomputed in backward); bit-identical training")
+    ap.add_argument("--grad-accum", type=int, default=1,
+                    help="accumulate this many micro-batches per optimizer step "
+                         "(recovers effective batch size at low VRAM)")
     args = ap.parse_args()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -58,16 +70,20 @@ def main() -> int:
         p.requires_grad_(False)
 
     print("loading student + wrapping allocated linears...", flush=True)
+    student_dtype = torch.bfloat16 if args.student_bf16 else torch.float32
     student = AutoModelForCausalLM.from_pretrained(
-        args.model_dir, local_files_only=True, dtype=torch.float32
+        args.model_dir, local_files_only=True, dtype=student_dtype
     ).to(dev)
     student.config.use_cache = False
-    try:
-        student.gradient_checkpointing_enable()
-    except Exception:
-        pass
+    # Model-level checkpointing would nest inside the per-quantize checkpoint
+    # (and clobber its cb_loss output tracking), so use one or the other.
+    if not args.checkpoint_quantize:
+        try:
+            student.gradient_checkpointing_enable()
+        except Exception:
+            pass
     wrapped = build_qat_student(student, allocation, group_size=args.group_size,
-                                commitment=args.commit)
+                                commitment=args.commit, checkpoint=args.checkpoint_quantize)
     print(f"  wrapped {len(wrapped)} linears", flush=True)
 
     # Train only the quantized layers' shadow weights + codebooks.
@@ -82,7 +98,12 @@ def main() -> int:
         p.requires_grad_(False)
     for p in train_params:
         p.requires_grad_(True)
-    opt = torch.optim.AdamW(train_params, lr=args.lr)
+    if args.optim8bit:
+        import bitsandbytes as bnb
+        opt = bnb.optim.AdamW8bit(train_params, lr=args.lr)
+        print("optimizer: bitsandbytes AdamW8bit (int8 m+v)", flush=True)
+    else:
+        opt = torch.optim.AdamW(train_params, lr=args.lr)
 
     # Warmup + cosine decay - longer runs converge better with a schedule.
     warmup = max(10, args.steps // 20)
@@ -102,34 +123,42 @@ def main() -> int:
     import time
     rng = torch.Generator(device="cpu")
     rng.manual_seed(0)
+    accum = max(1, args.grad_accum)
     for step in range(args.steps):
-        idx = torch.randint(0, corpus.shape[0], (args.batch,), generator=rng).to(dev)
-        batch = corpus[idx]
-        with torch.no_grad():
-            t_logits = teacher(batch).logits.float()
-        s_logits = student(batch).logits
-
-        T = args.temp
-        # flatten tokens; KL per token averaged
-        sl = s_logits.reshape(-1, s_logits.shape[-1])
-        tl = t_logits.reshape(-1, t_logits.shape[-1])
-        kl = F.kl_div(
-            F.log_softmax(sl / T, dim=-1),
-            F.softmax(tl / T, dim=-1),
-            reduction="batchmean", log_target=False,
-        ) * (T * T)
-        del t_logits, tl
-        cb_loss = collect_codebook_loss(wrapped)
-        loss = kl + args.cb_weight * cb_loss
-
+        # Gradient accumulation: sum grads over `accum` micro-batches, then one
+        # optimizer step. Recovers a larger effective batch (accum * batch) on a
+        # small GPU where only batch=1 fits in VRAM.
         opt.zero_grad(set_to_none=True)
-        loss.backward()
+        kl_log = 0.0
+        cb_log = 0.0
+        for micro in range(accum):
+            idx = torch.randint(0, corpus.shape[0], (args.batch,), generator=rng).to(dev)
+            batch = corpus[idx]
+            with torch.no_grad():
+                t_logits = teacher(batch).logits.float()
+            s_logits = student(batch).logits
+
+            T = args.temp
+            sl = s_logits.reshape(-1, s_logits.shape[-1])
+            tl = t_logits.reshape(-1, t_logits.shape[-1])
+            kl = F.kl_div(
+                F.log_softmax(sl / T, dim=-1),
+                F.softmax(tl / T, dim=-1),
+                reduction="batchmean", log_target=False,
+            ) * (T * T)
+            del t_logits, tl
+            cb_loss = collect_codebook_loss(wrapped)
+            loss = (kl + args.cb_weight * cb_loss) / accum
+            loss.backward()
+            kl_log += kl.item() / accum
+            cb_log += cb_loss.item() / accum
+
         torch.nn.utils.clip_grad_norm_(train_params, 1.0)
         opt.step()
         sched.step()
 
         if step % 20 == 0 or step == args.steps - 1:
-            print(f"step {step:4d}  kl={kl.item():.4f}  cb={cb_loss.item():.4f}  lr={sched.get_last_lr()[0]:.2e}", flush=True)
+            print(f"step {step:4d}  kl={kl_log:.4f}  cb={cb_log:.4f}  lr={sched.get_last_lr()[0]:.2e}", flush=True)
 
     print("materializing quantized weights into a dense HF dir...", flush=True)
     student.eval()
