@@ -18,7 +18,7 @@ except ImportError:
 
 try:
     import torch
-except ImportError:
+except Exception:  # ImportError, or OSError from a broken/partial native install
     torch = None
 
 
