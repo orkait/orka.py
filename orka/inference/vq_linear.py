@@ -188,7 +188,7 @@ def build_vq_linear(
     import numpy as np
     from orka._format import (
         _read_codebook, _read_indices, _read_salient, _read_outliers,
-        _float_value_dtype,
+        _read_float_vector, _float_value_dtype,
     )
 
     shape = [int(x) for x in tensor_meta["shape"]]
@@ -244,12 +244,9 @@ def build_vq_linear(
     scales_np = None
     if norm in ("slrq-block", "block-max", "channel-block-max", "awq-block-max"):
         scale_dtype = tensor_meta.get("scale_dtype") or "float32"
-        scales_raw = np.fromfile(
-            str(artifact_dir / tensor_meta["scales"]),
-            dtype=_float_value_dtype(scale_dtype),
-        ).astype(np.float32)
         n_scale = math.ceil(total / block_size)
-        scales_np = scales_raw[:n_scale]
+        scales_full = _read_float_vector(artifact_dir / tensor_meta["scales"], int(tensor_meta["scale_count"]), scale_dtype)
+        scales_np = scales_full[:n_scale]
         layer.scales.copy_(torch.from_numpy(scales_np).to(torch.float16))
 
     # --- Precompute sparse correction (salient + outliers) ---

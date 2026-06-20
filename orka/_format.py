@@ -17,7 +17,7 @@ from orka._tensor import _is_torch_tensor
 # v2: fp16 codebooks/scales (with f32 overflow fallback) + optional zlib
 # index streams. v1 artifacts read fine: missing manifest fields default to
 # float32 / raw.
-ORKA_VERSION = 2
+ORKA_VERSION = 3
 
 
 _FLOAT_VALUE_DTYPES = {
@@ -269,16 +269,45 @@ def _read_codebook(path: Path, group_size: int, dtype: str = "float32"):
     return arr.astype(np.float32).reshape(-1, group_size)
 
 
+def _write_blob(path: Path, raw: bytes) -> None:
+    """Write a sidecar byte stream, self-describing its codec with a 1-byte
+    header (0 = raw, 1 = zlib). zlib is used only when it actually shrinks the
+    stream, so incompressible sidecars cost only the 1-byte header."""
+    import zlib
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    comp = zlib.compress(raw, 6)
+    if len(comp) < len(raw):
+        path.write_bytes(b"\x01" + comp)
+    else:
+        path.write_bytes(b"\x00" + raw)
+
+
+def _read_blob(path: Path) -> bytes:
+    """Inverse of ``_write_blob``: read the 1-byte codec header + payload."""
+    data = path.read_bytes()
+    if not data:
+        return b""
+    codec = data[0]
+    payload = data[1:]
+    if codec == 1:
+        import zlib
+
+        return zlib.decompress(payload)
+    if codec == 0:
+        return bytes(payload)
+    raise ValueError(f"unknown sidecar codec {codec} in {path}")
+
+
 def _write_float_vector(path: Path, values, dtype: str = "float16") -> str:
     """Write a float sidecar vector; fp16 by default with f32 overflow
-    fallback. Returns the actual dtype written."""
+    fallback. Self-describing zlib via ``_write_blob``. Returns the actual dtype."""
     import numpy as np
-    path.parent.mkdir(parents=True, exist_ok=True)
     if _is_torch_tensor(values):
         values = values.detach().cpu().numpy()
     arr = np.asarray(values, dtype=np.float32)
     actual = _compact_float_dtype(arr, dtype)
-    path.write_bytes(arr.astype(_float_value_dtype(actual)).tobytes())
+    _write_blob(path, arr.astype(_float_value_dtype(actual)).tobytes())
     return actual
 
 
@@ -288,7 +317,7 @@ def _write_f32_vector(path: Path, values) -> None:
 
 def _read_float_vector(path: Path, expected_count: int, dtype: str = "float32"):
     import numpy as np
-    arr = np.fromfile(str(path), dtype=_float_value_dtype(dtype)).astype(np.float32)
+    arr = np.frombuffer(_read_blob(path), dtype=_float_value_dtype(dtype)).astype(np.float32)
     if arr.shape[0] != expected_count:
         raise ValueError(
             f"float vector size mismatch for {path}: expected {expected_count}, got {arr.shape[0]}"
