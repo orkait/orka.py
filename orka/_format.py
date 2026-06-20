@@ -455,32 +455,32 @@ def _write_salient(
     val_path: Path,
     salient_indices,
     salient_weights,
+    index_bits: int,
     weight_dtype: str = "float16",
-) -> tuple[str, str]:
-    """Write SLRQ salient sidecars."""
+) -> str:
+    """Write SLRQ salient sidecars. Local block indices (0..block_size-1) are
+    bit-packed to ``index_bits`` = ceil(log2 block_size) inside a self-describing
+    blob; weights go through the float-vector blob. Returns the weight dtype."""
     import numpy as np
 
     sw = salient_weights.numpy() if hasattr(salient_weights, "numpy") else salient_weights
     si = salient_indices.numpy() if hasattr(salient_indices, "numpy") else salient_indices
     sw = np.asarray(sw, dtype=np.float32)
     si = np.asarray(si, dtype=np.uint64)
-    index_dtype = _smallest_unsigned_dtype(int(si.max()) if si.size else 0)
-    weight_dtype = _compact_float_dtype(sw, weight_dtype)
-    sw.astype(_float_value_dtype(weight_dtype)).tofile(str(val_path))
-    si.astype(_unsigned_value_dtype(index_dtype)).tofile(str(idx_path))
-    return index_dtype, weight_dtype
+    _write_blob(idx_path, _pack_indices(si, index_bits).tobytes())
+    return _write_float_vector(val_path, sw, weight_dtype)
 
 
 def _read_salient(
     idx_path: Path,
     val_path: Path,
-    index_dtype: str = "uint32",
+    count: int,
+    index_bits: int,
     weight_dtype: str = "float32",
 ):
-    """Read SLRQ salient sidecars."""
+    """Read SLRQ salient sidecars (bit-packed indices + float-vector weights)."""
     import numpy as np
-    s_idx = np.fromfile(str(idx_path), dtype=_unsigned_value_dtype(index_dtype))
-    s_val = np.fromfile(str(val_path), dtype=_float_value_dtype(weight_dtype)).astype(np.float32)
-    if len(s_idx) != len(s_val):
-        raise ValueError(f"salient count mismatch: {len(s_idx)} != {len(s_val)}")
+    raw = np.frombuffer(_read_blob(idx_path), dtype=np.uint8)
+    s_idx = _unpack_indices(raw, index_bits, count)
+    s_val = _read_float_vector(val_path, count, weight_dtype)
     return s_idx, s_val

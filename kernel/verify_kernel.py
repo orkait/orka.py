@@ -150,7 +150,7 @@ def kernel_decode(lib, out_dir: Path, tm: dict) -> np.ndarray:
     if salient:
         s_idx, s_val = _read_salient(
             out_dir / salient["indices"], out_dir / salient["weights"],
-            salient.get("indices_dtype", "uint32"), salient.get("weights_dtype", "float32"),
+            int(salient["count"]), int(salient["indices_bits"]), salient.get("weights_dtype", "float32"),
         )
         if s_idx.size:
             si_arr, si_ptr = _i32ptr(s_idx)
