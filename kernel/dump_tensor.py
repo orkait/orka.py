@@ -113,7 +113,7 @@ def dump(artifact: Path, tensor_name: str | None, out_prefix: Path, n_cols_out: 
     sal = tm.get("salient")
     if sal:
         s_idx, s_val = _read_salient(artifact / sal["indices"], artifact / sal["weights"],
-                                     sal.get("indices_dtype", "uint32"), sal.get("weights_dtype", "float32"))
+                                     int(sal["count"]), int(sal["indices_bits"]), sal.get("weights_dtype", "float32"))
         if s_idx.size:
             off_i, _ = add(s_idx.astype(np.float32))
             off_v, _ = add(s_val)

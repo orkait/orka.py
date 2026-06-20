@@ -305,7 +305,8 @@ def build_vq_linear(
         s_idx_raw, s_val_raw = _read_salient(
             artifact_dir / salient["indices"],
             artifact_dir / salient["weights"],
-            salient.get("indices_dtype", "uint32"),
+            int(salient["count"]),
+            int(salient["indices_bits"]),
             salient.get("weights_dtype", "float32"),
         )
         n_scale = math.ceil(total / block_size)
