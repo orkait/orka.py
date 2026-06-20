@@ -96,7 +96,10 @@ class CompensatedPackTest(unittest.TestCase):
                 codebook_mode="per-tensor", backend="torch", device="cpu",
                 em_aq_passes=0, error_compensation=True,
             )
-            self.assertTrue(manifest["error_compensation"])
+            # No calibration activations -> compensation cannot run, so the
+            # manifest must truthfully record it as not applied (it was
+            # misleadingly True before, claiming a step that silently no-oped).
+            self.assertFalse(manifest["error_compensation"])
             verified = verify_artifact(artifact)
             self.assertLess(verified["max_mse_delta"], 1e-6)
 

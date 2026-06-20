@@ -57,8 +57,10 @@ from orka._format import (
     _read_codebook,
     _read_float_vector,
     _read_indices,
+    _read_outliers,
     _read_salient,
 )
+from orka.pipeline.decode import _read_lowrank
 
 # ──────────────────────────────────────────────────────────────────────
 #  Helpers
@@ -230,6 +232,30 @@ def _add_orka_tensor(
         writer.add_tensor(f"{name}.orka.salient.idx", sal_idx_store)
         total_bytes += sal_idx_store.nbytes
         total_bytes += _quantize_to_q8(np.asarray(sal_val, dtype=np.float32), f"{name}.orka.salient.val", writer)
+
+    # Outlier / pillar escape: absolute positions + pre-scale values. Previously
+    # dropped entirely, which corrupted the GGUF for the recommended recipe
+    # (outlier_frac) and any pillar-protected model.
+    if tmeta.get("outliers"):
+        outl = tmeta["outliers"]
+        pos, val = _read_outliers(
+            orka_dir / outl["positions"],
+            orka_dir / outl["values"],
+            int(outl["count"]),
+            outl.get("positions_dtype", "uint32"),
+            outl.get("values_dtype", "float32"),
+        )
+        pos_store = np.asarray(pos, dtype=np.int64).astype(np.int32)  # < tensor numel, fits int32
+        writer.add_tensor(f"{name}.orka.outlier.idx", pos_store)
+        total_bytes += pos_store.nbytes
+        total_bytes += _quantize_to_q8(np.asarray(val, dtype=np.float32), f"{name}.orka.outlier.val", writer)
+
+    # Low-rank correction (A [rows, r], B [cols, r]) -> fp16, applied last at decode.
+    if tmeta.get("lowrank"):
+        a, b = _read_lowrank(orka_dir, tmeta["lowrank"])
+        writer.add_tensor(f"{name}.orka.lowrank.a", np.ascontiguousarray(a, dtype=np.float16))
+        writer.add_tensor(f"{name}.orka.lowrank.b", np.ascontiguousarray(b, dtype=np.float16))
+        total_bytes += a.size * 2 + b.size * 2
 
     return total_bytes
 
