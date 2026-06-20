@@ -59,6 +59,7 @@ def _build_synth_artifact(tmp_path: Path) -> Path:
         backend="numpy",
         sample_vectors=4096,
         iterations=4,
+        outlier_frac=0.02,  # adds the outlier sidecar - guards against the GGUF dropping it
     )
     return orka_dir
 

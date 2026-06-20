@@ -91,6 +91,18 @@ class GGUFOrkaLinear(nn.Module):
 
         decoded = decoded[:packed_values]
 
+        # Outlier / pillar escape (absolute positions, pre-rotation / pre-scale)
+        outl = self.tensor_meta.get("outliers")
+        if outl:
+            pos = self.gguf_tensors[f"{name}.orka.outlier.idx"].data.astype(np.int64)
+            ov_t = self.gguf_tensors[f"{name}.orka.outlier.val"]
+            if ov_t.tensor_type == GGMLQuantizationType.Q8_0:
+                ov = dequantize(ov_t.data, GGMLQuantizationType.Q8_0)
+            else:
+                ov = ov_t.data.view(np.float16).astype(np.float32)
+            mask = pos < decoded.size
+            decoded[pos[mask]] = ov[mask]
+
         # Apply rotation
         rotation = self.tensor_meta.get("rotation", "none")
         if rotation in {"orthogonal", "hadamard"}:
@@ -145,6 +157,16 @@ class GGUFOrkaLinear(nn.Module):
                 flat_idx = b_idx * block_size + int(local_idx)
                 if flat_idx < decoded.size:
                     decoded[flat_idx] = float(weight)
+
+        # Low-rank correction: decoded += A @ B^T, applied last
+        lr = self.tensor_meta.get("lowrank")
+        if lr:
+            r = int(lr["rank"])
+            a = self.gguf_tensors[f"{name}.orka.lowrank.a"].data.view(np.float16).astype(np.float32).reshape(-1, r)
+            b = self.gguf_tensors[f"{name}.orka.lowrank.b"].data.view(np.float16).astype(np.float32).reshape(-1, r)
+            rows = a.shape[0]
+            cols = b.shape[0]
+            decoded = (decoded[:rows * cols].reshape(rows, cols) + a @ b.T).reshape(-1)
 
         w_torch = torch.from_numpy(decoded.reshape(shape)).to(device=device, dtype=torch.float32)
         self._reconstructed_weight = w_torch

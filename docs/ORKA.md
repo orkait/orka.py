@@ -150,7 +150,7 @@ python3 orka.py sweep model.safetensors \
   --iterations 8
 ```
 
-CUDA support requires a working PyTorch CUDA install. If CUDA is requested and unavailable, Orka fails instead of silently falling back to CPU.
+CUDA support requires a working PyTorch CUDA install. If CUDA is requested but unavailable (no device, or `torch.cuda.is_available()` is false), Orka raises rather than silently using CPU. The one exception is a GPU whose compute capability is below sm_70 (for example a P100): the installed PyTorch build cannot run on it, so Orka prints a warning to stderr and falls back to CPU.
 
 ## Compiler Scope v0
 
