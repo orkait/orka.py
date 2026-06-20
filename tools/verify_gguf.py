@@ -77,6 +77,14 @@ def decompress_gguf_tensor(tmeta, gguf_tensors, reader):
 
     decoded = decoded[:packed_values]
 
+    # Outlier / pillar escape: absolute positions overwritten pre-rotation / pre-scale.
+    outl = tmeta.get("outliers")
+    if outl:
+        pos = gguf_tensors[f"{name}.orka.outlier.idx"].data.astype(np.int64)
+        val = _dequant_or_fp16(gguf_tensors[f"{name}.orka.outlier.val"])
+        mask = pos < decoded.size
+        decoded[pos[mask]] = val[mask]
+
     # 3. Apply rotation
     rotation = tmeta.get("rotation", "none")
     if rotation in {"orthogonal", "hadamard"}:
@@ -109,6 +117,16 @@ def decompress_gguf_tensor(tmeta, gguf_tensors, reader):
             flat_idx = b_idx * block_size + int(local_idx)
             if flat_idx < decoded.size:
                 decoded[flat_idx] = float(weight)
+
+    # Low-rank correction: decoded += (A @ B^T), applied last.
+    lr = tmeta.get("lowrank")
+    if lr:
+        r = int(lr["rank"])
+        a = _dequant_or_fp16(gguf_tensors[f"{name}.orka.lowrank.a"]).reshape(-1, r)
+        b = _dequant_or_fp16(gguf_tensors[f"{name}.orka.lowrank.b"]).reshape(-1, r)
+        rows = a.shape[0]
+        cols = b.shape[0]
+        decoded = (decoded[:rows * cols].reshape(rows, cols) + a @ b.T).reshape(-1)
 
     return decoded.reshape(shape)
 
