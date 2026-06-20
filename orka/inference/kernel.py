@@ -233,7 +233,7 @@ def vq_linear_forward(layer, x: torch.Tensor) -> torch.Tensor:
         y = _vq_decode_n1(layer, x_2d)
         if layer.corr_indices.numel() > 0:
             sp = layer._correction_sparse()
-            y = y + torch.sparse.mm(sp, x_2d.float().T).T.to(torch.float16)
+            y = y + torch.sparse.mm(sp, x_2d.float().T.contiguous()).T.to(torch.float16)
         if layer.bias is not None:
             y = y + layer.bias
         return y.reshape(*orig_shape[:-1], M).to(x.dtype)
@@ -266,7 +266,7 @@ def vq_linear_forward(layer, x: torch.Tensor) -> torch.Tensor:
     # the sparse.mm runs per forward.
     if layer.corr_indices.numel() > 0:
         sp = layer._correction_sparse()
-        correction = torch.sparse.mm(sp, x_2d.float().T).T.to(torch.float16)
+        correction = torch.sparse.mm(sp, x_2d.float().T.contiguous()).T.to(torch.float16)
         y = y + correction
 
     if layer.bias is not None:
