@@ -162,12 +162,12 @@ def _enforce_hard_ceiling(requested_gb: float) -> float:
 def _apply_system_ram_cap(
     max_ram_gb: float | None, workload_budget_gb: float | None
 ) -> None:
-    """Apply 4-layer RAM cap. Both args required when cap is requested.
+    """Apply layered RAM protection. Both args required when cap is requested.
 
       1. Preflight check  - refuse if MemAvailable < budget+5GB or SwapUsed > 4GB
       2. Hard ceiling     - clamp max_ram_gb to HARD_CEILING_GB (25GB)
-      3. RLIMIT_AS        - OS-enforced cap on process address space
-      4. Polling monitor  - 100ms early-warning checkpoint
+      3. RLIMIT_AS        - DISABLED (capping VSZ crashes CUDA/PyTorch; see _apply_hard_ram_cap)
+      4. Polling monitor  - 100ms RSS checkpoint; the only active runtime enforcement
 
     Pass max_ram_gb=None to skip cap entirely (NOT recommended).
     When max_ram_gb is set, workload_budget_gb is required (no default - caller

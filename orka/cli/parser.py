@@ -145,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--max-system-ram-gb",
             type=float,
             default=None,
-            help="strict cap on total system RAM (GB). RLIMIT_AS-enforced. Hard ceiling 25GB.",
+            help="strict cap on total system RAM (GB), enforced by the 100ms RSS poll-monitor. Hard ceiling 25GB.",
         )
         p.add_argument(
             "--workload-budget-gb",
@@ -457,7 +457,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-system-ram-gb",
         type=float,
         default=None,
-        help="strict cap on total system RAM (GB). RLIMIT_AS-enforced. Hard ceiling 25GB.",
+        help="strict cap on total system RAM (GB), enforced by the 100ms RSS poll-monitor. Hard ceiling 25GB.",
     )
     sweep.add_argument(
         "--workload-budget-gb",
@@ -547,7 +547,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow transformers to download missing files",
     )
     eval_cmd.add_argument("--max-system-ram-gb", type=float, default=None,
-                          help="strict cap on total system RAM (GB). RLIMIT_AS-enforced.")
+                          help="strict cap on total system RAM (GB), enforced by the 100ms RSS poll-monitor.")
     eval_cmd.add_argument("--workload-budget-gb", type=float, default=None,
                           help="estimated process RAM budget (GB) for preflight. Required with --max-system-ram-gb.")
     eval_cmd.add_argument("--max-cpu-threads", type=int, default=None,
@@ -577,7 +577,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow transformers to download missing files",
     )
     pulse_check_cmd.add_argument("--max-system-ram-gb", type=float, default=None,
-                                 help="strict cap on total system RAM (GB). RLIMIT_AS-enforced.")
+                                 help="strict cap on total system RAM (GB), enforced by the 100ms RSS poll-monitor.")
     pulse_check_cmd.add_argument("--workload-budget-gb", type=float, default=None,
                                  help="estimated process RAM budget (GB) for preflight. Required with --max-system-ram-gb.")
     pulse_check_cmd.add_argument("--max-cpu-threads", type=int, default=None,
@@ -617,7 +617,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow transformers to download missing files",
     )
     eval_sweep_cmd.add_argument("--max-system-ram-gb", type=float, default=None,
-                                help="strict cap on total system RAM (GB). RLIMIT_AS-enforced.")
+                                help="strict cap on total system RAM (GB), enforced by the 100ms RSS poll-monitor.")
     eval_sweep_cmd.add_argument("--workload-budget-gb", type=float, default=None,
                                 help="estimated process RAM budget (GB) for preflight. Required with --max-system-ram-gb.")
     eval_sweep_cmd.add_argument("--max-cpu-threads", type=int, default=None,
