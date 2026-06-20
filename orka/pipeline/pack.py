@@ -648,6 +648,22 @@ def pack_checkpoint(
     else:
         resolved_device = "cpu"
 
+    # Error compensation only runs with torch backend + no rotation + calibration
+    # activations. If a precondition is missing it would silently no-op while the
+    # manifest still claimed it ran, so downgrade the flag here (keeps the manifest
+    # truthful) and tell the user.
+    if error_compensation and (
+        backend != "torch" or rotation != "none" or awq_activations is None
+    ):
+        import sys as _sys
+
+        print(
+            "WARNING: --error-compensation needs --backend torch, --rotation none, "
+            "and calibration activations; one is missing, so it will NOT be applied.",
+            file=_sys.stderr,
+        )
+        error_compensation = False
+
     if tensor_partition_count is not None:
         if tensor_partition_count < 1:
             raise ValueError("tensor_partition_count must be >= 1")
