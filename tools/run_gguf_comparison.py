@@ -2,6 +2,7 @@
 import sys
 import json
 import math
+import argparse
 from pathlib import Path
 import torch
 import torch.nn as nn
@@ -204,9 +205,15 @@ def replace_linear_with_gguf(model, gguf_path, manifest_path):
     _replace(model)
 
 def main():
-    model_dir = "/home/kai/ai-models/misc/orka-smollm2-135m"
-    orka_dir = "/home/kai/orkait/bonsai-models/results/rvq-mixed-smol.orka"
-    gguf_path = "/home/kai/orkait/bonsai-models/results/orka-smollm2-135m-ultra.gguf"
+    ap = argparse.ArgumentParser(
+        description="Compare original vs raw-Orka vs GGUF-Orka generations on a few prompts."
+    )
+    ap.add_argument("model_dir", help="HF model dir (config/tokenizer + base weights)")
+    ap.add_argument("orka_dir", help="Path to the reference .orka artifact directory")
+    ap.add_argument("gguf_path", help="Path to the Orka GGUF file")
+    ap.add_argument("--max-length", type=int, default=48, help="max generation length")
+    args = ap.parse_args()
+    model_dir, orka_dir, gguf_path = args.model_dir, args.orka_dir, args.gguf_path
 
     print("Loading tokenizer...", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
@@ -239,7 +246,7 @@ def main():
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_length=48,
+                max_length=args.max_length,
                 do_sample=False,
                 pad_token_id=tokenizer.eos_token_id
             )
