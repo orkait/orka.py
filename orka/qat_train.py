@@ -50,6 +50,13 @@ def main() -> int:
                     help="gradient-checkpoint each layer's quantize() - frees the "
                          "~8GB of weight-sized straight-through intermediates "
                          "(recomputed in backward); bit-identical training")
+    ap.add_argument("--ckpt-dir", default="",
+                    help="directory to write/read a resumable training checkpoint "
+                         "(shadow + codebooks + optimizer + step). Empty = disabled.")
+    ap.add_argument("--ckpt-every", type=int, default=25,
+                    help="save a resume checkpoint every N optimizer steps")
+    ap.add_argument("--resume", action="store_true",
+                    help="resume from --ckpt-dir/qat_ckpt.pt if it exists")
     ap.add_argument("--grad-accum", type=int, default=1,
                     help="accumulate this many micro-batches per optimizer step "
                          "(recovers effective batch size at low VRAM)")
@@ -124,7 +131,32 @@ def main() -> int:
     rng = torch.Generator(device="cpu")
     rng.manual_seed(0)
     accum = max(1, args.grad_accum)
-    for step in range(args.steps):
+
+    # --- resume checkpoint (shadow + codebooks + optimizer + step + RNG) ---
+    # The trainable state lives in student.state_dict() (QATVQLinear shadow +
+    # codebooks are nn.Parameters) plus the optimizer state. Saving all of it
+    # every --ckpt-every steps lets a killed run continue instead of restart.
+    ckpt_path = Path(args.ckpt_dir) / "qat_ckpt.pt" if args.ckpt_dir else None
+    start_step = 0
+    if ckpt_path and args.resume and ckpt_path.exists():
+        ck = torch.load(ckpt_path, map_location=dev)
+        student.load_state_dict(ck["student"])
+        opt.load_state_dict(ck["opt"])
+        sched.load_state_dict(ck["sched"])
+        rng.set_state(ck["rng"].cpu().to(torch.uint8))  # set_state needs a CPU ByteTensor
+        start_step = ck["step"]
+        print(f"resumed from {ckpt_path} at step {start_step}", flush=True)
+
+    def _save_ckpt(step):
+        if not ckpt_path:
+            return
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = ckpt_path.with_suffix(".tmp")
+        torch.save({"student": student.state_dict(), "opt": opt.state_dict(),
+                    "sched": sched.state_dict(), "rng": rng.get_state(), "step": step}, tmp)
+        tmp.replace(ckpt_path)   # atomic - a kill mid-write never corrupts the ckpt
+
+    for step in range(start_step, args.steps):
         # Gradient accumulation: sum grads over `accum` micro-batches, then one
         # optimizer step. Recovers a larger effective batch (accum * batch) on a
         # small GPU where only batch=1 fits in VRAM.
@@ -159,6 +191,9 @@ def main() -> int:
 
         if step % 20 == 0 or step == args.steps - 1:
             print(f"step {step:4d}  kl={kl_log:.4f}  cb={cb_log:.4f}  lr={sched.get_last_lr()[0]:.2e}", flush=True)
+        # checkpoint AFTER the step so resume restarts at the next unfinished step
+        if ckpt_path and ((step + 1) % args.ckpt_every == 0 or step == args.steps - 1):
+            _save_ckpt(step + 1)
 
     print("materializing quantized weights into a dense HF dir...", flush=True)
     student.eval()
