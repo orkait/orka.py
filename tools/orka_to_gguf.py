@@ -214,7 +214,8 @@ def _add_orka_tensor(
         sal_idx, sal_val = _read_salient(
             orka_dir / sal["indices"],
             orka_dir / sal["weights"],
-            sal.get("indices_dtype", "uint32"),
+            int(sal["count"]),
+            int(sal["indices_bits"]),
             sal.get("weights_dtype", "float32"),
         )
         # Salient indices are local block offsets (small); a signed int that fits

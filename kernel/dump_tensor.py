@@ -103,7 +103,7 @@ def dump(artifact: Path, tensor_name: str | None, out_prefix: Path, n_cols_out: 
     outl = tm.get("outliers")
     if outl:
         pos, val = _read_outliers(artifact / outl["positions"], artifact / outl["values"],
-                                  outl.get("positions_dtype", "uint32"), outl.get("values_dtype", "float32"))
+                                  int(outl["count"]), outl.get("positions_dtype", "uint32"), outl.get("values_dtype", "float32"))
         if pos.size:
             off_p, _ = add_i32(pos.astype(np.int64))  # absolute positions, may exceed 2^24
             off_v, _ = add(val)
@@ -113,7 +113,7 @@ def dump(artifact: Path, tensor_name: str | None, out_prefix: Path, n_cols_out: 
     sal = tm.get("salient")
     if sal:
         s_idx, s_val = _read_salient(artifact / sal["indices"], artifact / sal["weights"],
-                                     sal.get("indices_dtype", "uint32"), sal.get("weights_dtype", "float32"))
+                                     int(sal["count"]), int(sal["indices_bits"]), sal.get("weights_dtype", "float32"))
         if s_idx.size:
             off_i, _ = add(s_idx.astype(np.float32))
             off_v, _ = add(s_val)

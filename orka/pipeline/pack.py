@@ -226,14 +226,15 @@ def _persist_tensor_sidecars(c: dict, tensor_dir: Path, out_dir: Path) -> tuple:
     if c.get("salient_indices") is not None:
         s_idx_path = tensor_dir / f"{safe}.salient.idx"
         s_val_path = tensor_dir / f"{safe}.salient.val"
-        indices_dtype, weights_dtype = _write_salient(
-            s_idx_path, s_val_path, c["salient_indices"], c["salient_weights"]
+        salient_index_bits = _index_bits_for_size(int(c.get("block_scale_size") or 32))
+        weights_dtype = _write_salient(
+            s_idx_path, s_val_path, c["salient_indices"], c["salient_weights"], salient_index_bits
         )
         salient_meta = {
             "count": int(len(c["salient_weights"])),
             "indices": str(s_idx_path.relative_to(out_dir)),
             "weights": str(s_val_path.relative_to(out_dir)),
-            "indices_dtype": indices_dtype,
+            "indices_bits": salient_index_bits,
             "weights_dtype": weights_dtype,
             "indices_bytes": s_idx_path.stat().st_size,
             "weights_bytes": s_val_path.stat().st_size,

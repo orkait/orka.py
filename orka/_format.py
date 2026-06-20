@@ -17,7 +17,7 @@ from orka._tensor import _is_torch_tensor
 # v2: fp16 codebooks/scales (with f32 overflow fallback) + optional zlib
 # index streams. v1 artifacts read fine: missing manifest fields default to
 # float32 / raw.
-ORKA_VERSION = 2
+ORKA_VERSION = 3
 
 
 _FLOAT_VALUE_DTYPES = {
@@ -269,16 +269,45 @@ def _read_codebook(path: Path, group_size: int, dtype: str = "float32"):
     return arr.astype(np.float32).reshape(-1, group_size)
 
 
+def _write_blob(path: Path, raw: bytes) -> None:
+    """Write a sidecar byte stream, self-describing its codec with a 1-byte
+    header (0 = raw, 1 = zlib). zlib is used only when it actually shrinks the
+    stream, so incompressible sidecars cost only the 1-byte header."""
+    import zlib
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    comp = zlib.compress(raw, 6)
+    if len(comp) < len(raw):
+        path.write_bytes(b"\x01" + comp)
+    else:
+        path.write_bytes(b"\x00" + raw)
+
+
+def _read_blob(path: Path) -> bytes:
+    """Inverse of ``_write_blob``: read the 1-byte codec header + payload."""
+    data = path.read_bytes()
+    if not data:
+        return b""
+    codec = data[0]
+    payload = data[1:]
+    if codec == 1:
+        import zlib
+
+        return zlib.decompress(payload)
+    if codec == 0:
+        return bytes(payload)
+    raise ValueError(f"unknown sidecar codec {codec} in {path}")
+
+
 def _write_float_vector(path: Path, values, dtype: str = "float16") -> str:
     """Write a float sidecar vector; fp16 by default with f32 overflow
-    fallback. Returns the actual dtype written."""
+    fallback. Self-describing zlib via ``_write_blob``. Returns the actual dtype."""
     import numpy as np
-    path.parent.mkdir(parents=True, exist_ok=True)
     if _is_torch_tensor(values):
         values = values.detach().cpu().numpy()
     arr = np.asarray(values, dtype=np.float32)
     actual = _compact_float_dtype(arr, dtype)
-    path.write_bytes(arr.astype(_float_value_dtype(actual)).tobytes())
+    _write_blob(path, arr.astype(_float_value_dtype(actual)).tobytes())
     return actual
 
 
@@ -288,7 +317,7 @@ def _write_f32_vector(path: Path, values) -> None:
 
 def _read_float_vector(path: Path, expected_count: int, dtype: str = "float32"):
     import numpy as np
-    arr = np.fromfile(str(path), dtype=_float_value_dtype(dtype)).astype(np.float32)
+    arr = np.frombuffer(_read_blob(path), dtype=_float_value_dtype(dtype)).astype(np.float32)
     if arr.shape[0] != expected_count:
         raise ValueError(
             f"float vector size mismatch for {path}: expected {expected_count}, got {arr.shape[0]}"
@@ -362,23 +391,30 @@ def _write_outliers(
     values,
     value_dtype: str = "float16",
 ) -> tuple[str, str]:
+    """Write outlier sidecars. Positions are re-injected by scatter and so are
+    order-independent: sort them, delta-code the (now small) gaps, and let the
+    self-describing blob zlib them. Values are reordered to match the sorted
+    positions. Returns (delta_dtype, value_dtype)."""
     try:
         import numpy as np
     except Exception as exc:
         raise RuntimeError("outlier writing requires numpy") from exc
-    idx_path.parent.mkdir(parents=True, exist_ok=True)
     pos_arr = np.asarray(positions, dtype=np.uint64)
     val_arr = np.asarray(values, dtype=np.float32)
-    position_dtype = _smallest_unsigned_dtype(int(pos_arr.max()) if pos_arr.size else 0)
-    value_dtype = _compact_float_dtype(val_arr, value_dtype)
-    pos_arr.astype(_unsigned_value_dtype(position_dtype)).tofile(str(idx_path))
-    val_arr.astype(_float_value_dtype(value_dtype)).tofile(str(val_path))
+    order = np.argsort(pos_arr, kind="stable")
+    pos_sorted = pos_arr[order]
+    val_sorted = val_arr[order]
+    delta = np.diff(pos_sorted, prepend=np.uint64(0))
+    position_dtype = _smallest_unsigned_dtype(int(delta.max()) if delta.size else 0)
+    _write_blob(idx_path, delta.astype(_unsigned_value_dtype(position_dtype)).tobytes())
+    value_dtype = _write_float_vector(val_path, val_sorted, value_dtype)
     return position_dtype, value_dtype
 
 
 def _read_outliers(
     idx_path: Path,
     val_path: Path,
+    count: int,
     position_dtype: str = "uint32",
     value_dtype: str = "float32",
 ):
@@ -386,8 +422,9 @@ def _read_outliers(
         import numpy as np
     except Exception as exc:
         raise RuntimeError("outlier reading requires numpy") from exc
-    positions = np.fromfile(str(idx_path), dtype=_unsigned_value_dtype(position_dtype))
-    values = np.fromfile(str(val_path), dtype=_float_value_dtype(value_dtype)).astype(np.float32)
+    delta = np.frombuffer(_read_blob(idx_path), dtype=_unsigned_value_dtype(position_dtype))
+    positions = np.cumsum(delta.astype(np.uint64))
+    values = _read_float_vector(val_path, count, value_dtype)
     if len(positions) != len(values):
         raise ValueError(f"outlier count mismatch: {len(positions)} != {len(values)}")
     return positions, values
@@ -426,32 +463,32 @@ def _write_salient(
     val_path: Path,
     salient_indices,
     salient_weights,
+    index_bits: int,
     weight_dtype: str = "float16",
-) -> tuple[str, str]:
-    """Write SLRQ salient sidecars."""
+) -> str:
+    """Write SLRQ salient sidecars. Local block indices (0..block_size-1) are
+    bit-packed to ``index_bits`` = ceil(log2 block_size) inside a self-describing
+    blob; weights go through the float-vector blob. Returns the weight dtype."""
     import numpy as np
 
     sw = salient_weights.numpy() if hasattr(salient_weights, "numpy") else salient_weights
     si = salient_indices.numpy() if hasattr(salient_indices, "numpy") else salient_indices
     sw = np.asarray(sw, dtype=np.float32)
     si = np.asarray(si, dtype=np.uint64)
-    index_dtype = _smallest_unsigned_dtype(int(si.max()) if si.size else 0)
-    weight_dtype = _compact_float_dtype(sw, weight_dtype)
-    sw.astype(_float_value_dtype(weight_dtype)).tofile(str(val_path))
-    si.astype(_unsigned_value_dtype(index_dtype)).tofile(str(idx_path))
-    return index_dtype, weight_dtype
+    _write_blob(idx_path, _pack_indices(si, index_bits).tobytes())
+    return _write_float_vector(val_path, sw, weight_dtype)
 
 
 def _read_salient(
     idx_path: Path,
     val_path: Path,
-    index_dtype: str = "uint32",
+    count: int,
+    index_bits: int,
     weight_dtype: str = "float32",
 ):
-    """Read SLRQ salient sidecars."""
+    """Read SLRQ salient sidecars (bit-packed indices + float-vector weights)."""
     import numpy as np
-    s_idx = np.fromfile(str(idx_path), dtype=_unsigned_value_dtype(index_dtype))
-    s_val = np.fromfile(str(val_path), dtype=_float_value_dtype(weight_dtype)).astype(np.float32)
-    if len(s_idx) != len(s_val):
-        raise ValueError(f"salient count mismatch: {len(s_idx)} != {len(s_val)}")
+    raw = np.frombuffer(_read_blob(idx_path), dtype=np.uint8)
+    s_idx = _unpack_indices(raw, index_bits, count)
+    s_val = _read_float_vector(val_path, count, weight_dtype)
     return s_idx, s_val
