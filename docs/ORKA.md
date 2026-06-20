@@ -523,12 +523,12 @@ the serving form.
 
 - No runtime inference engine.
 - No production GGUF runtime quantization type yet.
-- No quantization-aware training loop.
 - No public performance claims.
 
 Previously listed non-goals that are now implemented:
 
 - Orthogonal rotation (`--rotation orthogonal`) - replaces "no SpinQuant rotation" item.
+- Quantization-aware training (`python -m orka.qat_train`) - replaces the "no QAT loop" item.
 
 ## Open Research Questions
 
