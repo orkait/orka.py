@@ -391,23 +391,30 @@ def _write_outliers(
     values,
     value_dtype: str = "float16",
 ) -> tuple[str, str]:
+    """Write outlier sidecars. Positions are re-injected by scatter and so are
+    order-independent: sort them, delta-code the (now small) gaps, and let the
+    self-describing blob zlib them. Values are reordered to match the sorted
+    positions. Returns (delta_dtype, value_dtype)."""
     try:
         import numpy as np
     except Exception as exc:
         raise RuntimeError("outlier writing requires numpy") from exc
-    idx_path.parent.mkdir(parents=True, exist_ok=True)
     pos_arr = np.asarray(positions, dtype=np.uint64)
     val_arr = np.asarray(values, dtype=np.float32)
-    position_dtype = _smallest_unsigned_dtype(int(pos_arr.max()) if pos_arr.size else 0)
-    value_dtype = _compact_float_dtype(val_arr, value_dtype)
-    pos_arr.astype(_unsigned_value_dtype(position_dtype)).tofile(str(idx_path))
-    val_arr.astype(_float_value_dtype(value_dtype)).tofile(str(val_path))
+    order = np.argsort(pos_arr, kind="stable")
+    pos_sorted = pos_arr[order]
+    val_sorted = val_arr[order]
+    delta = np.diff(pos_sorted, prepend=np.uint64(0))
+    position_dtype = _smallest_unsigned_dtype(int(delta.max()) if delta.size else 0)
+    _write_blob(idx_path, delta.astype(_unsigned_value_dtype(position_dtype)).tobytes())
+    value_dtype = _write_float_vector(val_path, val_sorted, value_dtype)
     return position_dtype, value_dtype
 
 
 def _read_outliers(
     idx_path: Path,
     val_path: Path,
+    count: int,
     position_dtype: str = "uint32",
     value_dtype: str = "float32",
 ):
@@ -415,8 +422,9 @@ def _read_outliers(
         import numpy as np
     except Exception as exc:
         raise RuntimeError("outlier reading requires numpy") from exc
-    positions = np.fromfile(str(idx_path), dtype=_unsigned_value_dtype(position_dtype))
-    values = np.fromfile(str(val_path), dtype=_float_value_dtype(value_dtype)).astype(np.float32)
+    delta = np.frombuffer(_read_blob(idx_path), dtype=_unsigned_value_dtype(position_dtype))
+    positions = np.cumsum(delta.astype(np.uint64))
+    values = _read_float_vector(val_path, count, value_dtype)
     if len(positions) != len(values):
         raise ValueError(f"outlier count mismatch: {len(positions)} != {len(values)}")
     return positions, values

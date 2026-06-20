@@ -126,6 +126,7 @@ def _load_decode_consts(out_dir: Path, tm: dict, device: str) -> dict:
         positions, values = _read_outliers(
             out_dir / outl["positions"],
             out_dir / outl["values"],
+            int(outl["count"]),
             outl.get("positions_dtype", "uint32"),
             outl.get("values_dtype", "float32"),
         )

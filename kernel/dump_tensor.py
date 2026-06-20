@@ -103,7 +103,7 @@ def dump(artifact: Path, tensor_name: str | None, out_prefix: Path, n_cols_out: 
     outl = tm.get("outliers")
     if outl:
         pos, val = _read_outliers(artifact / outl["positions"], artifact / outl["values"],
-                                  outl.get("positions_dtype", "uint32"), outl.get("values_dtype", "float32"))
+                                  int(outl["count"]), outl.get("positions_dtype", "uint32"), outl.get("values_dtype", "float32"))
         if pos.size:
             off_p, _ = add_i32(pos.astype(np.int64))  # absolute positions, may exceed 2^24
             off_v, _ = add(val)

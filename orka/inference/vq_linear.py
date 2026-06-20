@@ -289,6 +289,7 @@ def build_vq_linear(
         positions, values = _read_outliers(
             artifact_dir / outl["positions"],
             artifact_dir / outl["values"],
+            int(outl["count"]),
             outl.get("positions_dtype", "uint32"),
             outl.get("values_dtype", "float32"),
         )

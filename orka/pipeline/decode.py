@@ -90,6 +90,7 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict):
         positions, values = _read_outliers(
             out_dir / outl["positions"],
             out_dir / outl["values"],
+            int(outl["count"]),
             outl.get("positions_dtype", "uint32"),
             outl.get("values_dtype", "float32"),
         )
@@ -204,6 +205,7 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
         positions, values = _read_outliers(
             out_dir / outl["positions"],
             out_dir / outl["values"],
+            int(outl["count"]),
             outl.get("positions_dtype", "uint32"),
             outl.get("values_dtype", "float32"),
         )
