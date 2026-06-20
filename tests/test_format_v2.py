@@ -68,7 +68,7 @@ class FormatV2ArtifactTest(unittest.TestCase):
                 codebook_mode="per-tensor", backend="numpy", em_aq_passes=0,
                 normalization="block-max", block_scale_size=8,
             )
-            self.assertEqual(manifest["version"], 2)
+            self.assertEqual(manifest["version"], 3)
             entry = manifest["tensors"][0]
             self.assertEqual(entry["scale_dtype"], "float16")
             stage = entry["stages"][0]

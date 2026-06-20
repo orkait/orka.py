@@ -21,6 +21,7 @@ from orka._format import (
     _cast_codebook_storage,
     _float_value_dtype,
     _read_codebook,
+    _read_float_vector,
     _read_indices,
     _read_outliers,
     _read_pillars,
@@ -151,23 +152,15 @@ def _load_decode_consts(out_dir: Path, tm: dict, device: str) -> dict:
     consts["normalization"] = norm
     scale_np_dtype = _float_value_dtype(tm.get("scale_dtype") or "float32")
     if norm in ("block-max", "channel-block-max", "slrq-block", "awq-block-max"):
-        scales = np.fromfile(
-            str(out_dir / tm["scales"]), dtype=scale_np_dtype, count=int(tm["scale_count"])
-        ).astype(np.float32)
+        scales = _read_float_vector(out_dir / tm["scales"], int(tm["scale_count"]), tm.get("scale_dtype") or "float32")
         consts["block_scales"] = torch.from_numpy(scales).to(device)
         consts["block_scale_size"] = int(tm.get("block_scale_size") or 32)
         if norm == "awq-block-max" and tm.get("awq_col_scales"):
             awq_meta = tm["awq_col_scales"]
-            awq = np.fromfile(
-                str(out_dir / awq_meta["path"]),
-                dtype=_float_value_dtype(awq_meta.get("dtype") or "float32"),
-                count=int(awq_meta["count"]),
-            ).astype(np.float32)
+            awq = _read_float_vector(out_dir / awq_meta["path"], int(awq_meta["count"]), awq_meta.get("dtype") or "float32")
             consts["awq_col"] = torch.from_numpy(awq).to(device)
     elif norm == "awq":
-        scales = np.fromfile(
-            str(out_dir / tm["scales"]), dtype=scale_np_dtype, count=int(tm["scale_count"])
-        ).astype(np.float32)
+        scales = _read_float_vector(out_dir / tm["scales"], int(tm["scale_count"]), tm.get("scale_dtype") or "float32")
         consts["awq_col"] = torch.from_numpy(scales).to(device)
 
     salient = tm.get("salient")

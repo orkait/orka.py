@@ -238,9 +238,7 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
     norm = tm.get("normalization", "none")
     scale_np_dtype = _float_value_dtype(tm.get("scale_dtype") or "float32")
     if norm in ("block-max", "channel-block-max", "awq-block-max", "slrq-block"):
-        scales = np.fromfile(
-            str(out_dir / tm["scales"]), dtype=scale_np_dtype, count=int(tm["scale_count"])
-        ).astype(np.float32)
+        scales = _read_float_vector(out_dir / tm["scales"], int(tm["scale_count"]), tm.get("scale_dtype") or "float32")
         block_size = int(tm.get("block_scale_size") or 32)
         scales_t = torch.from_numpy(scales).to(device)
         n = decoded.numel()
@@ -253,19 +251,13 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
         if norm == "awq-block-max":
             awq_meta = tm.get("awq_col_scales")
             if awq_meta:
-                awq_scales = np.fromfile(
-                    str(out_dir / awq_meta["path"]),
-                    dtype=_float_value_dtype(awq_meta.get("dtype") or "float32"),
-                    count=int(awq_meta["count"]),
-                ).astype(np.float32)
+                awq_scales = _read_float_vector(out_dir / awq_meta["path"], int(awq_meta["count"]), awq_meta.get("dtype") or "float32")
                 awq_t = torch.from_numpy(awq_scales).to(device)
                 cols = shape[-1]
                 rows = decoded.numel() // cols
                 decoded = (decoded[:rows * cols].reshape(rows, cols) * awq_t[None, :]).reshape(-1)
     elif norm == "awq":
-        scales = np.fromfile(
-            str(out_dir / tm["scales"]), dtype=scale_np_dtype, count=int(tm["scale_count"])
-        ).astype(np.float32)
+        scales = _read_float_vector(out_dir / tm["scales"], int(tm["scale_count"]), tm.get("scale_dtype") or "float32")
         scales_t = torch.from_numpy(scales).to(device)
         cols = scales_t.numel()
         rows = decoded.numel() // cols
