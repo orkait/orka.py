@@ -5,19 +5,30 @@ Custom GGUF writer for Orka compressed models.
 Packs the raw compressed representation (codebooks, indices, scales, salient
 outliers) directly into a single GGUF file *without* decompressing to FP16/FP32.
 
+All on-disk sidecars are read through the canonical orka._format readers, so
+the writer handles every v2 format detail correctly: bit-packed (non-byte-
+aligned) and zlib-encoded index streams, fp16/int8 codebooks, and fp16 scales.
+Reading them with a plain np.fromfile (the previous approach) silently produced
+garbage for any of those - the common case on modern artifacts.
+
 Optimizations applied:
   1. Codebook deduplication - identical codebooks are written once and referenced
      by a shared tensor name.  Per-tensor metadata maps to the shared name.
-  2. FP16 downcast - codebooks, block scales, and salient values are stored as
-     FP16 instead of FP32, halving their size with negligible quality loss.
+  2. Q8_0 / FP16 downcast - codebooks, block scales, and salient values are
+     stored compactly, with negligible quality loss.
 
 Tensor naming convention inside the GGUF:
-    <weight_name>.orka.s<N>.codebook   – FP16 codebook  [codebook_size, group_size]
-      (or shared: orka.shared_cb.<hash>.s<N>)
-    <weight_name>.orka.s<N>.indices    – I16/I8 indices  [vector_count]
-    <weight_name>.orka.scales          – FP16 block scales
-    <weight_name>.orka.salient.idx     – I32 salient weight indices
-    <weight_name>.orka.salient.val     – FP16 salient weight values
+    <weight_name>.orka.s<N>.codebook   - codebook  [codebook_size, group_size]
+      (or shared: orka.shared_cb.<hash>)
+    <weight_name>.orka.s<N>.indices    - I16/I8 indices  [vector_count]
+    <weight_name>.orka.scales          - block scales
+    <weight_name>.orka.salient.idx     - salient weight indices
+    <weight_name>.orka.salient.val     - salient weight values
+
+GGML has no native unsigned-integer tensor type, so VQ indices are stored as
+signed I8/I16 carrying the unsigned bit pattern; readers reinterpret them as
+unsigned (uint8/uint16). The bit pattern round-trips exactly for all index
+values, including those >= 2^15.
 
 Non-quantized tensors (norms, biases) are stored as regular FP32 tensors.
 """
@@ -25,9 +36,8 @@ Non-quantized tensors (norms, biases) are stored as regular FP32 tensors.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import os
+import math
 import sys
 from pathlib import Path
 
@@ -43,44 +53,21 @@ from gguf import GGUFWriter, GGMLQuantizationType
 from gguf.quants import quantize as ggml_quantize
 
 from orka._checkpoint import _load_tensors
-from orka._format import _read_salient
-
-# ──────────────────────────────────────────────────────────────────────
-#  Obfuscation & Encryption Helpers
-# ──────────────────────────────────────────────────────────────────────
-
-XOR_KEY = b"ORKA_PRIVATE_KEY_2026_DO_NOT_SHARE"
-
-def _xor_encrypt_array(arr: np.ndarray) -> np.ndarray:
-    """XOR encrypts a numpy array by viewing it as uint8 and applying the key."""
-    # Ensure it's a contiguous C-array
-    arr_bytes = np.ascontiguousarray(arr).view(np.uint8)
-    key_arr = np.frombuffer(XOR_KEY, dtype=np.uint8)
-    # Tile key to match length
-    tiled_key = np.resize(key_arr, arr_bytes.shape)
-    encrypted = np.bitwise_xor(arr_bytes, tiled_key)
-    return encrypted
+from orka._format import (
+    _read_codebook,
+    _read_float_vector,
+    _read_indices,
+    _read_salient,
+)
 
 # ──────────────────────────────────────────────────────────────────────
 #  Helpers
 # ──────────────────────────────────────────────────────────────────────
 
-def _load_raw(path: Path, dtype: np.dtype) -> np.ndarray:
-    """Load a raw binary file as a flat numpy array."""
-    return np.fromfile(str(path), dtype=dtype)
-
-
-def _index_dtype(index_bits: int) -> np.dtype:
-    if index_bits <= 8:
-        return np.dtype(np.uint8)
-    elif index_bits <= 16:
-        return np.dtype(np.uint16)
-    else:
-        raise ValueError(f"Unsupported index_bits: {index_bits}")
-
-
 def _file_hash(path: Path) -> str:
     """Fast MD5 hash of a file's contents."""
+    import hashlib
+
     return hashlib.md5(path.read_bytes()).hexdigest()[:12]
 
 
@@ -88,32 +75,24 @@ def _file_hash(path: Path) -> str:
 #  GGUF Metadata
 # ──────────────────────────────────────────────────────────────────────
 
-def _write_model_metadata(writer: GGUFWriter, config: dict, manifest: dict, obfuscate: bool = False) -> None:
+def _write_model_metadata(writer: GGUFWriter, config: dict, manifest: dict) -> None:
     """Write standard LLM metadata KV pairs expected by GGUF readers."""
     writer.add_string("general.name", f"orka-{config.get('model_type', 'llama')}-{config.get('hidden_size', 0)}")
     writer.add_string("general.description", "Orka RVQ-compressed model (optimized)")
     writer.add_string("general.file_type", "orka-rvq-optimized")
 
-    if obfuscate:
-        import base64
-        manifest_json = json.dumps(manifest).encode('utf-8')
-        manifest_arr = np.frombuffer(manifest_json, dtype=np.uint8)
-        enc_manifest = _xor_encrypt_array(manifest_arr)
-        b64_manifest = base64.b64encode(enc_manifest.tobytes()).decode('utf-8')
-        writer.add_string("sys.cfg", b64_manifest)
-    else:
-        # Orka-specific metadata
-        writer.add_string("orka.format", manifest.get("format", "orka"))
-        writer.add_uint32("orka.version", manifest.get("version", 1))
-        writer.add_uint32("orka.group_size", manifest.get("group_size", 8))
-        writer.add_uint32("orka.n_stages", manifest.get("n_stages", 1))
-        writer.add_string("orka.normalization", manifest.get("normalization", "none"))
-        writer.add_string("orka.codebook_mode", manifest.get("codebook_mode", "per-tensor"))
-        writer.add_string("orka.backend", manifest.get("backend", "torch"))
-        writer.add_uint32("orka.tensor_count", manifest.get("tensor_count", 0))
-        writer.add_uint32("orka.passthrough_count", manifest.get("passthrough_count", 0))
-        writer.add_bool("orka.fp16_optimized", True)
-        writer.add_bool("orka.codebook_dedup", True)
+    # Orka-specific metadata
+    writer.add_string("orka.format", manifest.get("format", "orka"))
+    writer.add_uint32("orka.version", manifest.get("version", 1))
+    writer.add_uint32("orka.group_size", manifest.get("group_size", 8))
+    writer.add_uint32("orka.n_stages", manifest.get("n_stages", 1))
+    writer.add_string("orka.normalization", manifest.get("normalization", "none"))
+    writer.add_string("orka.codebook_mode", manifest.get("codebook_mode", "per-tensor"))
+    writer.add_string("orka.backend", manifest.get("backend", "torch"))
+    writer.add_uint32("orka.tensor_count", manifest.get("tensor_count", 0))
+    writer.add_uint32("orka.passthrough_count", manifest.get("passthrough_count", 0))
+    writer.add_bool("orka.fp16_optimized", True)
+    writer.add_bool("orka.codebook_dedup", True)
 
     # Standard LLM hyperparameters
     writer.add_uint32("llama.context_length", config.get("max_position_embeddings", 2048))
@@ -134,10 +113,9 @@ def _write_model_metadata(writer: GGUFWriter, config: dict, manifest: dict, obfu
 class CodebookRegistry:
     """Tracks unique codebooks and maps duplicate file paths to shared tensor names."""
 
-    def __init__(self, obfuscate: bool = False):
-        self.obfuscate = obfuscate
-        self._hash_to_name: dict[str, str] = {}  # file_hash → shared tensor name
-        self._mappings: dict[str, str] = {}       # original tensor name → shared tensor name
+    def __init__(self):
+        self._hash_to_name: dict[str, str] = {}  # file_hash -> shared tensor name
+        self._mappings: dict[str, str] = {}        # original tensor name -> shared tensor name
         self.saved_bytes = 0
         self.dedup_count = 0
 
@@ -150,17 +128,10 @@ class CodebookRegistry:
             self.saved_bytes += cb_data.nbytes
             self.dedup_count += 1
             return shared_name, False
-        else:
-            # First occurrence uses as the shared reference
-            prefix = "sys.shared." if self.obfuscate else "orka.shared_cb."
-            shared_name = f"{prefix}{h}"
-            self._hash_to_name[h] = shared_name
-            self._mappings[tensor_name] = shared_name
-            return shared_name, True
-
-    def get_mapping_kv(self) -> dict[str, str]:
-        """Return the full mapping for storage as GGUF metadata."""
-        return dict(self._mappings)
+        shared_name = f"orka.shared_cb.{h}"
+        self._hash_to_name[h] = shared_name
+        self._mappings[tensor_name] = shared_name
+        return shared_name, True
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -181,109 +152,83 @@ def _quantize_to_q8(data_fp32: np.ndarray, tensor_name: str, writer: GGUFWriter)
             raw_dtype=GGMLQuantizationType.Q8_0,
         )
         return q8.nbytes
-    else:
-        fp16 = data_fp32.astype(np.float16).flatten()
-        writer.add_tensor(tensor_name, fp16)
-        return fp16.nbytes
-
-
-def _encrypt_to_tensor(data_fp32: np.ndarray, tensor_name: str, writer: GGUFWriter) -> int:
-    """XOR encrypts data and saves it as Int8 in the GGUF file."""
     fp16 = data_fp32.astype(np.float16).flatten()
-    encrypted = _xor_encrypt_array(fp16)
-    # GGUF supports Int8 natively
-    writer.add_tensor(tensor_name, encrypted.view(np.int8))
-    return encrypted.nbytes
+    writer.add_tensor(tensor_name, fp16)
+    return fp16.nbytes
 
 
 def _add_orka_tensor(
-    writer: GGUFWriter, orka_dir: Path, tmeta: dict,
-    cb_registry: CodebookRegistry, obfuscate: bool = False
+    writer: GGUFWriter, orka_dir: Path, tmeta: dict, cb_registry: CodebookRegistry
 ) -> int:
     """Add all compressed sub-tensors for one Orka weight. Returns total bytes written."""
     name = tmeta["name"]
-    group_size = tmeta["group_size"]
+    group_size = int(tmeta["group_size"])
+    padded_values = int(tmeta["padded_values"])
     total_bytes = 0
-
-    # Hash name if obfuscating
-    base_name = hashlib.md5(name.encode()).hexdigest()[:8] if obfuscate else name
 
     # Per-stage codebooks and indices
     for stage in tmeta.get("stages", []):
         sid = stage["stage"]
-        cb_size = stage["codebook_size"]
-        idx_bits = stage["index_bits"]
+        idx_bits = int(stage["index_bits"])
+        s_group_size = int(stage.get("group_size", group_size))
+        s_index_count = math.ceil(padded_values / s_group_size)
 
-        # Codebook: deduplicate + Q8_0 quantize (or encrypt)
+        # Codebook: canonical reader handles fp16/int8/f32. Dedup + Q8_0.
         cb_path = orka_dir / stage["codebook"]
-        s_group_size = stage.get("group_size", group_size)
-        cb_fp32 = _load_raw(cb_path, np.float32).reshape(cb_size, s_group_size)
+        cb_fp32 = _read_codebook(cb_path, s_group_size, stage.get("codebook_dtype", "float32"))
         original_tensor_name = f"{name}.orka.s{sid}.codebook"
         shared_name, is_new = cb_registry.register(original_tensor_name, cb_path, cb_fp32)
-
         if is_new:
-            if obfuscate:
-                total_bytes += _encrypt_to_tensor(cb_fp32, shared_name, writer)
-            else:
-                total_bytes += _quantize_to_q8(cb_fp32, shared_name, writer)
+            total_bytes += _quantize_to_q8(cb_fp32, shared_name, writer)
+        writer.add_string(f"orka.cb_map.{original_tensor_name}", shared_name)
 
-        # Store mapping
-        if not obfuscate:
-            writer.add_string(f"orka.cb_map.{original_tensor_name}", shared_name)
-
-        # Indices: U16→I16 or U8→I8
+        # Indices: decode bit-packing + entropy coding via the canonical reader,
+        # then store the integer values as GGML signed ints (bit-identical to
+        # unsigned; readers reinterpret as unsigned - GGML has no uint tensor).
         idx_path = orka_dir / stage["indices"]
-        idx_dt = _index_dtype(idx_bits)
-        indices = _load_raw(idx_path, idx_dt)
+        unpacked = _read_indices(
+            idx_path,
+            idx_bits,
+            s_index_count,
+            packed=bool(stage.get("packed", idx_bits % 8 != 0)),
+            encoding=stage.get("encoding", "raw"),
+        )
+        unsigned_dt = np.uint16 if idx_bits > 8 else np.uint8
         signed_dt = np.int16 if idx_bits > 8 else np.int8
-        indices = indices.view(signed_dt)
-
-        idx_name = f"t.{base_name}.i{sid}" if obfuscate else f"{name}.orka.s{sid}.indices"
-        writer.add_tensor(idx_name, indices)
+        indices = np.asarray(unpacked, dtype=unsigned_dt).view(signed_dt)
+        writer.add_tensor(f"{name}.orka.s{sid}.indices", indices)
         total_bytes += indices.nbytes
 
-    # Block scales: FP32 → Q8_0 (or encrypt)
+    # Block scales (stored fp16 on disk) -> Q8_0
     if tmeta.get("scales"):
-        scales_path = orka_dir / tmeta["scales"]
-        scales_fp32 = _load_raw(scales_path, np.float32)
-        scale_name = f"t.{base_name}.s" if obfuscate else f"{name}.orka.scales"
-        if obfuscate:
-            total_bytes += _encrypt_to_tensor(scales_fp32, scale_name, writer)
-        else:
-            total_bytes += _quantize_to_q8(scales_fp32, scale_name, writer)
+        scales_fp32 = _read_float_vector(
+            orka_dir / tmeta["scales"],
+            int(tmeta["scale_count"]),
+            tmeta.get("scale_dtype") or "float32",
+        )
+        total_bytes += _quantize_to_q8(scales_fp32, f"{name}.orka.scales", writer)
 
-    # Salient outliers
+    # Salient outliers (slrq)
     if tmeta.get("salient"):
         sal = tmeta["salient"]
-
-        # Salient indices: auto-downcast to smallest signed int that fits
-        sal_idx_path = orka_dir / sal["indices"]
-        sal_idx_u32 = _load_raw(sal_idx_path, np.uint32)
-        max_val = sal_idx_u32.max()
-        if max_val <= 127:
-            sal_idx = sal_idx_u32.astype(np.int8)
-        elif max_val <= 32767:
-            sal_idx = sal_idx_u32.astype(np.int16)
-        else:
-            sal_idx = sal_idx_u32.view(np.int32)
-
-        sal_idx_name = f"t.{base_name}.x" if obfuscate else f"{name}.orka.salient.idx"
-        writer.add_tensor(sal_idx_name, sal_idx)
-        total_bytes += sal_idx.nbytes
-
-        # Salient values: FP32 to Q8_0 or encrypt
-        sal_val_path = orka_dir / sal["weights"]
-        _, sal_val_fp32 = _read_salient(
-            sal_idx_path,
-            sal_val_path,
+        sal_idx, sal_val = _read_salient(
+            orka_dir / sal["indices"],
+            orka_dir / sal["weights"],
             sal.get("indices_dtype", "uint32"),
             sal.get("weights_dtype", "float32"),
         )
-        sal_val_name = f"t.{base_name}.y" if obfuscate else f"{name}.orka.salient.val"
-        if obfuscate:
-            total_bytes += _encrypt_to_tensor(sal_val_fp32, sal_val_name, writer)
+        # Salient indices are local block offsets (small); a signed int that fits
+        # round-trips exactly.
+        max_val = int(sal_idx.max()) if sal_idx.size else 0
+        if max_val <= 127:
+            sal_idx_store = sal_idx.astype(np.int8)
+        elif max_val <= 32767:
+            sal_idx_store = sal_idx.astype(np.int16)
         else:
-            total_bytes += _quantize_to_q8(sal_val_fp32, sal_val_name, writer)
+            sal_idx_store = sal_idx.astype(np.int32)
+        writer.add_tensor(f"{name}.orka.salient.idx", sal_idx_store)
+        total_bytes += sal_idx_store.nbytes
+        total_bytes += _quantize_to_q8(np.asarray(sal_val, dtype=np.float32), f"{name}.orka.salient.val", writer)
 
     return total_bytes
 
@@ -303,7 +248,7 @@ def _add_passthrough_tensors(writer: GGUFWriter, orka_dir: Path) -> int:
             import torch
             if isinstance(tensor, torch.Tensor):
                 tensor = tensor.to(torch.float32).numpy()
-        except ImportError:
+        except Exception:  # torch absent, or broken native install (OSError)
             pass
         if not isinstance(tensor, np.ndarray):
             tensor = np.asarray(tensor, dtype=np.float32)
@@ -372,7 +317,6 @@ def main() -> None:
     )
     parser.add_argument("artifact", help="Path to the .orka directory")
     parser.add_argument("--output", "-o", help="Output .gguf file path")
-    parser.add_argument("--obfuscate", action="store_true", help="Obfuscate tensor names and encrypt codebooks/scales")
     args = parser.parse_args()
 
     orka_dir = Path(args.artifact)
@@ -399,16 +343,16 @@ def main() -> None:
     out_path = Path(args.output) if args.output else orka_dir.with_suffix(".gguf")
 
     print("=" * 60)
-    print("  ORKA → GGUF Optimized Compressed Writer")
+    print("  ORKA -> GGUF Optimized Compressed Writer")
     print("=" * 60)
     print(f"  Source:          {orka_dir}")
     print(f"  Output:          {out_path}")
     print(f"  Tensors:         {manifest.get('tensor_count', '?')} quantized + {manifest.get('passthrough_count', '?')} passthrough")
-    print(f"  Optimizations:   FP16 downcast + codebook dedup")
+    print(f"  Optimizations:   Q8_0/FP16 downcast + codebook dedup")
     print()
 
     writer = GGUFWriter(str(out_path), arch="llama")
-    cb_registry = CodebookRegistry(args.obfuscate)
+    cb_registry = CodebookRegistry()
 
     # 1. Tokenizer
     print("Writing tokenizer...")
@@ -416,15 +360,15 @@ def main() -> None:
         _write_tokenizer(writer, source_dir)
 
     # 2. Orka compressed tensors
-    print(f"\nWriting Orka compressed tensors (FP16 + dedup, obfuscate={args.obfuscate})...")
+    print("\nWriting Orka compressed tensors (Q8_0/FP16 + dedup)...")
     total_compressed_bytes = 0
     for i, tmeta in enumerate(manifest.get("tensors", [])):
         name = tmeta["name"]
         n_stages = len(tmeta.get("stages", []))
         has_salient = "salient" in tmeta and tmeta["salient"] is not None
-        tb = _add_orka_tensor(writer, orka_dir, tmeta, cb_registry, args.obfuscate)
+        tb = _add_orka_tensor(writer, orka_dir, tmeta, cb_registry)
         total_compressed_bytes += tb
-        print(f"  [{i+1:3d}] {name} ({n_stages}s, sal={'Y' if has_salient else 'N'}) → {tb:,} bytes")
+        print(f"  [{i+1:3d}] {name} ({n_stages}s, sal={'Y' if has_salient else 'N'}) -> {tb:,} bytes")
 
     # 3. Passthrough tensors
     print("\nWriting passthrough tensors...")
@@ -434,12 +378,10 @@ def main() -> None:
 
     # 4. Metadata
     print("\nWriting model metadata...")
-    if args.obfuscate:
-        manifest["cb_map"] = cb_registry.get_mapping_kv()
-    _write_model_metadata(writer, config, manifest, args.obfuscate)
+    _write_model_metadata(writer, config, manifest)
 
     # 5. Dedup stats
-    print(f"\nCodebook dedup: {cb_registry.dedup_count} duplicates eliminated, {cb_registry.saved_bytes:,} bytes saved (before FP16)")
+    print(f"\nCodebook dedup: {cb_registry.dedup_count} duplicates eliminated, {cb_registry.saved_bytes:,} bytes saved (before Q8_0)")
 
     # 6. Finalize
     print("\nFinalizing GGUF file...")
@@ -458,7 +400,8 @@ def main() -> None:
     print(f"  Output file:      {out_path}")
     print(f"  GGUF size:        {final_size:,} bytes ({final_size / 1024 / 1024:.1f} MB)")
     print(f"  .orka dir size:   {orka_dir_size:,} bytes ({orka_dir_size / 1024 / 1024:.1f} MB)")
-    print(f"  Savings vs .orka: {(1 - final_size/orka_dir_size)*100:.1f}%")
+    if orka_dir_size:
+        print(f"  Savings vs .orka: {(1 - final_size/orka_dir_size)*100:.1f}%")
     print(f"  Tensor data:      {total_compressed_bytes:,} bytes ({total_compressed_bytes / 1024 / 1024:.1f} MB)")
     print("=" * 60)
 
