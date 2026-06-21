@@ -895,16 +895,16 @@ def pack_checkpoint(
                     )
                     tensor_rotation = rotation
 
-                # --- DYNAMIC FAMILY-AWARE GROUP SIZING (per-tensor mode only) ---
-                # Different layer types have different sensitivity to group size.
-                # Attention: phase-sensitive, needs tight groups.
-                # MLP: high channel redundancy, tolerates larger groups.
-                # Embedding: linguistic pillars, needs high fidelity.
+                # --- PER-TENSOR GROUP SIZING ---
+                # All families use the base group_size; only embedding caps at 8.
+                # Per-family group overrides (the old attn->g4 / mlp->g16 heuristic)
+                # were removed: enlarging the group at a fixed codebook size collapses
+                # fidelity, since k centroids must tile a higher-dim space - see the
+                # inline rationale below.
                 # Shared codebooks (global/family) require one vector width across
-                # all tensors they cover, so the override only applies per-tensor.
-                # Measured allocation (tensor_stages_map) plans bits at one
-                # uniform group size; family overrides would silently change
-                # the achieved bpw, so they are disabled in that mode.
+                # all tensors they cover, so any override is per-tensor only.
+                # Measured allocation (tensor_stages_map) plans bits at one uniform
+                # group size, so overrides are disabled in that mode too.
                 family = classify_tensor_family(name)
                 resolved_group_size = group_size
                 if codebook_mode == "per-tensor" and tensor_stages_resolved is None:
