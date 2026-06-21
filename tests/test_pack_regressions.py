@@ -50,7 +50,14 @@ class SharedCodebookGroupSizeTest(unittest.TestCase):
                 for entry in manifest["tensors"]:
                     self.assertEqual(entry["group_size"], 8)
 
-    def test_per_tensor_mode_keeps_family_group_sizing(self) -> None:
+    def test_per_tensor_mode_uses_uniform_base_group(self) -> None:
+        """Per-tensor mode keeps the base group for attention/mlp (no enlargement).
+
+        Old heuristic enlarged mlp to group 16 and tightened attention to 4.
+        Measured backwards: at fixed codebook size, group 16 collapses mlp
+        fidelity (10.6 dB vs 16.1 dB @ g8) and group-4 attention over-provisions
+        (35 dB) while mlp starves. F1 keeps the uniform base group.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "model.json"
@@ -65,13 +72,12 @@ class SharedCodebookGroupSizeTest(unittest.TestCase):
                 backend="numpy",
                 em_aq_passes=0,
             )
-            self.assertTrue(manifest["dynamic_group_sizing"])
             by_name = {t["name"]: t for t in manifest["tensors"]}
             self.assertEqual(
-                by_name["model.layers.0.self_attn.q_proj.weight"]["group_size"], 4
+                by_name["model.layers.0.self_attn.q_proj.weight"]["group_size"], 8
             )
             self.assertEqual(
-                by_name["model.layers.0.mlp.up_proj.weight"]["group_size"], 16
+                by_name["model.layers.0.mlp.up_proj.weight"]["group_size"], 8
             )
 
 
