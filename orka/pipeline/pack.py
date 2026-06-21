@@ -910,12 +910,12 @@ def pack_checkpoint(
                 if codebook_mode == "per-tensor" and tensor_stages_resolved is None:
                     if family == "embedding":
                         resolved_group_size = min(group_size, 8)
-                    elif family == "attention":
-                        # Attention projections are phase-sensitive; use tighter groups
-                        resolved_group_size = max(4, group_size // 2) if group_size > 4 else group_size
-                    elif family in ("mlp", "expert", "shared_expert"):
-                        # MLP/expert layers have high channel redundancy; relax group size
-                        resolved_group_size = min(group_size * 2, 32)
+                    # attention/mlp/expert: keep the base group_size. Enlarging the
+                    # group at fixed codebook size collapses fidelity - k centroids
+                    # must tile a higher-dimensional space (measured: mlp 10.6 dB @
+                    # g16 vs 16.1 dB @ g8). The old heuristic also tightened attention
+                    # to g4 (35 dB, far past need) while starving mlp, an inverted bit
+                    # allocation. Uniform base group equalizes SQNR across families.
                     # router/other: keep the user-specified group_size
 
                 if backend == "torch":
