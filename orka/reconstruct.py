@@ -8,7 +8,7 @@ from pathlib import Path
 from orka._checkpoint import _load_tensors
 from orka._format import ORKA_VERSION
 from orka._tensor import _flatten_float_values, _tensor_shape
-from orka._util import _reshape_flat
+from orka._util import _product, _reshape_flat
 from orka.pipeline.decode import _decode_tensor, _decode_tensor_torch
 
 
@@ -208,6 +208,22 @@ def reconstruct_artifact(
 
     manifest = json.loads(manifest_path.read_text())
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if output_format == "safetensors":
+        # An artifact packed with --max-values-per-tensor stores fewer values
+        # than the shape implies; a safetensors header built from the full shape
+        # would be byte-misaligned. Refuse with a clear error instead.
+        truncated = [
+            t["name"]
+            for t in manifest.get("tensors", [])
+            if int(t.get("packed_values", 0)) != _product([int(x) for x in t.get("shape", [])])
+        ]
+        if truncated:
+            raise ValueError(
+                f"cannot reconstruct to safetensors: {len(truncated)} tensor(s) were packed "
+                f"with --max-values-per-tensor (packed_values < shape), e.g. {truncated[0]}. "
+                "Re-pack without the sample limit, or use --format json."
+            )
 
     if output_format == "json":
         tensors = _decoded_tensor_map(out_dir, manifest)
