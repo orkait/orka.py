@@ -640,6 +640,11 @@ def pack_checkpoint(
     # importance weighting, which changes codebook learning, not the format.
     if normalization in {"awq", "awq-block-max"} and not awq_feature_enabled():
         raise RuntimeError(AWQ_DISABLED_MESSAGE)
+    if normalization == "awq" and awq_activations is None:
+        raise ValueError(
+            "normalization 'awq' requires calibration activations "
+            "(--awq-calibration with --awq-model-dir, or --awq-activations-file)"
+        )
     if rotation not in {"none", "orthogonal", "hadamard"}:
         raise ValueError("rotation must be 'none', 'orthogonal', or 'hadamard'")
     if backend == "torch":
