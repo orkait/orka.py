@@ -234,9 +234,19 @@ def vq_linear_forward(layer, x: torch.Tensor) -> torch.Tensor:
     x_2d = x.reshape(-1, K).contiguous().to(torch.float16)
     N = x_2d.shape[0]
 
-    # Decode hot path: N=1 uses the LUT kernel (codebook.x precomputed once,
-    # then per-row table lookup) - much cheaper than the tiled gather+GEMM.
+    # Decode hot path (N=1, memory-bound matvec). Prefer the fused CUDA fast path
+    # (float4 gather GEMV + warp-spmv correction, group-major coalesced indices)
+    # when available - ~6x over this Triton path, dense-fp16 parity at >=1B. Any
+    # failure (no nvcc, unsupported layer) returns None and we fall back below.
     if N == 1:
+        try:
+            from orka.inference import cuda_decode
+            if cuda_decode.supported(layer, N):
+                out = cuda_decode.forward_n1(layer, x)
+                if out is not None:
+                    return out
+        except Exception:
+            pass
         y = _vq_decode_n1(layer, x_2d)
         if layer.corr_indices.numel() > 0:
             sp = layer._correction_sparse()
