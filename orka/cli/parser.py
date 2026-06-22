@@ -196,6 +196,12 @@ def build_parser() -> argparse.ArgumentParser:
             default=4096,
             help="max activation samples retained per layer for AWQ calibration",
         )
+        p.add_argument(
+            "--no-hessian",
+            action="store_true",
+            help="disable default Hessian-weighting (skip auto activation collection "
+            "from the bundled calibration corpus); packs unweighted and faster",
+        )
         p.add_argument("--progress-file", help="file to write real-time progress status")
         p.add_argument(
             "--sensitivity-map",

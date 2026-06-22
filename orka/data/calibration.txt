@@ -1,0 +1,32 @@
+The development of written language transformed how human societies recorded knowledge, enabling laws, trade, and history to persist across generations.
+Photosynthesis converts sunlight, water, and carbon dioxide into glucose and oxygen, forming the energetic basis for most life on Earth.
+In economics, supply and demand describe how the price of a good adjusts until the quantity buyers want equals the quantity sellers offer.
+The human immune system distinguishes self from non-self, deploying white blood cells and antibodies to neutralize pathogens it recognizes as foreign.
+Plate tectonics explains earthquakes, mountain ranges, and volcanic activity as consequences of slowly moving sections of the planet's rigid outer shell.
+A compiler translates source code written in a high-level language into machine instructions that a processor can execute directly.
+The French Revolution began in 1789 and reshaped European politics by challenging the authority of monarchs and the privileges of the aristocracy.
+Neural networks learn by adjusting connection weights through gradient descent, gradually reducing the error between predictions and observed data.
+Ocean currents redistribute heat around the globe, moderating coastal climates and influencing weather patterns far from where the water originates.
+The printing press, introduced in Europe in the fifteenth century, dramatically lowered the cost of books and accelerated the spread of ideas.
+Genetic information is stored in DNA as sequences of four nucleotide bases, which cells transcribe into RNA and translate into proteins.
+Inflation measures the rate at which the general level of prices rises, eroding the purchasing power of money over time.
+A balanced diet provides carbohydrates for energy, proteins for tissue repair, fats for hormone production, and vitamins for metabolic regulation.
+The speed of light in a vacuum is constant, and Einstein's theory of relativity links space and time into a single four-dimensional continuum.
+Democratic governments derive their authority from the consent of the governed, typically expressed through regular and competitive elections.
+Bacteria reproduce rapidly and can exchange genetic material, which is one reason antibiotic resistance can emerge and spread so quickly.
+The water cycle moves moisture through evaporation, condensation, precipitation, and runoff, continually recycling the planet's freshwater supply.
+Algorithms are step-by-step procedures for solving problems, and their efficiency is often analyzed in terms of how running time grows with input size.
+Renaissance artists revived classical techniques such as linear perspective, giving their paintings a new sense of depth and realism.
+The nervous system transmits electrical signals between the brain and the body, coordinating movement, sensation, and conscious thought.
+Markets can fail when costs or benefits spill over to third parties, prompting governments to intervene through taxes, subsidies, or regulation.
+Stars generate energy by fusing hydrogen into helium in their cores, and when their fuel runs out their fate depends on their mass.
+A well-designed experiment isolates a single variable, uses a control group, and is repeated enough times to distinguish signal from random noise.
+The Industrial Revolution shifted production from handcraft to machinery, drawing workers into cities and transforming patterns of daily life.
+Encryption protects information by transforming it into a form that is unreadable without the correct key, securing communication over networks.
+Ecosystems depend on flows of energy and nutrients, where producers, consumers, and decomposers each occupy a distinct role in the food web.
+The scientific method advances knowledge through observation, hypothesis, prediction, and experiment, with conclusions always open to revision.
+Languages change over time as pronunciation drifts, new words are borrowed, and grammatical patterns are simplified or elaborated by speakers.
+Climate is the long-term average of weather in a region, shaped by latitude, altitude, ocean proximity, and prevailing atmospheric circulation.
+A database stores structured information so that it can be queried efficiently, updated reliably, and shared safely among many users.
+The heart pumps blood through two circuits, sending oxygen-poor blood to the lungs and oxygen-rich blood to the rest of the body.
+Probability quantifies uncertainty on a scale from zero to one, and the expected value of an event weights each outcome by its likelihood.
