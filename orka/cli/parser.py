@@ -242,6 +242,15 @@ def build_parser() -> argparse.ArgumentParser:
                  "replaces EM-AQ on compensated tensors.",
         )
         p.add_argument(
+            "--mse-scale",
+            action="store_true",
+            help="MSE-optimal block scales: after quantization, replace each block's "
+                 "max scale with the least-squares-optimal scale for its assigned "
+                 "codewords (excludes salient/outlier positions). Free quality gain "
+                 "(no extra bits, no inference cost). rotation none + block-max-family "
+                 "normalization only.",
+        )
+        p.add_argument(
             "--allocation-map",
             default=None,
             help="JSON from 'orka allocate': per-tensor measured stage specs "
