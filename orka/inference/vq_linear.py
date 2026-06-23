@@ -85,6 +85,19 @@ class VQLinear(nn.Module):
         else:
             self.register_buffer("bias", None)
 
+    @property
+    def weight(self):
+        """Device/dtype sentinel. orka serves the projection through forward(); the
+        weight matrix is never materialized. Some model code (e.g. the mamba/SSM
+        fast path in falcon_h1/jamba) only probes `in_proj.weight.device`/`.dtype`
+        to pick a kernel path, not the matrix itself - return a 1-elem tensor on the
+        right device so those checks succeed while the projection stays compressed."""
+        w = getattr(self, "_weight_sentinel", None)
+        if w is None or w.device != self.scales.device or w.dtype != self.scales.dtype:
+            w = torch.empty(1, device=self.scales.device, dtype=self.scales.dtype)
+            object.__setattr__(self, "_weight_sentinel", w)
+        return w
+
     # ------------------------------------------------------------------
     # Correction sparse tensor (rebuilt on first forward or after .to())
     # ------------------------------------------------------------------
