@@ -139,6 +139,7 @@ def cmd_pack(args: argparse.Namespace) -> int:
             tensor_partition_count=args.tensor_partition_count,
             tensor_partition_index=args.tensor_partition_index,
             error_compensation=getattr(args, "error_compensation", False),
+            mse_scale=getattr(args, "mse_scale", False),
         )
         print(
             json.dumps(
