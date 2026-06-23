@@ -106,6 +106,229 @@ from orka.pipeline.pack_config import (
 # live in orka.pipeline.strategies.refinement and are imported above.
 
 
+def _prefetch_worker(
+    ctx: PackCtx,
+    *,
+    source: Path,
+    only_tensors: list[str] | None,
+    only_tensors_passthrough: bool,
+    tensor_partition_count: int | None,
+    tensor_partition_index: int | None,
+    awq_alpha: float,
+    slrq_salient: bool,
+    max_values_per_tensor: int | None,
+    prefetch_queue: "queue.Queue",
+    prefetch_done: threading.Event,
+    _prefetch_exc: list,
+    _prefetch_state: dict,
+    _passthrough: dict,
+    awq_fallbacks: list,
+) -> None:
+    """Producer thread body for pack_checkpoint: iterate _load_tensors(source),
+    do shape/candidate detection -> normalization -> rotation -> outlier/salient
+    extraction -> vector-prep per tensor, and prefetch_queue.put(...) each candidate.
+
+    Config that already lives on PackCtx (backend, normalization, rotation, etc.) is
+    read off ``ctx``; the remaining run knobs and the shared mutable state (queue, the
+    prefetch_done Event, _prefetch_exc / _prefetch_state, _passthrough, awq_fallbacks)
+    are threaded in explicitly. Pulled out of pack_checkpoint as a module-level function
+    so the orchestrator shrinks; behaviour is identical to the former nested closure.
+    """
+    # Unpack the ctx-resident config so the body below reads exactly as it did inline.
+    backend = ctx.backend
+    n_stages = ctx.n_stages
+    codebook_mode = ctx.codebook_mode
+    group_size = ctx.group_size
+    resolved_device = ctx.resolved_device
+    rotation = ctx.rotation
+    rotation_seed = ctx.rotation_seed
+    skipped_tensors = ctx.skipped_tensors
+    awq_activations = ctx.awq_activations
+    normalization = ctx.normalization
+    max_tensors = ctx.max_tensors
+    block_scale_size = ctx.block_scale_size
+    tensor_stages_resolved = ctx.tensor_stages_resolved
+
+    try:
+        tensors_emitted = 0
+        for name, tensor in _load_tensors(source):
+            _check_ram_cap()
+
+            shape = _tensor_shape(tensor)
+            name_lower = name.lower()
+            is_candidate = len(shape) >= 2
+
+            # Exclude biases, norms, and architectural sidecars.
+            if any(
+                x in name_lower
+                for x in (".bias", ".norm", ".layernorm", "rotary_emb", "attention.bias")
+            ):
+                is_candidate = False
+
+            # Non-candidates (norms, biases) always pass through so any
+            # partial artifact stays completable.
+            if not is_candidate:
+                _passthrough[name] = tensor
+                continue
+
+            if only_tensors is not None:
+                base_name = name.replace(".weight", "")
+                if name not in only_tensors and base_name not in only_tensors:
+                    # Unlisted candidates: passthrough by default (legacy
+                    # behaviour); skipped entirely for partitioned runs
+                    # (sequential packing) so partial artifacts stay small.
+                    if only_tensors_passthrough:
+                        _passthrough[name] = tensor
+                    continue
+
+            if max_tensors is not None and tensors_emitted >= max_tensors:
+                break
+
+            # Skipped tensors stay FP16 in the artifact (passthrough), not quantized.
+            if name.replace(".weight", "") in skipped_tensors or name in skipped_tensors:
+                _passthrough[name] = tensor
+                continue
+
+            if tensor_partition_count is not None:
+                slot = _prefetch_state["candidate_count"] % tensor_partition_count
+                _prefetch_state["candidate_count"] += 1
+                if slot != tensor_partition_index:
+                    continue
+            else:
+                _prefetch_state["candidate_count"] += 1
+
+            row_scales = None
+            source_flat = None
+            awq_col_scales = None
+            salient_weights = None
+            salient_indices = None
+            if normalization in {
+                "block-max",
+                "channel-block-max",
+                "awq",
+                "awq-block-max",
+                "slrq-block",
+            }:
+                (
+                    tensor, row_scales, source_flat, awq_col_scales,
+                    salient_weights, salient_indices
+                ) = _apply_normalization(
+                    tensor, name, normalization, awq_activations, awq_alpha,
+                    block_scale_size, backend, resolved_device, awq_fallbacks,
+                    slrq_salient=slrq_salient,
+                )
+
+            # --- Post-Normalization Pre-processing ---
+            # Capture source_flat if not already set by normalization.
+            # This is mandatory for quality metrics verification.
+            if source_flat is None:
+                if backend == "torch":
+                    _, _arr = _torch_f32(tensor, resolved_device)
+                    source_flat = _arr.reshape(-1).detach().cpu()
+                else:
+                    source_flat = _numpy_float32_array(tensor).reshape(-1)
+
+            tensor_seed = None
+            tensor_rotation = "none"
+            if rotation in {"orthogonal", "hadamard"}:
+                tensor, tensor_seed = _rotate_tensor_to_2d(
+                    tensor, name, rotation, rotation_seed, backend, resolved_device
+                )
+                tensor_rotation = rotation
+
+            # --- PER-TENSOR GROUP SIZING ---
+            # All families use the base group_size; only embedding caps at 8.
+            # Per-family group overrides (the old attn->g4 / mlp->g16 heuristic)
+            # were removed: enlarging the group at a fixed codebook size collapses
+            # fidelity, since k centroids must tile a higher-dim space - see the
+            # inline rationale below.
+            # Shared codebooks (global/family) require one vector width across
+            # all tensors they cover, so any override is per-tensor only.
+            # Measured allocation (tensor_stages_map) plans bits at one uniform
+            # group size, so overrides are disabled in that mode too.
+            family = classify_tensor_family(name)
+            resolved_group_size = group_size
+            if codebook_mode == "per-tensor" and tensor_stages_resolved is None:
+                if family == "embedding":
+                    resolved_group_size = min(group_size, EMBEDDING_MAX_GROUP_SIZE)
+                # attention/mlp/expert: keep the base group_size. Enlarging the
+                # group at fixed codebook size collapses fidelity - k centroids
+                # must tile a higher-dimensional space (measured: mlp 10.6 dB @
+                # g16 vs 16.1 dB @ g8). The old heuristic also tightened attention
+                # to g4 (35 dB, far past need) while starving mlp, an inverted bit
+                # allocation. Uniform base group equalizes SQNR across families.
+                # router/other: keep the user-specified group_size
+
+            if backend == "torch":
+                packed_values, padded_values, vectors = _torch_vectors_from_tensor(
+                    tensor, resolved_group_size, max_values_per_tensor, resolved_device
+                )
+            else:
+                packed_values, padded_values, vectors = _numpy_vectors_from_tensor(
+                    tensor, resolved_group_size, max_values_per_tensor
+                )
+
+            # --- HESSIAN-PROXY IMPORTANCE WEIGHTS ---
+            # h_j = E[x_j^2] per input column from calibration activations.
+            # Two weight sets feed weighted k-means:
+            #   vector_weights  - within-group dimension pattern (global average),
+            #                     scales the distance metric per dimension.
+            #   sample_weights  - per-vector scalar = mean importance of the columns
+            #                     that vector covers, tiled across rows (row-major
+            #                     flatten). Pulls centroids toward high-energy
+            #                     column groups in the Lloyd update.
+            vw = None
+            sw = None
+            col_importance = None
+            if (awq_activations is not None and name in awq_activations and shape[-1] % resolved_group_size == 0):
+                import torch
+                H_diag = torch.as_tensor(awq_activations[name], dtype=torch.float32).pow(2).mean(dim=0)
+                cols = int(shape[-1])
+                # Column importance is in ORIGINAL column space; rotation
+                # mixes columns, so salience-guided escape is rotation-off only.
+                if tensor_rotation == "none":
+                    col_importance = (
+                        H_diag if backend == "torch" else H_diag.numpy()
+                    )
+                groups_per_row = cols // resolved_group_size
+                h_groups = H_diag.reshape(groups_per_row, resolved_group_size)
+                vw = h_groups.mean(dim=0).clamp(min=IMPORTANCE_WEIGHT_FLOOR).tolist()
+                rows_count = padded_values // cols
+                if rows_count * cols == padded_values:
+                    sw_row = h_groups.mean(dim=1).clamp(min=IMPORTANCE_WEIGHT_FLOOR)
+                    sw_row = sw_row / sw_row.mean()
+                    sw_full = sw_row.repeat(rows_count)
+                    if backend == "torch":
+                        sw = sw_full
+                    else:
+                        sw = sw_full.numpy()
+
+            prefetch_queue.put({
+                "name": name, "shape": shape, "source_flat": source_flat,
+                "packed_values": packed_values, "padded_values": padded_values,
+                "vectors": vectors, "row_scales": row_scales, "awq_col_scales": awq_col_scales,
+                "salient_weights": salient_weights, "salient_indices": salient_indices,
+                "normalization": normalization,
+                "block_scale_size": (
+                    block_scale_size
+                    if normalization
+                    in ("block-max", "channel-block-max", "awq-block-max", "slrq-block")
+                    else None
+                ),
+                "family": family, "rotation_seed": tensor_seed,
+                "rotation": tensor_rotation,
+                "group_size": resolved_group_size,
+                "vector_weights": vw, "sample_weights": sw,
+                "col_importance": col_importance, "stages_data": {},
+            })
+            tensors_emitted += 1
+
+    except BaseException as exc:
+        _prefetch_exc.append(exc)
+    finally:
+        prefetch_done.set()
+
+
 def pack_checkpoint(
     source: Path,
     out_dir: Path,
@@ -280,186 +503,6 @@ def pack_checkpoint(
     _prefetch_exc: list[BaseException] = []
     _prefetch_state = {"candidate_count": 0}
 
-    def _prefetch_worker():
-        try:
-            tensors_emitted = 0
-            for name, tensor in _load_tensors(source):
-                _check_ram_cap()
-
-                shape = _tensor_shape(tensor)
-                name_lower = name.lower()
-                is_candidate = len(shape) >= 2
-
-                # Exclude biases, norms, and architectural sidecars.
-                if any(
-                    x in name_lower
-                    for x in (".bias", ".norm", ".layernorm", "rotary_emb", "attention.bias")
-                ):
-                    is_candidate = False
-
-                # Non-candidates (norms, biases) always pass through so any
-                # partial artifact stays completable.
-                if not is_candidate:
-                    _passthrough[name] = tensor
-                    continue
-
-                if only_tensors is not None:
-                    base_name = name.replace(".weight", "")
-                    if name not in only_tensors and base_name not in only_tensors:
-                        # Unlisted candidates: passthrough by default (legacy
-                        # behaviour); skipped entirely for partitioned runs
-                        # (sequential packing) so partial artifacts stay small.
-                        if only_tensors_passthrough:
-                            _passthrough[name] = tensor
-                        continue
-
-                if max_tensors is not None and tensors_emitted >= max_tensors:
-                    break
-                
-                # Skipped tensors stay FP16 in the artifact (passthrough), not quantized.
-                if name.replace(".weight", "") in skipped_tensors or name in skipped_tensors:
-                    _passthrough[name] = tensor
-                    continue
-
-                if tensor_partition_count is not None:
-                    slot = _prefetch_state["candidate_count"] % tensor_partition_count
-                    _prefetch_state["candidate_count"] += 1
-                    if slot != tensor_partition_index:
-                        continue
-                else:
-                    _prefetch_state["candidate_count"] += 1
-
-                row_scales = None
-                source_flat = None
-                awq_col_scales = None
-                salient_weights = None
-                salient_indices = None
-                if normalization in {
-                    "block-max",
-                    "channel-block-max",
-                    "awq",
-                    "awq-block-max",
-                    "slrq-block",
-                }:
-                    (
-                        tensor, row_scales, source_flat, awq_col_scales,
-                        salient_weights, salient_indices
-                    ) = _apply_normalization(
-                        tensor, name, normalization, awq_activations, awq_alpha,
-                        block_scale_size, backend, resolved_device, awq_fallbacks,
-                        slrq_salient=slrq_salient,
-                    )
-
-                # --- Post-Normalization Pre-processing ---
-                # Capture source_flat if not already set by normalization.
-                # This is mandatory for quality metrics verification.
-                if source_flat is None:
-                    if backend == "torch":
-                        _, _arr = _torch_f32(tensor, resolved_device)
-                        source_flat = _arr.reshape(-1).detach().cpu()
-                    else:
-                        source_flat = _numpy_float32_array(tensor).reshape(-1)
-
-                tensor_seed = None
-                tensor_rotation = "none"
-                if rotation in {"orthogonal", "hadamard"}:
-                    tensor, tensor_seed = _rotate_tensor_to_2d(
-                        tensor, name, rotation, rotation_seed, backend, resolved_device
-                    )
-                    tensor_rotation = rotation
-
-                # --- PER-TENSOR GROUP SIZING ---
-                # All families use the base group_size; only embedding caps at 8.
-                # Per-family group overrides (the old attn->g4 / mlp->g16 heuristic)
-                # were removed: enlarging the group at a fixed codebook size collapses
-                # fidelity, since k centroids must tile a higher-dim space - see the
-                # inline rationale below.
-                # Shared codebooks (global/family) require one vector width across
-                # all tensors they cover, so any override is per-tensor only.
-                # Measured allocation (tensor_stages_map) plans bits at one uniform
-                # group size, so overrides are disabled in that mode too.
-                family = classify_tensor_family(name)
-                resolved_group_size = group_size
-                if codebook_mode == "per-tensor" and tensor_stages_resolved is None:
-                    if family == "embedding":
-                        resolved_group_size = min(group_size, EMBEDDING_MAX_GROUP_SIZE)
-                    # attention/mlp/expert: keep the base group_size. Enlarging the
-                    # group at fixed codebook size collapses fidelity - k centroids
-                    # must tile a higher-dimensional space (measured: mlp 10.6 dB @
-                    # g16 vs 16.1 dB @ g8). The old heuristic also tightened attention
-                    # to g4 (35 dB, far past need) while starving mlp, an inverted bit
-                    # allocation. Uniform base group equalizes SQNR across families.
-                    # router/other: keep the user-specified group_size
-
-                if backend == "torch":
-                    packed_values, padded_values, vectors = _torch_vectors_from_tensor(
-                        tensor, resolved_group_size, max_values_per_tensor, resolved_device
-                    )
-                else:
-                    packed_values, padded_values, vectors = _numpy_vectors_from_tensor(
-                        tensor, resolved_group_size, max_values_per_tensor
-                    )
-                
-                # --- HESSIAN-PROXY IMPORTANCE WEIGHTS ---
-                # h_j = E[x_j^2] per input column from calibration activations.
-                # Two weight sets feed weighted k-means:
-                #   vector_weights  - within-group dimension pattern (global average),
-                #                     scales the distance metric per dimension.
-                #   sample_weights  - per-vector scalar = mean importance of the columns
-                #                     that vector covers, tiled across rows (row-major
-                #                     flatten). Pulls centroids toward high-energy
-                #                     column groups in the Lloyd update.
-                vw = None
-                sw = None
-                col_importance = None
-                if (awq_activations is not None and name in awq_activations and shape[-1] % resolved_group_size == 0):
-                    import torch
-                    H_diag = torch.as_tensor(awq_activations[name], dtype=torch.float32).pow(2).mean(dim=0)
-                    cols = int(shape[-1])
-                    # Column importance is in ORIGINAL column space; rotation
-                    # mixes columns, so salience-guided escape is rotation-off only.
-                    if tensor_rotation == "none":
-                        col_importance = (
-                            H_diag if backend == "torch" else H_diag.numpy()
-                        )
-                    groups_per_row = cols // resolved_group_size
-                    h_groups = H_diag.reshape(groups_per_row, resolved_group_size)
-                    vw = h_groups.mean(dim=0).clamp(min=IMPORTANCE_WEIGHT_FLOOR).tolist()
-                    rows_count = padded_values // cols
-                    if rows_count * cols == padded_values:
-                        sw_row = h_groups.mean(dim=1).clamp(min=IMPORTANCE_WEIGHT_FLOOR)
-                        sw_row = sw_row / sw_row.mean()
-                        sw_full = sw_row.repeat(rows_count)
-                        if backend == "torch":
-                            sw = sw_full
-                        else:
-                            sw = sw_full.numpy()
-
-                prefetch_queue.put({
-                    "name": name, "shape": shape, "source_flat": source_flat,
-                    "packed_values": packed_values, "padded_values": padded_values,
-                    "vectors": vectors, "row_scales": row_scales, "awq_col_scales": awq_col_scales,
-                    "salient_weights": salient_weights, "salient_indices": salient_indices,
-                    "normalization": normalization,
-                    "block_scale_size": (
-                        block_scale_size
-                        if normalization
-                        in ("block-max", "channel-block-max", "awq-block-max", "slrq-block")
-                        else None
-                    ),
-                    "family": family, "rotation_seed": tensor_seed,
-                    "rotation": tensor_rotation,
-                    "group_size": resolved_group_size,
-                    "vector_weights": vw, "sample_weights": sw,
-                    "col_importance": col_importance, "stages_data": {},
-                })
-                tensors_emitted += 1
-
-        except BaseException as exc:
-            _prefetch_exc.append(exc)
-        finally:
-            prefetch_done.set()
-
     streamed_tensor_count = 0
 
     # Per-tensor processing (stage loop + strategies + manifest entry) and the stage-spec
@@ -496,7 +539,27 @@ def pack_checkpoint(
         manifest=manifest,
     )
 
-    prefetch_thread = threading.Thread(target=_prefetch_worker, daemon=True)
+    prefetch_thread = threading.Thread(
+        target=_prefetch_worker,
+        kwargs=dict(
+            ctx=ctx,
+            source=source,
+            only_tensors=only_tensors,
+            only_tensors_passthrough=only_tensors_passthrough,
+            tensor_partition_count=tensor_partition_count,
+            tensor_partition_index=tensor_partition_index,
+            awq_alpha=awq_alpha,
+            slrq_salient=slrq_salient,
+            max_values_per_tensor=max_values_per_tensor,
+            prefetch_queue=prefetch_queue,
+            prefetch_done=prefetch_done,
+            _prefetch_exc=_prefetch_exc,
+            _prefetch_state=_prefetch_state,
+            _passthrough=_passthrough,
+            awq_fallbacks=awq_fallbacks,
+        ),
+        daemon=True,
+    )
     prefetch_thread.start()
 
     while not prefetch_done.is_set() or not prefetch_queue.empty():
