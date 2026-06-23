@@ -30,11 +30,7 @@ from orka.codebook import (
 )
 from orka.pipeline.pack_helpers import _sample_vectors_and_weights, _weights_digest
 from orka.pipeline.pack_manifest import _finalize_tensor_manifest_entry
-from orka.pipeline.strategies import (
-    _refine_scales_ls,
-    _run_em_aq_refinement,
-    maybe_compensate_candidate,
-)
+from orka.pipeline.strategies import POST_ASSIGNMENT_STRATEGIES
 
 
 @dataclass
@@ -121,17 +117,15 @@ def process_streamed_per_tensor_candidate(ctx: PackCtx, c: dict, stream_index: i
     block_scale_size = ctx.block_scale_size
     rotation = ctx.rotation
     rotation_seed = ctx.rotation_seed
-    mse_scale = ctx.mse_scale
     src_sig = ctx.src_sig
-    skipped_tensors = ctx.skipped_tensors
     codebook_dtype = ctx.codebook_dtype
     codebook_cache_dir = ctx.codebook_cache_dir
-    awq_activations = ctx.awq_activations
     outlier_frac = ctx.outlier_frac
     normalization = ctx.normalization
     max_tensors = ctx.max_tensors
-    error_compensation = ctx.error_compensation
     manifest = ctx.manifest
+    # error_compensation / em_aq / mse_scale config is read by the strategy objects via
+    # ctx (see POST_ASSIGNMENT_STRATEGIES); the stage loop below does not need them.
     total_index_bytes = ctx.total_index_bytes
 
     for stage_i in range(n_stages):
@@ -276,35 +270,13 @@ def process_streamed_per_tensor_candidate(ctx: PackCtx, c: dict, stream_index: i
             }
         )
 
-    compensated = False
-    if error_compensation:
-        compensated = maybe_compensate_candidate(
-            c,
-            backend=backend,
-            awq_activations=awq_activations,
-            resolved_device=resolved_device,
-            progress_file=progress_file,
-            out_dir=out_dir,
-        )
-
-    if n_stages > 1 and em_aq_passes > 0 and not compensated:
-        _run_em_aq_refinement(
-            candidates=[c],
-            n_stages=n_stages,
-            skipped_tensors=skipped_tensors,
-            sample_vectors=sample_vectors,
-            backend=backend,
-            resolved_device=resolved_device,
-            tensor_dir=tensor_dir,
-            progress_file=progress_file,
-            em_aq_passes=em_aq_passes,
-        )
-
-    try:
-        _refine_scales_ls(c, mse_scale=mse_scale, block_scale_size=block_scale_size, out_dir=out_dir)
-    except Exception as _e:  # refinement is optional; never fail the pack
-        c.pop("_mse_v", None)
-        _report_progress(progress_file, f"  mse_scale refinement skipped: {_e}")
+    # Post-assignment strategies, applied in registry order (error_compensation ->
+    # em_aq -> mse_scale). Each decides whether it runs; the order + the "em_aq skipped
+    # if compensated" dependency live in the strategy gates, not here. Add a new trick by
+    # registering it in orka.pipeline.strategies.POST_ASSIGNMENT_STRATEGIES - no edit here.
+    for strategy in POST_ASSIGNMENT_STRATEGIES:
+        if strategy.applies(ctx, c):
+            strategy.apply(ctx, c)
 
     _BG_WRITER.wait()
     manifest["tensors"].append(

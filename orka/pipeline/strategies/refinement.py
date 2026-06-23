@@ -23,6 +23,7 @@ from orka.codebook import learn_codebook_auto, quantize_vectors_auto
 from orka.metrics import _stage_quality_metrics
 from orka.pipeline.pack_config import LS_SCALE_DENOM_FLOOR, LS_SCALE_MIN_MAGNITUDE
 from orka.pipeline.pack_helpers import _sample_vectors_and_weights
+from orka.pipeline.strategies.base import PostAssignmentStrategy
 
 
 def _offload_to_cpu(t):
@@ -282,3 +283,40 @@ def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_di
     s_new = torch.where(skip_block, sc, s_new)  # outlier blocks keep block-max
     s_new = torch.where(torch.isfinite(s_new) & (s_new.abs() > LS_SCALE_MIN_MAGNITUDE), s_new, sc)
     c["row_scales"] = _fp16_storage_roundtrip(s_new.numpy().astype(np.float32))
+
+
+class EMAQStrategy(PostAssignmentStrategy):
+    name = "em_aq"
+
+    def applies(self, ctx, c: dict) -> bool:
+        # Skipped when error compensation already ran (it would undo the compensation).
+        return ctx.n_stages > 1 and ctx.em_aq_passes > 0 and not c.get("_compensated")
+
+    def apply(self, ctx, c: dict) -> None:
+        _run_em_aq_refinement(
+            candidates=[c],
+            n_stages=ctx.n_stages,
+            skipped_tensors=ctx.skipped_tensors,
+            sample_vectors=ctx.sample_vectors,
+            backend=ctx.backend,
+            resolved_device=ctx.resolved_device,
+            tensor_dir=ctx.tensor_dir,
+            progress_file=ctx.progress_file,
+            em_aq_passes=ctx.em_aq_passes,
+        )
+
+
+class MSEScaleStrategy(PostAssignmentStrategy):
+    name = "mse_scale"
+
+    def applies(self, ctx, c: dict) -> bool:
+        return ctx.mse_scale
+
+    def apply(self, ctx, c: dict) -> None:
+        try:
+            _refine_scales_ls(
+                c, mse_scale=ctx.mse_scale, block_scale_size=ctx.block_scale_size, out_dir=ctx.out_dir
+            )
+        except Exception as exc:  # refinement is optional; never fail the pack
+            c.pop("_mse_v", None)
+            _report_progress(ctx.progress_file, f"  mse_scale refinement skipped: {exc}")
