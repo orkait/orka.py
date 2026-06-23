@@ -27,9 +27,36 @@ load -> rotation -> normalization -> outliers/salient extract -> hessian weights
      -> persist (codebooks, indices, scale + sparse sidecars, manifest)
 ```
 
-## Adding a strategy
+## Pluggable post-assignment strategies (Strategy pattern)
 
-1. Implement it (in `strategies/` if it is a pack-time step; in `transforms`/`codebook` if it is a base transform).
-2. Wire the call into `pack_checkpoint` at the right stage.
-3. Add an entry to `STRATEGY_REGISTRY` and a row here.
-4. Add an oracle config in the golden test or a unit test that exercises it, so the wiring is regression-covered.
+The post-assignment steps (error_compensation, em_aq, mse_scale) are **plugins**, not
+hardcoded calls. Each is a `PostAssignmentStrategy` (`base.py`) with:
+
+- `applies(ctx, c) -> bool` - does this strategy run for this candidate + config
+- `apply(ctx, c) -> None` - run it, mutating the candidate in place
+
+`pack_pipeline` applies `POST_ASSIGNMENT_STRATEGIES` (ordered list in `__init__.py`) with a
+single generic loop:
+
+```python
+for strategy in POST_ASSIGNMENT_STRATEGIES:
+    if strategy.applies(ctx, c):
+        strategy.apply(ctx, c)
+```
+
+Order is load-bearing: error_compensation first (sets `c["_compensated"]`), then em_aq
+(its `applies` returns False when compensated), then mse_scale. The dependency lives in the
+gates, not the loop - so the loop never changes.
+
+## Adding a post-assignment strategy
+
+1. Subclass `PostAssignmentStrategy` (in `strategies/`), implement `applies` + `apply`
+   (read config from `ctx`, duck-typed - do not import `PackCtx`).
+2. Append an instance to `POST_ASSIGNMENT_STRATEGIES` in `__init__.py` at the right
+   position. **No edit to `pack_pipeline` or `pack_checkpoint`.**
+3. Add a row to the catalog above + an entry to `STRATEGY_REGISTRY`.
+4. Add an oracle config / unit test that exercises it, so the wiring is regression-covered.
+
+Base transforms (normalization / rotation / outliers / RVQ) are not post-assignment
+strategies - they run pre-stage and stay in `transforms` / `codebook`, catalogued by
+reference above.

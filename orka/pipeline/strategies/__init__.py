@@ -12,13 +12,34 @@ in this package.
 
 from __future__ import annotations
 
-from orka.pipeline.strategies.error_compensation import maybe_compensate_candidate
+from orka.pipeline.strategies.base import PostAssignmentStrategy
+from orka.pipeline.strategies.error_compensation import (
+    ErrorCompensationStrategy,
+    maybe_compensate_candidate,
+)
 from orka.pipeline.strategies.refinement import (
+    EMAQStrategy,
+    MSEScaleStrategy,
     _refine_scales_ls,
     _run_em_aq_refinement,
 )
 
+# Ordered post-assignment strategy pipeline. The streamed worker applies these in order;
+# each decides whether it runs (see PostAssignmentStrategy). Order is load-bearing:
+# error_compensation first (sets c["_compensated"]), then em_aq (skipped if compensated),
+# then mse_scale. Add a new trick by appending an instance here - no pipeline edit.
+POST_ASSIGNMENT_STRATEGIES: list[PostAssignmentStrategy] = [
+    ErrorCompensationStrategy(),
+    EMAQStrategy(),
+    MSEScaleStrategy(),
+]
+
 __all__ = [
+    "PostAssignmentStrategy",
+    "POST_ASSIGNMENT_STRATEGIES",
+    "ErrorCompensationStrategy",
+    "EMAQStrategy",
+    "MSEScaleStrategy",
     "maybe_compensate_candidate",
     "_refine_scales_ls",
     "_run_em_aq_refinement",
