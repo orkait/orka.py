@@ -12,6 +12,27 @@ Wired in pack_checkpoint per-tensor, before EM-AQ / scale refinement.
 
 from __future__ import annotations
 
+from orka.pipeline.strategies.base import PostAssignmentStrategy
+
+
+class ErrorCompensationStrategy(PostAssignmentStrategy):
+    name = "error_compensation"
+
+    def applies(self, ctx, c: dict) -> bool:
+        return ctx.error_compensation
+
+    def apply(self, ctx, c: dict) -> None:
+        # Record whether compensation actually ran so em_aq can skip (it would re-learn
+        # codebooks against uncompensated residuals and undo this).
+        c["_compensated"] = maybe_compensate_candidate(
+            c,
+            backend=ctx.backend,
+            awq_activations=ctx.awq_activations,
+            resolved_device=ctx.resolved_device,
+            progress_file=ctx.progress_file,
+            out_dir=ctx.out_dir,
+        )
+
 
 def maybe_compensate_candidate(
     c: dict,
