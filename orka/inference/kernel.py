@@ -56,6 +56,7 @@ def _vq_decode_kernel(
     GROUPS_PER_BLOCK: tl.constexpr,         # B // G
     N_STAGES: tl.constexpr,
     BLOCK_M: tl.constexpr,
+    GROUP_MAJOR: tl.constexpr,              # indices/scales laid out [GPR, M] / [BPR, M]
 ):
     pid = tl.program_id(0)
     m_ids = pid * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -68,20 +69,27 @@ def _vq_decode_kernel(
         x_g = tl.load(x_ptr + g * G + e).to(tl.float32)          # [G]
 
         b = g // GROUPS_PER_BLOCK
-        scale = tl.load(scale_ptr + m_ids * BPR + b, mask=m_mask, other=0.0).to(tl.float32)
+        # group-major [GPR,M]/[BPR,M] coalesces across rows; row-major is the legacy layout
+        if GROUP_MAJOR:
+            i_off = g * M + m_ids
+            s_off = b * M + m_ids
+        else:
+            i_off = m_ids * GPR + g
+            s_off = m_ids * BPR + b
+        scale = tl.load(scale_ptr + s_off, mask=m_mask, other=0.0).to(tl.float32)
 
         # Stage 0: codebook[idx].x_g  (codebook gather from L2)
-        idx0 = tl.load(idx0_ptr + m_ids * GPR + g, mask=m_mask, other=0).to(tl.int32)
+        idx0 = tl.load(idx0_ptr + i_off, mask=m_mask, other=0).to(tl.int32)
         cbe0 = tl.load(cb0_ptr + idx0[:, None] * G + e[None, :], mask=m_mask[:, None], other=0.0).to(tl.float32)
         dot = tl.sum(cbe0 * x_g[None, :], axis=1)                # [BLOCK_M]
 
         if N_STAGES >= 2:
-            idx1 = tl.load(idx1_ptr + m_ids * GPR + g, mask=m_mask, other=0).to(tl.int32)
+            idx1 = tl.load(idx1_ptr + i_off, mask=m_mask, other=0).to(tl.int32)
             cbe1 = tl.load(cb1_ptr + idx1[:, None] * G + e[None, :], mask=m_mask[:, None], other=0.0).to(tl.float32)
             dot += tl.sum(cbe1 * x_g[None, :], axis=1)
 
         if N_STAGES >= 3:
-            idx2 = tl.load(idx2_ptr + m_ids * GPR + g, mask=m_mask, other=0).to(tl.int32)
+            idx2 = tl.load(idx2_ptr + i_off, mask=m_mask, other=0).to(tl.int32)
             cbe2 = tl.load(cb2_ptr + idx2[:, None] * G + e[None, :], mask=m_mask[:, None], other=0.0).to(tl.float32)
             dot += tl.sum(cbe2 * x_g[None, :], axis=1)
 
@@ -115,6 +123,7 @@ def _vq_decode_n1(layer, x_2d: torch.Tensor) -> torch.Tensor:
         y,
         M, GPR, BPR,
         G, B // G, layer.n_stages,
+        GROUP_MAJOR=bool(getattr(layer, "_group_major", False)),
     )
     return y.view(1, M).to(torch.float16)
 
@@ -156,6 +165,7 @@ def _vq_gemm_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    GROUP_MAJOR: tl.constexpr,    # indices [GPR,M] / scales [BPR,M] vs legacy row-major
 ):
     m_start = tl.program_id(0) * BLOCK_M
     n_start = tl.program_id(1) * BLOCK_N
@@ -175,7 +185,10 @@ def _vq_gemm_kernel(
         block_of_col = col_ids // B                      # [BLOCK_K]
 
         # flat group index per (row, col): [BLOCK_M, BLOCK_K]
-        flat_group = m_ids[:, None] * GPR + group_of_col[None, :]
+        if GROUP_MAJOR:
+            flat_group = group_of_col[None, :] * M + m_ids[:, None]
+        else:
+            flat_group = m_ids[:, None] * GPR + group_of_col[None, :]
 
         # Stage 0 (always present)
         idx0 = tl.load(idx0_ptr + flat_group, mask=m_mask[:, None] & k_mask[None, :], other=0).to(tl.int32)
@@ -193,7 +206,10 @@ def _vq_gemm_kernel(
             w_tile = w_tile + tl.load(cb2_ptr + cb_off2, mask=m_mask[:, None] & k_mask[None, :], other=0.0).to(tl.float32)
 
         # Block scales [BLOCK_M, BLOCK_K]
-        scale_off = m_ids[:, None] * BPR + block_of_col[None, :]
+        if GROUP_MAJOR:
+            scale_off = block_of_col[None, :] * M + m_ids[:, None]
+        else:
+            scale_off = m_ids[:, None] * BPR + block_of_col[None, :]
         scales = tl.load(scale_ptr + scale_off, mask=m_mask[:, None] & k_mask[None, :], other=1.0).to(tl.float32)
         w_tile = w_tile * scales
 
@@ -276,6 +292,7 @@ def vq_linear_forward(layer, x: torch.Tensor) -> torch.Tensor:
         layer.scales,
         M, N, K, GPR, BPR,
         G, B, layer.n_stages,
+        GROUP_MAJOR=bool(getattr(layer, "_group_major", False)),
     )
 
     # Sparse correction: W_correction [M, K] -> y += x @ W_correction.T

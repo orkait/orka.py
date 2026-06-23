@@ -123,6 +123,7 @@ def supported(layer, n_tokens: int) -> bool:
         and getattr(layer, "group_size", 0) == 8
         and getattr(layer, "block_size", 0) == 32
         and layer.in_features % 32 == 0
+        and getattr(layer, "_group_major", False)  # kernel reads group-major directly
         and layer.scales.is_cuda
         and _get_module() is not None
     )
@@ -162,11 +163,13 @@ def _build_buffers(layer, M, GPR, BPR):
     cache = getattr(layer, "_cuda_decode_cache", None)
     if cache is not None:
         return cache
-    i0 = layer.indices_0.view(M, GPR).t().contiguous().reshape(-1)
-    i1 = layer.indices_1.view(M, GPR).t().contiguous().reshape(-1)
-    sc = layer.scales.view(M, BPR).t().contiguous().reshape(-1)
-    c0 = layer.codebook_0.reshape(-1).contiguous()
-    c1 = layer.codebook_1.reshape(-1).contiguous()
+    # Indices/scales are stored group-major ([GPR,M]/[BPR,M]) - exactly the layout the
+    # kernel reads (i[g*M+m]) - so reference them directly, no transposed copy.
+    i0 = layer.indices_0
+    i1 = layer.indices_1
+    sc = layer.scales
+    c0 = layer.codebook_0.reshape(-1)   # [cb,8] contiguous -> view, float4-addressable
+    c1 = layer.codebook_1.reshape(-1)
     # Reuse the layer's registered CSR correction buffers directly - no rebuild,
     # no second copy (this is the same data the N>1 cuSPARSE path uses).
     csr = None

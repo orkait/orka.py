@@ -115,21 +115,30 @@ class VQLinear(nn.Module):
         """Decode full W [out, in] fp32. Expensive - for testing only."""
         dev = self.scales.device
         G, B = self.group_size, self.block_size
-        total = self.out_features * self.in_features
+        M = self.out_features
+        total = M * self.in_features
         padded = math.ceil(total / G) * G
+        # Indices/scales may be stored group-major ([GPR,M]/[BPR,M]); transpose back
+        # to row-major element/block order for the dense decode.
+        gm = bool(getattr(self, "_group_major", False))
 
         decoded = torch.zeros(padded, dtype=torch.float32, device=dev)
         for s in range(self.n_stages):
             idxs = getattr(self, f"indices_{s}").long()
+            if gm and idxs.numel() == total // G:
+                idxs = idxs.view(total // G // M, M).t().reshape(-1)
             cb = getattr(self, f"codebook_{s}").float()
             decoded.add_(cb[idxs].reshape(-1))
         decoded = decoded[:total]
 
         n_blocks = math.ceil(total / B)
         pad_b = n_blocks * B - total
+        sc = self.scales
+        if gm and sc.numel() == n_blocks:
+            sc = sc.view(n_blocks // M, M).t().reshape(-1)
         if pad_b:
             decoded = F.pad(decoded, (0, pad_b))
-        decoded = (decoded.reshape(n_blocks, B) * self.scales[:n_blocks, None].float()).reshape(-1)[:total]
+        decoded = (decoded.reshape(n_blocks, B) * sc[:n_blocks, None].float()).reshape(-1)[:total]
 
         # Apply correction directly from the stored CSR buffers - independent of the
         # forward path's cached sparse tensor.
@@ -342,5 +351,25 @@ def build_vq_linear(
         layer.corr_rowptr.copy_(torch.from_numpy(rowptr.astype(np.int32)))
         layer.corr_col.resize_(len(cols_s)).copy_(torch.from_numpy(cols_s))
         layer.corr_val.resize_(len(delta_s)).copy_(torch.from_numpy(delta_s))
+
+    # Group-major index/scale layout ([GPR,M] / [BPR,M]) for coalesced kernel reads.
+    # Done LAST: the correction delta above reads row-major indices. In-place copy_
+    # keeps the buffers registered; the transient transpose copy is freed at load
+    # time (not during inference), so the inference footprint holds only one layout.
+    if in_features % group_size == 0 and in_features % block_size == 0:
+        gpr = in_features // group_size
+        bpr = in_features // block_size
+        ok = True
+        for s in range(n_stages):
+            buf = getattr(layer, f"indices_{s}")
+            if buf.numel() != out_features * gpr:
+                ok = False
+                break
+        if ok and layer.scales.numel() == out_features * bpr:
+            for s in range(n_stages):
+                buf = getattr(layer, f"indices_{s}")
+                buf.copy_(buf.view(out_features, gpr).t().contiguous().reshape(-1))
+            layer.scales.copy_(layer.scales.view(out_features, bpr).t().contiguous().reshape(-1))
+            layer._group_major = True
 
     return layer.to(device)
