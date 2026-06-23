@@ -173,7 +173,7 @@ class VQLinear(nn.Module):
     def _triton_available(self) -> bool:
         if self._triton_ok is None:
             try:
-                from orka.inference.kernel import vq_linear_forward  # noqa: F401
+                from orka.inference.dispatch import vq_linear_forward  # noqa: F401
                 self._triton_ok = True
             except Exception:
                 self._triton_ok = False
@@ -181,7 +181,7 @@ class VQLinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self._triton_available():
-            from orka.inference.kernel import vq_linear_forward
+            from orka.inference.dispatch import vq_linear_forward
             return vq_linear_forward(self, x)
         return self._forward_python(x)
 
