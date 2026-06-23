@@ -205,47 +205,11 @@ class VQLinear(nn.Module):
 # Factory: load VQLinear from a .orka artifact
 # ------------------------------------------------------------------
 
-def build_vq_linear(
-    artifact_dir: Path,
-    tensor_meta: dict,
-    bias: Optional[torch.Tensor],
-    device: str | torch.device = "cpu",
-) -> VQLinear:
-    """Construct and populate a VQLinear from one tensor's .orka metadata."""
+def _register_layer_buffers(layer, artifact_dir, stages, group_size, block_size, total, tensor_meta):
+    """Load codebooks/indices (per stage) and block scales into the layer's
+    registered buffers. Returns the loaded scales array (or None)."""
     import numpy as np
-    from orka._format import (
-        _read_codebook, _read_indices, _read_salient, _read_outliers,
-        _read_float_vector, _float_value_dtype,
-    )
-
-    shape = [int(x) for x in tensor_meta["shape"]]
-    out_features = shape[0]
-    in_features = 1
-    for s in shape[1:]:
-        in_features *= s
-
-    stages = tensor_meta.get("stages") or [{
-        "codebook": tensor_meta["codebook"],
-        "codebook_size": int(tensor_meta["codebook_size"]),
-        "index_bits": int(tensor_meta["index_bits"]),
-        "indices": tensor_meta["indices"],
-    }]
-
-    group_size = int(tensor_meta.get("group_size", 8))
-    block_size = int(tensor_meta.get("block_scale_size") or 32)
-    cb_sizes = [int(st["codebook_size"]) for st in stages]
-    n_stages = len(stages)
-    total = out_features * in_features
-
-    layer = VQLinear(
-        out_features=out_features,
-        in_features=in_features,
-        n_stages=n_stages,
-        group_size=group_size,
-        block_size=block_size,
-        cb_sizes=cb_sizes,
-        bias=bias,
-    )
+    from orka._format import _read_codebook, _read_indices, _read_float_vector
 
     # --- Load codebooks + indices ---
     for s, stage in enumerate(stages):
@@ -276,18 +240,28 @@ def build_vq_linear(
         scales_np = scales_full[:n_scale]
         layer.scales.copy_(torch.from_numpy(scales_np).to(torch.float16))
 
-    # --- Precompute sparse correction (salient + outliers) ---
-    # The Triton kernel produces W_vq = vq_decode * block_scale at every position.
-    # The artifact overrides some positions; we store delta = final - W_vq so
-    # forward() applies them with one sparse matmul.
-    #
-    # orka decode ordering (must be matched exactly):
-    #   1. vq decode
-    #   2. outliers OVERWRITE (pre-scale)  -> final_outlier = outlier_val * block_scale
-    #   3. block scaling                   -> scales everything incl. outliers
-    #   4. salient OVERWRITE (post-scale)  -> final_salient = salient_val  (verbatim)
-    # Salient is applied last, so at a shared position salient wins. We dedup
-    # into a position->final-value map with salient priority (NOT summed).
+    return scales_np
+
+
+def _build_csr_correction(layer, artifact_dir, tensor_meta, n_stages, group_size, block_size, scales_np, in_features, out_features, total):
+    """Precompute sparse correction (salient + outliers) and store it into the
+    layer's CSR buffers.
+
+    The Triton kernel produces W_vq = vq_decode * block_scale at every position.
+    The artifact overrides some positions; we store delta = final - W_vq so
+    forward() applies them with one sparse matmul.
+
+    orka decode ordering (must be matched exactly):
+      1. vq decode
+      2. outliers OVERWRITE (pre-scale)  -> final_outlier = outlier_val * block_scale
+      3. block scaling                   -> scales everything incl. outliers
+      4. salient OVERWRITE (post-scale)  -> final_salient = salient_val  (verbatim)
+    Salient is applied last, so at a shared position salient wins. We dedup
+    into a position->final-value map with salient priority (NOT summed).
+    """
+    import numpy as np
+    from orka._format import _read_salient, _read_outliers
+
     def _vq_decoded_at(flat_pos_np):
         """W_vq = vq_decode * block_scale at given flat positions."""
         flat_t = torch.from_numpy(flat_pos_np.astype(np.int64))
@@ -365,10 +339,15 @@ def build_vq_linear(
         layer.corr_col.resize_(len(cols_s)).copy_(torch.from_numpy(cols_s))
         layer.corr_val.resize_(len(delta_s)).copy_(torch.from_numpy(delta_s))
 
-    # Group-major index/scale layout ([GPR,M] / [BPR,M]) for coalesced kernel reads.
-    # Done LAST: the correction delta above reads row-major indices. In-place copy_
-    # keeps the buffers registered; the transient transpose copy is freed at load
-    # time (not during inference), so the inference footprint holds only one layout.
+
+def _to_group_major(layer, n_stages, group_size, block_size, in_features, out_features):
+    """Transpose index/scale buffers to group-major ([GPR,M] / [BPR,M]) for
+    coalesced kernel reads.
+
+    Done LAST: the correction delta above reads row-major indices. In-place copy_
+    keeps the buffers registered; the transient transpose copy is freed at load
+    time (not during inference), so the inference footprint holds only one layout.
+    """
     if in_features % group_size == 0 and in_features % block_size == 0:
         gpr = in_features // group_size
         bpr = in_features // block_size
@@ -384,5 +363,59 @@ def build_vq_linear(
                 buf.copy_(buf.view(out_features, gpr).t().contiguous().reshape(-1))
             layer.scales.copy_(layer.scales.view(out_features, bpr).t().contiguous().reshape(-1))
             layer._group_major = True
+
+
+def build_vq_linear(
+    artifact_dir: Path,
+    tensor_meta: dict,
+    bias: Optional[torch.Tensor],
+    device: str | torch.device = "cpu",
+) -> VQLinear:
+    """Construct and populate a VQLinear from one tensor's .orka metadata."""
+    import numpy as np
+    from orka._format import (
+        _read_codebook, _read_indices, _read_salient, _read_outliers,
+        _read_float_vector, _float_value_dtype,
+    )
+
+    shape = [int(x) for x in tensor_meta["shape"]]
+    out_features = shape[0]
+    in_features = 1
+    for s in shape[1:]:
+        in_features *= s
+
+    stages = tensor_meta.get("stages") or [{
+        "codebook": tensor_meta["codebook"],
+        "codebook_size": int(tensor_meta["codebook_size"]),
+        "index_bits": int(tensor_meta["index_bits"]),
+        "indices": tensor_meta["indices"],
+    }]
+
+    group_size = int(tensor_meta.get("group_size", 8))
+    block_size = int(tensor_meta.get("block_scale_size") or 32)
+    cb_sizes = [int(st["codebook_size"]) for st in stages]
+    n_stages = len(stages)
+    total = out_features * in_features
+
+    layer = VQLinear(
+        out_features=out_features,
+        in_features=in_features,
+        n_stages=n_stages,
+        group_size=group_size,
+        block_size=block_size,
+        cb_sizes=cb_sizes,
+        bias=bias,
+    )
+
+    scales_np = _register_layer_buffers(
+        layer, artifact_dir, stages, group_size, block_size, total, tensor_meta
+    )
+
+    _build_csr_correction(
+        layer, artifact_dir, tensor_meta, n_stages, group_size, block_size,
+        scales_np, in_features, out_features, total,
+    )
+
+    _to_group_major(layer, n_stages, group_size, block_size, in_features, out_features)
 
     return layer.to(device)
