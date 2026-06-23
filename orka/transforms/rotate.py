@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from dataclasses import dataclass
+from typing import Callable, Sequence
 
 from orka._tensor import _numpy_float32_array, _torch_f32
 
@@ -117,32 +118,26 @@ def _generate_orthogonal_numpy(n: int, seed: int):
     q, _ = np.linalg.qr(a)
     return q.astype(np.float32)
 
-def _rotate_tensor_to_2d(
-    tensor, name: str, rotation: str, rotation_seed: int, backend: str, device: str
-):
-    if rotation == "none":
-        return tensor, None
-    if rotation not in {"orthogonal", "hadamard"}:
-        raise ValueError(f"unknown rotation mode: {rotation}")
-
-    if rotation == "hadamard":
-        if backend == "torch":
-            _, t = _torch_f32(tensor, device)
-            shape = list(t.shape)
-            rows, cols = shape[0], 1
-            for s in shape[1:]:
-                cols *= int(s)
-            block_size = _hadamard_block_size(cols)
-            return _block_fwht_torch(t.reshape(rows, cols), block_size).reshape(shape), 0
-
-        arr = _numpy_float32_array(tensor)
-        shape = [int(x) for x in arr.shape]
+def _rotate_hadamard(tensor, *, name, rotation_seed, backend, device):
+    if backend == "torch":
+        _, t = _torch_f32(tensor, device)
+        shape = list(t.shape)
         rows, cols = shape[0], 1
         for s in shape[1:]:
             cols *= int(s)
         block_size = _hadamard_block_size(cols)
-        return _block_fwht_numpy(arr.reshape((rows, cols)), block_size).reshape(shape), 0
+        return _block_fwht_torch(t.reshape(rows, cols), block_size).reshape(shape), 0
 
+    arr = _numpy_float32_array(tensor)
+    shape = [int(x) for x in arr.shape]
+    rows, cols = shape[0], 1
+    for s in shape[1:]:
+        cols *= int(s)
+    block_size = _hadamard_block_size(cols)
+    return _block_fwht_numpy(arr.reshape((rows, cols)), block_size).reshape(shape), 0
+
+
+def _rotate_orthogonal(tensor, *, name, rotation_seed, backend, device):
     seed = _tensor_rotation_seed(rotation_seed, name)
     if backend == "torch":
         import torch
@@ -152,15 +147,15 @@ def _rotate_tensor_to_2d(
         rows, cols = shape[0], 1
         for s in shape[1:]:
             cols *= int(s)
-        
+
         # Sanity cap: N*N matrix allocation for orthogonal rotation.
-        # 16384 * 16384 * 4 bytes = 1.0 GB. 
+        # 16384 * 16384 * 4 bytes = 1.0 GB.
         if cols > 16384:
             raise ValueError(
                 f"tensor {name} too wide for orthogonal rotation (cols={cols} > 16384). "
                 "Large tensors like attention masks should be skipped via sensitivity map or excluded from candidates."
             )
-            
+
         q = _generate_orthogonal_torch(cols, seed, resolved, torch.float32)
         return (t.reshape(rows, cols) @ q).reshape(shape), seed
     arr = _numpy_float32_array(tensor)
@@ -168,15 +163,63 @@ def _rotate_tensor_to_2d(
     rows, cols = shape[0], 1
     for s in shape[1:]:
         cols *= int(s)
-        
+
     if cols > 16384:
         raise ValueError(
             f"tensor {name} too wide for orthogonal rotation (cols={cols} > 16384). "
             "Large tensors like attention masks should be skipped via sensitivity map or excluded from candidates."
         )
-        
+
     q = _generate_orthogonal_numpy(cols, seed)
     return (arr.reshape(rows, cols) @ q).reshape(shape), seed
+
+
+def _unrotate_hadamard(arr, *, cols, seed):
+    block_size = _hadamard_block_size(cols)
+    return _block_fwht_numpy(arr, block_size)
+
+
+def _unrotate_orthogonal(arr, *, cols, seed):
+    q = _generate_orthogonal_numpy(cols, seed)
+    return arr @ q.T
+
+
+@dataclass
+class RotationStrategy:
+    """An invertible incoherence rotation: forward (pack-time) + inverse (decode-time)."""
+
+    name: str
+    rotate: Callable[..., tuple]    # (tensor, *, name, rotation_seed, backend, device) -> (rotated, stored_seed)
+    unrotate: Callable[..., object]  # (arr2d, *, cols, seed) -> unrotated 2d
+
+
+# Mode -> strategy. "none" is handled inline (identity). Register a new rotation with
+# register_rotation() - the dispatchers do not change (open/closed).
+ROTATION_REGISTRY: dict[str, RotationStrategy] = {
+    "hadamard": RotationStrategy("hadamard", _rotate_hadamard, _unrotate_hadamard),
+    "orthogonal": RotationStrategy("orthogonal", _rotate_orthogonal, _unrotate_orthogonal),
+}
+
+
+def register_rotation(strategy: RotationStrategy) -> None:
+    """Register a rotation strategy so it dispatches without editing the chain."""
+    ROTATION_REGISTRY[strategy.name] = strategy
+
+
+def rotation_modes() -> list[str]:
+    """Rotation modes the dispatcher recognizes (plus the implicit 'none')."""
+    return sorted(ROTATION_REGISTRY)
+
+
+def _rotate_tensor_to_2d(
+    tensor, name: str, rotation: str, rotation_seed: int, backend: str, device: str
+):
+    if rotation == "none":
+        return tensor, None
+    strategy = ROTATION_REGISTRY.get(rotation)
+    if strategy is None:
+        raise ValueError(f"unknown rotation mode: {rotation}")
+    return strategy.rotate(tensor, name=name, rotation_seed=rotation_seed, backend=backend, device=device)
 
 
 def _unrotate_flat(flat, shape, rotation: str, seed: int):
@@ -187,10 +230,9 @@ def _unrotate_flat(flat, shape, rotation: str, seed: int):
     for s in shape[1:]:
         cols *= int(s)
     arr = np.asarray(flat, dtype=np.float32)[: rows * cols].reshape(rows, cols)
-    if rotation == "hadamard":
-        block_size = _hadamard_block_size(cols)
-        unrotated = _block_fwht_numpy(arr, block_size)
-    else:
-        q = _generate_orthogonal_numpy(cols, seed)
-        unrotated = arr @ q.T
+    strategy = ROTATION_REGISTRY.get(rotation)
+    if strategy is None:
+        # legacy fallback: anything not "hadamard" inverted as orthogonal (matches prior else-branch)
+        strategy = ROTATION_REGISTRY["orthogonal"]
+    unrotated = strategy.unrotate(arr, cols=cols, seed=seed)
     return unrotated.reshape(-1)

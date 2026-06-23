@@ -77,6 +77,38 @@ class RotationMathTest(unittest.TestCase):
         back = _unrotate_flat(rotated.reshape(-1), [8, 48], "hadamard", seed)
         np.testing.assert_allclose(back.reshape(8, 48), w, atol=1e-5)
 
+    def test_rotation_registry_modes_and_unknown_raises(self) -> None:
+        from orka.transforms.rotate import _rotate_tensor_to_2d, rotation_modes
+
+        self.assertEqual(set(rotation_modes()), {"hadamard", "orthogonal"})
+        with self.assertRaises(ValueError):
+            _rotate_tensor_to_2d(np.zeros((2, 4), np.float32), "t", "bogus", 0, "numpy", "cpu")
+
+    def test_register_rotation_dispatches_and_round_trips(self) -> None:
+        # A custom rotation plugs in via register_rotation with no dispatcher edit.
+        from orka.transforms.rotate import (
+            ROTATION_REGISTRY,
+            RotationStrategy,
+            _rotate_tensor_to_2d,
+            _unrotate_flat,
+            register_rotation,
+        )
+
+        def _flip_rotate(tensor, *, name, rotation_seed, backend, device):
+            return np.asarray(tensor, np.float32)[:, ::-1].copy(), 0
+
+        def _flip_unrotate(arr, *, cols, seed):
+            return arr[:, ::-1].copy()
+
+        register_rotation(RotationStrategy("flip", _flip_rotate, _flip_unrotate))
+        try:
+            w = np.random.default_rng(7).standard_normal((4, 6)).astype(np.float32)
+            rotated, seed = _rotate_tensor_to_2d(w, "t", "flip", 0, "numpy", "cpu")
+            back = _unrotate_flat(rotated.reshape(-1), [4, 6], "flip", seed)
+            np.testing.assert_allclose(back.reshape(4, 6), w, atol=0)
+        finally:
+            ROTATION_REGISTRY.pop("flip", None)
+
 
 class NormalizationRoundTripTest(unittest.TestCase):
     def test_block_max_round_trip(self) -> None:
