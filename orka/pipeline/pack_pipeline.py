@@ -109,6 +109,191 @@ def stage_spec_for_candidate(ctx: PackCtx, c: dict, stage_i: int):
     return stages_spec[stage_i]
 
 
+def _quantize_and_record_stage(
+    ctx: PackCtx,
+    c: dict,
+    stage_i: int,
+    *,
+    k_spec,
+    codebook_path_dir: Path,
+    short_names: bool,
+    em_aq_cleanup: bool,
+    shared_cb=None,
+) -> int:
+    """Quantize one (candidate, stage) and record it; returns this stage's index-bytes.
+
+    The only acquisition difference between callers is the codebook: when ``shared_cb``
+    (a ``(cb, cb_path, cb_dtype)`` tuple) is provided the batched path already learned +
+    wrote it, so we use it as-is; otherwise we learn the per-tensor codebook (with cache)
+    and write it here. ``short_names`` selects the streamed single-stage filename form
+    (``{safe}.codebook.f32`` / ``{safe}.indices``) vs the per-stage form. ``em_aq_cleanup``
+    threads the caller's gate for dropping the residual/decoded_sum after the last stage.
+    """
+    backend = ctx.backend
+    n_stages = ctx.n_stages
+    resolved_device = ctx.resolved_device
+    out_dir = ctx.out_dir
+    sample_vectors = ctx.sample_vectors
+    iterations = ctx.iterations
+    em_aq_passes = ctx.em_aq_passes
+    rotation = ctx.rotation
+    rotation_seed = ctx.rotation_seed
+    src_sig = ctx.src_sig
+    codebook_dtype = ctx.codebook_dtype
+    codebook_cache_dir = ctx.codebook_cache_dir
+    outlier_frac = ctx.outlier_frac
+    normalization = ctx.normalization
+    max_tensors = ctx.max_tensors
+
+    safe = _safe_tensor_name(c["name"])
+    is_scalar_stage = isinstance(k_spec, str) and k_spec.startswith("s")
+    if is_scalar_stage:
+        k = 1 << int(k_spec[1:])
+        v_res = c["vectors_residual"].reshape(-1, 1)
+        c_group_size = 1
+    else:
+        k = int(k_spec)
+        v_res = c["vectors_residual"]
+        c_group_size = c["group_size"]
+
+    if backend == "torch":
+        c["vectors_orig"] = _onload(c["vectors_orig"], resolved_device)
+        v_res = _onload(v_res, resolved_device)
+        if c["decoded_sum"] is not None:
+            c["decoded_sum"] = _onload(c["decoded_sum"], resolved_device)
+
+    if shared_cb is not None:
+        # Shared codebooks are learned unweighted; assign unweighted too.
+        vw = None
+        cb, cb_path, cb_dtype = shared_cb
+        training_count = sample_vectors or len(v_res)
+    else:
+        vw = c.get("vector_weights") if not is_scalar_stage else None
+        sw = c.get("sample_weights") if not is_scalar_stage else None
+        cache_key = (
+            _codebook_cache_key(
+                [
+                    "per-tensor",
+                    src_sig,
+                    c["name"],
+                    c_group_size,
+                    k,
+                    sample_vectors,
+                    iterations,
+                    backend,
+                    normalization,
+                    rotation,
+                    rotation_seed,
+                    outlier_frac,
+                    max_tensors,
+                    stage_i,
+                    _weights_digest(c.get("sample_weights")),
+                ]
+            )
+            if stage_i == 0
+            else None
+        )
+        cached = (
+            _codebook_cache_load(codebook_cache_dir, cache_key) if cache_key else None
+        )
+        if cached is not None:
+            cb = cached
+            training_count = sample_vectors or len(v_res)
+        else:
+            training, sw_train = _sample_vectors_and_weights(v_res, sw, sample_vectors)
+            cb_seed = _derive_seed(
+                ["per-tensor", src_sig, c["name"], c_group_size, k, stage_i]
+            )
+            cb, _, _ = learn_codebook_auto(
+                training,
+                min(k, len(training)),
+                iterations,
+                backend,
+                resolved_device,
+                vector_weights=vw,
+                seed=cb_seed,
+                sample_weights=sw_train,
+            )
+            training_count = len(training)
+            if cache_key:
+                _codebook_cache_save(codebook_cache_dir, cache_key, cb)
+
+        # Round centroids to storage precision BEFORE assignment so the
+        # indices, metrics, and on-disk codebook all agree exactly.
+        cb, cb_dtype = _cast_codebook_storage(cb, dtype=codebook_dtype)
+        cb_path = codebook_path_dir / (
+            f"{safe}.codebook.f32"
+            if (short_names and n_stages == 1)
+            else f"{safe}.s{stage_i}.codebook.f32"
+        )
+        _write_codebook(cb_path, cb, dtype=cb_dtype)
+
+    indices, _ = quantize_vectors_auto(
+        v_res, cb, backend, resolved_device, vector_weights=vw
+    )
+    c["stages_data"][stage_i] = {
+        "cb": cb,
+        "indices": indices,
+        "group_size": c_group_size,
+    }
+    index_bits = _index_bits_for_size(len(cb))
+    idx_path = codebook_path_dir / (
+        f"{safe}.indices"
+        if (short_names and n_stages == 1)
+        else f"{safe}.s{stage_i}.indices"
+    )
+    _, idx_encoding = _write_indices(idx_path, indices, index_bits)
+    stage_bytes = idx_path.stat().st_size
+
+    decoded_raw = _decode_to_vectors_format(
+        v_res, cb, indices, backend, resolved_device
+    )
+    decoded = (
+        decoded_raw.reshape(c["vectors_residual"].shape)
+        if is_scalar_stage
+        else decoded_raw
+    )
+    if c["decoded_sum"] is None:
+        c["decoded_sum"] = decoded
+    else:
+        c["decoded_sum"] = c["decoded_sum"] + decoded
+    c["vectors_residual"] = _vectors_subtract(c["vectors_orig"], c["decoded_sum"])
+
+    if backend == "torch":
+        c["vectors_residual"] = _offload(c["vectors_residual"])
+        c["decoded_sum"] = _offload(c["decoded_sum"])
+        c["vectors_orig"] = _offload(c["vectors_orig"])
+        try:
+            import torch as _t
+            _t.cuda.empty_cache()
+        except Exception:
+            pass
+
+    if em_aq_cleanup and n_stages > 1 and em_aq_passes > 0 and stage_i == n_stages - 1:
+        c.pop("vectors_residual", None)
+        c.pop("decoded_sum", None)
+        import gc
+        gc.collect()
+
+    c["stages_meta"].append(
+        {
+            "stage": stage_i,
+            "codebook": str(cb_path.relative_to(out_dir)),
+            "codebook_size": len(cb),
+            "codebook_dtype": cb_dtype,
+            "index_bits": index_bits,
+            "packed": index_bits % 8 != 0,
+            "encoding": idx_encoding,
+            "indices": str(idx_path.relative_to(out_dir)),
+            "index_bytes": stage_bytes,
+            "training_vector_count": training_count,
+            "codebook_family": c["family"],
+            "group_size": c_group_size,
+        }
+    )
+    return stage_bytes
+
+
 def process_streamed_per_tensor_candidate(ctx: PackCtx, c: dict, stream_index: int) -> None:
     # Unpack resolved config so the body below reads exactly as it did inline.
     backend = ctx.backend
@@ -145,136 +330,14 @@ def process_streamed_per_tensor_candidate(ctx: PackCtx, c: dict, stream_index: i
             progress_file,
             f"Quantizing {c['name']} ({stream_index}) | Stage {stage_i + 1}/{n_stages} (Spec: {k_spec})",
         )
-        safe = _safe_tensor_name(c["name"])
-        is_scalar_stage = isinstance(k_spec, str) and k_spec.startswith("s")
-        if is_scalar_stage:
-            k = 1 << int(k_spec[1:])
-            v_res = c["vectors_residual"].reshape(-1, 1)
-            c_group_size = 1
-        else:
-            k = int(k_spec)
-            v_res = c["vectors_residual"]
-            c_group_size = c["group_size"]
-
-        if backend == "torch":
-            c["vectors_orig"] = _onload(c["vectors_orig"], resolved_device)
-            v_res = _onload(v_res, resolved_device)
-            if c["decoded_sum"] is not None:
-                c["decoded_sum"] = _onload(c["decoded_sum"], resolved_device)
-
-        cache_key = (
-            _codebook_cache_key(
-                [
-                    "per-tensor",
-                    src_sig,
-                    c["name"],
-                    c_group_size,
-                    k,
-                    sample_vectors,
-                    iterations,
-                    backend,
-                    normalization,
-                    rotation,
-                    rotation_seed,
-                    outlier_frac,
-                    max_tensors,
-                    stage_i,
-                    _weights_digest(c.get("sample_weights")),
-                ]
-            )
-            if stage_i == 0
-            else None
-        )
-        vw = c.get("vector_weights") if not is_scalar_stage else None
-        sw = c.get("sample_weights") if not is_scalar_stage else None
-        cached = _codebook_cache_load(codebook_cache_dir, cache_key) if cache_key else None
-        if cached is not None:
-            cb = cached
-            training_count = sample_vectors or len(v_res)
-        else:
-            training, sw_train = _sample_vectors_and_weights(v_res, sw, sample_vectors)
-            cb_seed = _derive_seed(
-                ["per-tensor", src_sig, c["name"], c_group_size, k, stage_i]
-            )
-            cb, _, _ = learn_codebook_auto(
-                training,
-                min(k, len(training)),
-                iterations,
-                backend,
-                resolved_device,
-                vector_weights=vw,
-                seed=cb_seed,
-                sample_weights=sw_train,
-            )
-            training_count = len(training)
-            if cache_key:
-                _codebook_cache_save(codebook_cache_dir, cache_key, cb)
-
-        # Round centroids to storage precision BEFORE assignment so the
-        # indices, metrics, and on-disk codebook all agree exactly.
-        cb, cb_dtype = _cast_codebook_storage(cb, dtype=codebook_dtype)
-        cb_path = tensor_dir / (
-            f"{safe}.codebook.f32" if n_stages == 1 else f"{safe}.s{stage_i}.codebook.f32"
-        )
-        _write_codebook(cb_path, cb, dtype=cb_dtype)
-
-        indices, _ = quantize_vectors_auto(v_res, cb, backend, resolved_device, vector_weights=vw)
-        c["stages_data"][stage_i] = {
-            "cb": cb,
-            "indices": indices,
-            "group_size": c_group_size,
-        }
-        index_bits = _index_bits_for_size(len(cb))
-        idx_path = tensor_dir / (
-            f"{safe}.indices" if n_stages == 1 else f"{safe}.s{stage_i}.indices"
-        )
-        _, idx_encoding = _write_indices(idx_path, indices, index_bits)
-        stage_bytes = idx_path.stat().st_size
-        total_index_bytes += stage_bytes
-
-        decoded_raw = _decode_to_vectors_format(v_res, cb, indices, backend, resolved_device)
-        decoded = decoded_raw.reshape(c["vectors_residual"].shape) if is_scalar_stage else decoded_raw
-        if c["decoded_sum"] is None:
-            c["decoded_sum"] = decoded
-        else:
-            c["decoded_sum"] = c["decoded_sum"] + decoded
-        c["vectors_residual"] = _vectors_subtract(c["vectors_orig"], c["decoded_sum"])
-
-        if backend == "torch":
-            c["vectors_residual"] = _offload(c["vectors_residual"])
-            c["decoded_sum"] = _offload(c["decoded_sum"])
-            c["vectors_orig"] = _offload(c["vectors_orig"])
-            try:
-                import torch as _t
-                _t.cuda.empty_cache()
-            except Exception:
-                pass
-
-        if (
-            n_stages > 1
-            and em_aq_passes > 0
-            and stage_i == n_stages - 1
-        ):
-            c.pop("vectors_residual", None)
-            c.pop("decoded_sum", None)
-            import gc
-            gc.collect()
-
-        c["stages_meta"].append(
-            {
-                "stage": stage_i,
-                "codebook": str(cb_path.relative_to(out_dir)),
-                "codebook_size": len(cb),
-                "codebook_dtype": cb_dtype,
-                "index_bits": index_bits,
-                "packed": index_bits % 8 != 0,
-                "encoding": idx_encoding,
-                "indices": str(idx_path.relative_to(out_dir)),
-                "index_bytes": stage_bytes,
-                "training_vector_count": training_count,
-                "codebook_family": c["family"],
-                "group_size": c_group_size,
-            }
+        total_index_bytes += _quantize_and_record_stage(
+            ctx,
+            c,
+            stage_i,
+            k_spec=k_spec,
+            codebook_path_dir=tensor_dir,
+            short_names=True,
+            em_aq_cleanup=True,
         )
 
     # Post-assignment strategies, applied in registry order (error_compensation ->
@@ -452,161 +515,24 @@ def process_batched_candidates(ctx: PackCtx, candidates: list) -> dict:
                 progress_file,
                 f"Quantizing {c['name']} ({i + 1}/{len(candidates)}) | Stage {stage_i + 1}/{n_stages} (Spec: {k_spec})",
             )
-            safe = _safe_tensor_name(c["name"])
 
-            # --- SCALAR STAGE DETECTION ---
-            is_scalar_stage = isinstance(k_spec, str) and k_spec.startswith("s")
-            if is_scalar_stage:
-                k = 1 << int(k_spec[1:])
-                # Reshape residual to scalar [N*G, 1]
-                v_res = c["vectors_residual"].reshape(-1, 1)
-                c_group_size = 1
-            else:
-                k = int(k_spec)
-                v_res = c["vectors_residual"]
-                c_group_size = c["group_size"]
-
-            if backend == "torch":
-                c["vectors_orig"] = _onload(c["vectors_orig"], resolved_device)
-                v_res = _onload(v_res, resolved_device)
-                if c["decoded_sum"] is not None:
-                    c["decoded_sum"] = _onload(c["decoded_sum"], resolved_device)
-
-            # Learn or Load Codebook
+            # Shared codebooks (global/family) are pre-trained above; the per-tensor
+            # branch learns + writes its own inside the helper.
             if codebook_mode in {"global", "family"}:
-                # Shared codebooks are learned unweighted; assign unweighted too.
-                vw = None
                 key = "global" if codebook_mode == "global" else c["family"]
-                cb, cb_path, cb_dtype = stage_codebooks[key]
-                training_count = sample_vectors or len(v_res)
+                shared_cb = stage_codebooks[key]
             else:
-                vw = c.get("vector_weights") if not is_scalar_stage else None
-                cache_key = (
-                    _codebook_cache_key(
-                        [
-                            "per-tensor",
-                            src_sig,
-                            c["name"],
-                            c_group_size,
-                            k,
-                            sample_vectors,
-                            iterations,
-                            backend,
-                            normalization,
-                            rotation,
-                            rotation_seed,
-                            outlier_frac,
-                            max_tensors,
-                            stage_i,
-                            _weights_digest(c.get("sample_weights")),
-                        ]
-                    )
-                    if stage_i == 0
-                    else None
-                )
-                cached = (
-                    _codebook_cache_load(codebook_cache_dir, cache_key)
-                    if cache_key
-                    else None
-                )
-                if cached is not None:
-                    cb = cached
-                    training_count = sample_vectors or len(v_res)
-                else:
-                    sw = c.get("sample_weights") if not is_scalar_stage else None
-                    training, sw_train = _sample_vectors_and_weights(
-                        v_res, sw, sample_vectors
-                    )
-                    cb_seed = _derive_seed(
-                        ["per-tensor", src_sig, c["name"], c_group_size, k, stage_i]
-                    )
-                    cb, _, _ = learn_codebook_auto(
-                        training,
-                        min(k, len(training)),
-                        iterations,
-                        backend,
-                        resolved_device,
-                        vector_weights=vw,
-                        seed=cb_seed,
-                        sample_weights=sw_train,
-                    )
-                    training_count = len(training)
-                    if cache_key:
-                        _codebook_cache_save(codebook_cache_dir, cache_key, cb)
+                shared_cb = None
 
-                cb, cb_dtype = _cast_codebook_storage(cb, dtype=codebook_dtype)
-                cb_path = tensor_dir / f"{safe}.s{stage_i}.codebook.f32"
-                _write_codebook(cb_path, cb, dtype=cb_dtype)
-
-            indices, _ = quantize_vectors_auto(
-                v_res, cb, backend, resolved_device, vector_weights=vw
-            )
-
-            # Cache for joint refinement
-            c["stages_data"][stage_i] = {
-                "cb": cb,
-                "indices": indices,
-                "group_size": c_group_size
-            }
-            index_bits = _index_bits_for_size(len(cb))
-            idx_path = tensor_dir / f"{safe}.s{stage_i}.indices"
-            _, idx_encoding = _write_indices(idx_path, indices, index_bits)
-            stage_bytes = idx_path.stat().st_size
-            total_index_bytes += stage_bytes
-
-            # Decode and update sum/residual
-            # Re-group decoded scalar back to original vector group size if needed
-            decoded_raw = _decode_to_vectors_format(
-                v_res, cb, indices, backend, resolved_device
-            )
-            if is_scalar_stage:
-                decoded = decoded_raw.reshape(c["vectors_residual"].shape)
-            else:
-                decoded = decoded_raw
-
-            if c["decoded_sum"] is None:
-                c["decoded_sum"] = decoded
-            else:
-                c["decoded_sum"] = c["decoded_sum"] + decoded
-
-            c["vectors_residual"] = _vectors_subtract(
-                c["vectors_orig"], c["decoded_sum"]
-            )
-
-            if backend == "torch":
-                c["vectors_residual"] = _offload(c["vectors_residual"])
-                c["decoded_sum"] = _offload(c["decoded_sum"])
-                c["vectors_orig"] = _offload(c["vectors_orig"])
-                try:
-                    import torch as _t
-                    _t.cuda.empty_cache()
-                except Exception: pass
-
-            # If we are doing EM-AQ, we don't need residual/decoded_sum in RAM
-            # because EM-AQ recalculates them from vectors_orig.
-            if n_stages > 1 and codebook_mode == "per-tensor" and em_aq_passes > 0 and stage_i == n_stages - 1:
-                if "vectors_residual" in c:
-                    del c["vectors_residual"]
-                if "decoded_sum" in c:
-                    del c["decoded_sum"]
-                import gc
-                gc.collect()
-
-            c["stages_meta"].append(
-                {
-                    "stage": stage_i,
-                    "codebook": str(cb_path.relative_to(out_dir)),
-                    "codebook_size": len(cb),
-                    "codebook_dtype": cb_dtype,
-                    "index_bits": index_bits,
-                    "packed": index_bits % 8 != 0,
-                    "encoding": idx_encoding,
-                    "indices": str(idx_path.relative_to(out_dir)),
-                    "index_bytes": stage_bytes,
-                    "training_vector_count": training_count,
-                    "codebook_family": c["family"],
-                    "group_size": c_group_size,
-                }
+            total_index_bytes += _quantize_and_record_stage(
+                ctx,
+                c,
+                stage_i,
+                k_spec=k_spec,
+                codebook_path_dir=tensor_dir,
+                short_names=False,
+                em_aq_cleanup=(shared_cb is None),
+                shared_cb=shared_cb,
             )
 
     if n_stages > 1 and codebook_mode == "per-tensor" and em_aq_passes > 0:
