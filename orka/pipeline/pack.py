@@ -60,6 +60,13 @@ from orka.codebook import (
 )
 from orka.metrics import _stage_quality_metrics
 from orka.quant import classify_tensor_family
+from orka.pipeline.pack_helpers import (
+    _numpy_vectors_from_tensor,
+    _sample_vectors_and_weights,
+    _torch_vectors_from_tensor,
+    _weights_digest,
+)
+from orka.pipeline.pack_refine import _run_em_aq_refinement
 from orka.transforms import (
     _apply_normalization,
     _extract_outliers,
@@ -67,93 +74,9 @@ from orka.transforms import (
 )
 
 
-def _weights_digest(sample_weights) -> str:
-    """Cache-key component for importance weights. Content-addressed so a
-    cached codebook is never reused when calibration activations changed."""
-    if sample_weights is None:
-        return "unweighted"
-    import hashlib
-
-    arr = (
-        sample_weights.detach().cpu().numpy()
-        if hasattr(sample_weights, "detach")
-        else sample_weights
-    )
-    import numpy as np
-
-    payload = np.asarray(arr, dtype="<f4").tobytes()
-    return "sw-" + hashlib.blake2b(payload, digest_size=8).hexdigest()
-
-
-def _sample_vectors_and_weights(vectors, weights, sample_vectors: int | None):
-    """Sample training rows and their per-sample weights at identical positions.
-
-    Mirrors ``_sample_vector_rows`` (deterministic linspace positions) so the
-    weight of each sampled row stays aligned with the row itself.
-    """
-    if (
-        sample_vectors is None
-        or sample_vectors <= 0
-        or sample_vectors >= len(vectors)
-    ):
-        return vectors, weights
-    if _is_torch_tensor(vectors):
-        import torch
-
-        positions = (
-            torch.linspace(
-                0,
-                len(vectors) - 1,
-                steps=sample_vectors,
-                device=vectors.device,
-                dtype=torch.float64,
-            )
-            .round()
-            .to(dtype=torch.long)
-            .clamp_(max=len(vectors) - 1)
-        )
-        sampled = vectors.index_select(0, positions)
-        if weights is None:
-            return sampled, None
-        if _is_torch_tensor(weights):
-            return sampled, weights.index_select(0, positions.to(weights.device))
-        return sampled, weights[positions.detach().cpu().numpy()]
-    import numpy as np
-
-    positions = np.linspace(0, len(vectors) - 1, sample_vectors, dtype=np.int64)
-    sampled = vectors[positions]
-    return sampled, (weights[positions] if weights is not None else None)
-
-
-def _numpy_vectors_from_tensor(tensor: object, group_size: int, limit: int | None):
-    try:
-        import numpy as np
-    except Exception as exc:
-        raise RuntimeError("NumPy backend requires numpy") from exc
-    flat = _numpy_float32_array(tensor).reshape(-1)
-    if limit is not None:
-        flat = flat[:limit]
-    original_len = int(flat.shape[0])
-    remainder = original_len % group_size
-    if remainder:
-        flat = np.pad(flat, (0, group_size - remainder), mode="constant")
-    return original_len, int(flat.shape[0]), flat.reshape(-1, group_size)
-
-
-def _torch_vectors_from_tensor(
-    tensor: object, group_size: int, limit: int | None, device: str
-):
-    import torch
-
-    _, arr = _torch_f32(tensor, device)
-    flat = arr.reshape(-1)
-    if limit is not None:
-        flat = flat[:limit]
-    original_len = int(flat.shape[0])
-    remainder = original_len % group_size
-    if remainder:
-        flat = torch.nn.functional.pad(flat, (0, group_size - remainder))
-    return original_len, int(flat.shape[0]), flat.reshape(-1, group_size)
+# Vector-prep helpers (_weights_digest, _sample_vectors_and_weights,
+# _numpy_vectors_from_tensor, _torch_vectors_from_tensor) live in
+# orka.pipeline.pack_helpers and are imported above.
 
 
 def _persist_tensor_sidecars(c: dict, tensor_dir: Path, out_dir: Path) -> tuple:
@@ -429,159 +352,8 @@ def _persist_manifest(
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
-def _offload_to_cpu(t):
-    """Move torch tensor to CPU; passthrough numpy/list."""
-    if _is_torch_tensor(t):
-        return t.detach().cpu()
-    return t
-
-
-def _run_em_aq_refinement(
-    *,
-    candidates: list,
-    n_stages: int,
-    skipped_tensors: set,
-    sample_vectors: int | None,
-    backend: str,
-    resolved_device: str,
-    tensor_dir: Path,
-    progress_file: Path | None,
-    em_aq_passes: int = 3,
-) -> None:
-    if em_aq_passes <= 0:
-        _report_progress(progress_file, "--- EM-AQ disabled (em_aq_passes=0) ---")
-    else:
-        _report_progress(progress_file, "--- Starting Joint Optimization (EM-AQ) ---")
-    joint_iterations = max(0, int(em_aq_passes))
-
-    def _is_skipped(c: dict) -> bool:
-        base = c["name"].replace(".weight", "")
-        return base in skipped_tensors or c["name"] in skipped_tensors
-
-    for i, c in enumerate(candidates):
-        _check_ram_cap()
-        if _is_skipped(c):
-            continue
-            
-        c_n_stages = len(c["stages_data"])
-        
-        # 1. Decode current full_sum
-        full_sum = None
-        for stage_i in range(c_n_stages):
-            sd = c["stages_data"][stage_i]
-            s_group_size = sd.get("group_size", c["group_size"])
-            t_template = c["vectors_orig"]
-            if s_group_size == 1 and c["group_size"] > 1:
-                t_template = c["vectors_orig"].reshape(-1, 1)
-
-            dec = _decode_to_vectors_format(
-                t_template, sd["cb"], sd["indices"], backend, resolved_device
-            )
-            if s_group_size == 1 and c["group_size"] > 1:
-                dec = dec.reshape(c["vectors_orig"].shape)
-            full_sum = dec if full_sum is None else full_sum + dec
-            del dec
-        
-        current_full_sum = full_sum
-
-        if joint_iterations > 0 and c_n_stages > 1:
-            _report_progress(progress_file, f"  Joint Refining {c['name']} ({i+1}/{len(candidates)})...")
-            # 2. EM-AQ Loop for this tensor
-            for joint_iter in range(joint_iterations):
-                for stage_i in range(c_n_stages):
-                    _check_ram_cap()
-                    sd = c["stages_data"][stage_i]
-                    s_group_size = sd.get("group_size", c["group_size"])
-                    k = c["stages_meta"][stage_i]["codebook_size"]
-
-                    if sample_vectors is not None and k >= sample_vectors:
-                        continue
-
-                    t_template = c["vectors_orig"]
-                    if s_group_size == 1 and c["group_size"] > 1:
-                        t_template = c["vectors_orig"].reshape(-1, 1)
-
-                    old_dec_raw = _decode_to_vectors_format(
-                        t_template, sd["cb"], sd["indices"], backend, resolved_device
-                    )
-                    old_dec = old_dec_raw
-                    if s_group_size == 1 and c["group_size"] > 1:
-                        old_dec = old_dec_raw.reshape(c["vectors_orig"].shape)
-
-                    target = _vectors_subtract(
-                        c["vectors_orig"], (current_full_sum - old_dec)
-                    )
-                    
-                    target_train = target
-                    if s_group_size == 1 and c["group_size"] > 1:
-                        target_train = target.reshape(-1, 1)
-
-                    sw = c.get("sample_weights") if s_group_size > 1 else None
-                    training, sw_train = _sample_vectors_and_weights(
-                        target_train, sw, sample_vectors
-                    )
-                    vw = c.get("vector_weights") if s_group_size > 1 else None
-
-                    cb, _, _ = learn_codebook_auto(
-                        training, min(k, len(training)), 2, backend, resolved_device,
-                        vector_weights=vw, initial_codebook=sd["cb"],
-                        sample_weights=sw_train,
-                    )
-                    stage_meta = c["stages_meta"][stage_i]
-                    cb, _cb_dtype = _cast_codebook_storage(
-                        cb, dtype=stage_meta.get("codebook_dtype", "float32")
-                    )
-                    stage_meta["codebook_dtype"] = _cb_dtype
-                    indices, _ = quantize_vectors_auto(target_train, cb, backend, resolved_device, vector_weights=vw)
-
-                    new_dec_raw = _decode_to_vectors_format(
-                        target_train, cb, indices, backend, resolved_device
-                    )
-                    new_dec = new_dec_raw
-                    if s_group_size == 1 and c["group_size"] > 1:
-                        new_dec = new_dec_raw.reshape(c["vectors_orig"].shape)
-
-                    if hasattr(current_full_sum, "sub_"):
-                        # In-place PyTorch math avoids creating 3 massive intermediate tensors
-                        current_full_sum.sub_(old_dec).add_(new_dec)
-                    else:
-                        current_full_sum = (current_full_sum - old_dec) + new_dec
-                        
-                    c["stages_data"][stage_i] = {"cb": cb, "indices": indices, "group_size": s_group_size}
-
-                    safe = _safe_tensor_name(c["name"])
-                    cb_path = tensor_dir / f"{safe}.s{stage_i}.codebook.f32"
-                    _BG_WRITER.submit(_write_codebook, cb_path, cb, _cb_dtype)
-                    idx_path = tensor_dir / f"{safe}.s{stage_i}.indices"
-                    _BG_WRITER.submit(
-                        _write_indices,
-                        idx_path,
-                        indices.cpu() if hasattr(indices, "cpu") else indices,
-                        stage_meta["index_bits"],
-                        stage_meta.get("encoding", "raw"),
-                    )
-                    
-                    del old_dec_raw, old_dec, target, target_train, training, cb, indices, new_dec_raw, new_dec
-                    import gc
-                    gc.collect()
-
-        c["decoded_sum"] = _offload_to_cpu(current_full_sum)
-        del current_full_sum
-        c["refined_metrics"] = _stage_quality_metrics(c, backend)
-        c["source_flat"] = None
-        c["decoded_sum"] = None
-
-        for stage_i in range(c_n_stages):
-            if "indices" in c["stages_data"][stage_i]:
-                c["stages_data"][stage_i]["indices"] = None
-
-        if "vectors_orig" in c:
-            c["vectors_orig"] = None
-        if "vectors" in c:
-            c["vectors"] = None
-
-        import gc
-        gc.collect()
+# The EM-AQ joint-optimization phase (_run_em_aq_refinement) and _offload_to_cpu
+# live in orka.pipeline.pack_refine and are imported above.
 
 
 def pack_checkpoint(
