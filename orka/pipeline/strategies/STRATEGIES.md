@@ -66,3 +66,8 @@ The **normalization** axis is itself pluggable: `orka.transforms.normalize` keep
 `_apply_normalization` is a registry lookup, so a new mode plugs in via
 `register_normalization("my-mode", handler)` - no edit to the dispatcher (open/closed).
 Unknown / `none` falls through to a passthrough handler.
+
+The **rotation** axis is pluggable the same way: `orka.transforms.rotate` keeps a
+`ROTATION_REGISTRY` (mode -> `RotationStrategy(name, rotate, unrotate)`), so a new
+invertible rotation registers via `register_rotation(RotationStrategy(...))` - the
+`_rotate_tensor_to_2d` / `_unrotate_flat` dispatchers do not change. `none` is identity.
