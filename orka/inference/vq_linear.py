@@ -72,11 +72,13 @@ class VQLinear(nn.Module):
 
         self.register_buffer("scales", torch.ones(n_scale_blocks, dtype=torch.float16))
 
-        # Sparse correction: W_correction in COO format [out, in].
-        # Encodes both salient and outlier deltas precomputed at load time.
-        # Stored as indices [2, nnz] + values [nnz] fp32.
-        self.register_buffer("corr_indices", torch.zeros(2, 0, dtype=torch.int32))
-        self.register_buffer("corr_values", torch.zeros(0, dtype=torch.float32))
+        # Sparse correction (salient+outlier deltas) in CSR: rowptr [out+1] int32,
+        # col [nnz] int32, val [nnz] fp16. CSR is what BOTH consumers want directly -
+        # the cuSPARSE N>1 path and the warp-spmv N=1 kernel - so it is stored once
+        # (no COO + CSR duplication) and ~2.5x smaller than the old COO form.
+        self.register_buffer("corr_rowptr", torch.zeros(out_features + 1, dtype=torch.int32))
+        self.register_buffer("corr_col", torch.zeros(0, dtype=torch.int32))
+        self.register_buffer("corr_val", torch.zeros(0, dtype=torch.float16))
 
         if bias is not None:
             self.register_buffer("bias", bias.to(torch.float16))
@@ -88,20 +90,20 @@ class VQLinear(nn.Module):
     # ------------------------------------------------------------------
 
     def _correction_sparse(self) -> Optional[torch.Tensor]:
-        if self.corr_indices.numel() == 0:
+        if self.corr_col.numel() == 0:
             return None
-        # CSR, not COO: cuSPARSE CSR x dense is ~3-6x faster than COO for this
-        # correction density on CUDA, and the matmul is bit-for-bit the same.
-        # Built once and cached; rebuilt only if the device changed.
+        # Wrap the stored CSR buffers as a torch CSR sparse tensor for cuSPARSE
+        # CSR x dense (N>1 path). Built once and cached; rebuilt only on device change.
         cached = getattr(self, "_corr_sp_cache", None)
-        if cached is not None and cached.device == self.corr_indices.device:
+        if cached is not None and cached.device == self.corr_col.device:
             return cached
-        sp = torch.sparse_coo_tensor(
-            self.corr_indices.long(),
-            self.corr_values,
+        sp = torch.sparse_csr_tensor(
+            self.corr_rowptr.long(),
+            self.corr_col.long(),
+            self.corr_val.float(),
             size=(self.out_features, self.in_features),
-            device=self.corr_indices.device,
-        ).coalesce().to_sparse_csr()
+            device=self.corr_col.device,
+        )
         self._corr_sp_cache = sp
         return sp
 
@@ -113,30 +115,41 @@ class VQLinear(nn.Module):
         """Decode full W [out, in] fp32. Expensive - for testing only."""
         dev = self.scales.device
         G, B = self.group_size, self.block_size
-        total = self.out_features * self.in_features
+        M = self.out_features
+        total = M * self.in_features
         padded = math.ceil(total / G) * G
+        # Indices/scales may be stored group-major ([GPR,M]/[BPR,M]); transpose back
+        # to row-major element/block order for the dense decode.
+        gm = bool(getattr(self, "_group_major", False))
 
         decoded = torch.zeros(padded, dtype=torch.float32, device=dev)
         for s in range(self.n_stages):
             idxs = getattr(self, f"indices_{s}").long()
+            if gm and idxs.numel() == total // G:
+                idxs = idxs.view(total // G // M, M).t().reshape(-1)
             cb = getattr(self, f"codebook_{s}").float()
             decoded.add_(cb[idxs].reshape(-1))
         decoded = decoded[:total]
 
         n_blocks = math.ceil(total / B)
         pad_b = n_blocks * B - total
+        sc = self.scales
+        if gm and sc.numel() == n_blocks:
+            sc = sc.view(n_blocks // M, M).t().reshape(-1)
         if pad_b:
             decoded = F.pad(decoded, (0, pad_b))
-        decoded = (decoded.reshape(n_blocks, B) * self.scales[:n_blocks, None].float()).reshape(-1)[:total]
+        decoded = (decoded.reshape(n_blocks, B) * sc[:n_blocks, None].float()).reshape(-1)[:total]
 
-        # Apply correction directly from the (deduped) COO buffers - independent
-        # of the forward path's CSR sparse tensor.
-        if self.corr_indices.numel() > 0:
-            rows = self.corr_indices[0].long()
-            cols = self.corr_indices[1].long()
-            flat = rows * self.in_features + cols
+        # Apply correction directly from the stored CSR buffers - independent of the
+        # forward path's cached sparse tensor.
+        if self.corr_col.numel() > 0:
+            counts = (self.corr_rowptr[1:] - self.corr_rowptr[:-1]).long()
+            rows = torch.repeat_interleave(
+                torch.arange(self.out_features, device=counts.device), counts
+            )
+            flat = rows * self.in_features + self.corr_col.long()
             mask = flat < total
-            decoded[flat[mask]] += self.corr_values[mask]
+            decoded[flat[mask]] += self.corr_val.float()[mask]
 
         return decoded.reshape(self.out_features, self.in_features)
 
@@ -167,7 +180,7 @@ class VQLinear(nn.Module):
         return out.to(x.dtype)
 
     def extra_repr(self) -> str:
-        nnz = self.corr_indices.shape[1] if self.corr_indices.numel() else 0
+        nnz = int(self.corr_col.numel())
         return (
             f"out={self.out_features}, in={self.in_features}, "
             f"stages={self.n_stages}, G={self.group_size}, B={self.block_size}, "
@@ -327,12 +340,36 @@ def build_vq_linear(
         fin_arr = np.fromiter(final_vals.values(), dtype=np.float32, count=len(final_vals))
         vq_at = _vq_decoded_at(pos_arr)
         delta = fin_arr - vq_at
-        rows = (pos_arr // in_features).astype(np.int32)
-        cols = (pos_arr % in_features).astype(np.int32)
-        layer.corr_indices.resize_(2, len(rows))
-        layer.corr_indices[0].copy_(torch.from_numpy(rows))
-        layer.corr_indices[1].copy_(torch.from_numpy(cols))
-        layer.corr_values.resize_(len(delta))
-        layer.corr_values.copy_(torch.from_numpy(delta))
+        rows = (pos_arr // in_features).astype(np.int64)
+        cols = (pos_arr % in_features).astype(np.int64)
+        # CSR: sort by row, build rowptr, store col (sorted) + val (fp16).
+        order = np.argsort(rows, kind="stable")
+        cols_s = cols[order].astype(np.int32)
+        delta_s = delta[order].astype(np.float16)
+        rowptr = np.zeros(out_features + 1, dtype=np.int64)
+        rowptr[1:] = np.cumsum(np.bincount(rows, minlength=out_features))
+        layer.corr_rowptr.copy_(torch.from_numpy(rowptr.astype(np.int32)))
+        layer.corr_col.resize_(len(cols_s)).copy_(torch.from_numpy(cols_s))
+        layer.corr_val.resize_(len(delta_s)).copy_(torch.from_numpy(delta_s))
+
+    # Group-major index/scale layout ([GPR,M] / [BPR,M]) for coalesced kernel reads.
+    # Done LAST: the correction delta above reads row-major indices. In-place copy_
+    # keeps the buffers registered; the transient transpose copy is freed at load
+    # time (not during inference), so the inference footprint holds only one layout.
+    if in_features % group_size == 0 and in_features % block_size == 0:
+        gpr = in_features // group_size
+        bpr = in_features // block_size
+        ok = True
+        for s in range(n_stages):
+            buf = getattr(layer, f"indices_{s}")
+            if buf.numel() != out_features * gpr:
+                ok = False
+                break
+        if ok and layer.scales.numel() == out_features * bpr:
+            for s in range(n_stages):
+                buf = getattr(layer, f"indices_{s}")
+                buf.copy_(buf.view(out_features, gpr).t().contiguous().reshape(-1))
+            layer.scales.copy_(layer.scales.view(out_features, bpr).t().contiguous().reshape(-1))
+            layer._group_major = True
 
     return layer.to(device)
