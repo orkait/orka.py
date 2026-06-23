@@ -59,12 +59,12 @@ __global__ void gemv_f4(
 
 // Correction: y[m] += sum_{j in row m} val[j] * x[col[j]]   (warp per row)
 __global__ void spmv_warp(
-    const int* __restrict__ rp, const int* __restrict__ col, const float* __restrict__ val,
+    const int* __restrict__ rp, const int* __restrict__ col, const __half* __restrict__ val,
     const __half* __restrict__ x, float* __restrict__ y, int M){
   int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5; int lane = threadIdx.x & 31;
   if (warp >= M) return;
   int s = rp[warp], e = rp[warp + 1]; float acc = 0.0f;
-  for (int j = s + lane; j < e; j += 32) acc += val[j] * __half2float(__ldg(&x[col[j]]));
+  for (int j = s + lane; j < e; j += 32) acc += __half2float(val[j]) * __half2float(__ldg(&x[col[j]]));
   #pragma unroll
   for (int o = 16; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffff, acc, o);
   if (lane == 0) y[warp] += acc;
@@ -84,7 +84,7 @@ torch::Tensor decode(torch::Tensor i0, torch::Tensor i1, torch::Tensor cb0, torc
 
 void correct(torch::Tensor y, torch::Tensor rp, torch::Tensor col, torch::Tensor val, torch::Tensor x, int M){
   int th = 128, bx = (M * 32 + th - 1) / th;
-  spmv_warp<<<bx, th>>>(rp.data_ptr<int>(), col.data_ptr<int>(), val.data_ptr<float>(),
+  spmv_warp<<<bx, th>>>(rp.data_ptr<int>(), col.data_ptr<int>(), (const __half*)val.data_ptr<at::Half>(),
                         (const __half*)x.data_ptr<at::Half>(), y.data_ptr<float>(), M);
 }
 '''
@@ -167,17 +167,11 @@ def _build_buffers(layer, M, GPR, BPR):
     sc = layer.scales.view(M, BPR).t().contiguous().reshape(-1)
     c0 = layer.codebook_0.reshape(-1).contiguous()
     c1 = layer.codebook_1.reshape(-1).contiguous()
+    # Reuse the layer's registered CSR correction buffers directly - no rebuild,
+    # no second copy (this is the same data the N>1 cuSPARSE path uses).
     csr = None
-    if layer.corr_indices.numel() > 0:
-        rows = layer.corr_indices[0].long()
-        cols = layer.corr_indices[1].int()
-        vals = layer.corr_values.float()
-        order = torch.argsort(rows, stable=True)
-        col_s = cols[order].contiguous()
-        val_s = vals[order].contiguous()
-        rp = torch.zeros(M + 1, dtype=torch.int32, device=rows.device)
-        rp[1:] = torch.bincount(rows, minlength=M).cumsum(0).int()
-        csr = (rp.contiguous(), col_s, val_s)
+    if layer.corr_col.numel() > 0:
+        csr = (layer.corr_rowptr, layer.corr_col, layer.corr_val)
     cache = (i0, i1, c0, c1, sc, csr)
     layer._cuda_decode_cache = cache
     return cache

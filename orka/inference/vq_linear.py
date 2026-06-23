@@ -72,11 +72,13 @@ class VQLinear(nn.Module):
 
         self.register_buffer("scales", torch.ones(n_scale_blocks, dtype=torch.float16))
 
-        # Sparse correction: W_correction in COO format [out, in].
-        # Encodes both salient and outlier deltas precomputed at load time.
-        # Stored as indices [2, nnz] + values [nnz] fp32.
-        self.register_buffer("corr_indices", torch.zeros(2, 0, dtype=torch.int32))
-        self.register_buffer("corr_values", torch.zeros(0, dtype=torch.float32))
+        # Sparse correction (salient+outlier deltas) in CSR: rowptr [out+1] int32,
+        # col [nnz] int32, val [nnz] fp16. CSR is what BOTH consumers want directly -
+        # the cuSPARSE N>1 path and the warp-spmv N=1 kernel - so it is stored once
+        # (no COO + CSR duplication) and ~2.5x smaller than the old COO form.
+        self.register_buffer("corr_rowptr", torch.zeros(out_features + 1, dtype=torch.int32))
+        self.register_buffer("corr_col", torch.zeros(0, dtype=torch.int32))
+        self.register_buffer("corr_val", torch.zeros(0, dtype=torch.float16))
 
         if bias is not None:
             self.register_buffer("bias", bias.to(torch.float16))
@@ -88,20 +90,20 @@ class VQLinear(nn.Module):
     # ------------------------------------------------------------------
 
     def _correction_sparse(self) -> Optional[torch.Tensor]:
-        if self.corr_indices.numel() == 0:
+        if self.corr_col.numel() == 0:
             return None
-        # CSR, not COO: cuSPARSE CSR x dense is ~3-6x faster than COO for this
-        # correction density on CUDA, and the matmul is bit-for-bit the same.
-        # Built once and cached; rebuilt only if the device changed.
+        # Wrap the stored CSR buffers as a torch CSR sparse tensor for cuSPARSE
+        # CSR x dense (N>1 path). Built once and cached; rebuilt only on device change.
         cached = getattr(self, "_corr_sp_cache", None)
-        if cached is not None and cached.device == self.corr_indices.device:
+        if cached is not None and cached.device == self.corr_col.device:
             return cached
-        sp = torch.sparse_coo_tensor(
-            self.corr_indices.long(),
-            self.corr_values,
+        sp = torch.sparse_csr_tensor(
+            self.corr_rowptr.long(),
+            self.corr_col.long(),
+            self.corr_val.float(),
             size=(self.out_features, self.in_features),
-            device=self.corr_indices.device,
-        ).coalesce().to_sparse_csr()
+            device=self.corr_col.device,
+        )
         self._corr_sp_cache = sp
         return sp
 
@@ -129,14 +131,16 @@ class VQLinear(nn.Module):
             decoded = F.pad(decoded, (0, pad_b))
         decoded = (decoded.reshape(n_blocks, B) * self.scales[:n_blocks, None].float()).reshape(-1)[:total]
 
-        # Apply correction directly from the (deduped) COO buffers - independent
-        # of the forward path's CSR sparse tensor.
-        if self.corr_indices.numel() > 0:
-            rows = self.corr_indices[0].long()
-            cols = self.corr_indices[1].long()
-            flat = rows * self.in_features + cols
+        # Apply correction directly from the stored CSR buffers - independent of the
+        # forward path's cached sparse tensor.
+        if self.corr_col.numel() > 0:
+            counts = (self.corr_rowptr[1:] - self.corr_rowptr[:-1]).long()
+            rows = torch.repeat_interleave(
+                torch.arange(self.out_features, device=counts.device), counts
+            )
+            flat = rows * self.in_features + self.corr_col.long()
             mask = flat < total
-            decoded[flat[mask]] += self.corr_values[mask]
+            decoded[flat[mask]] += self.corr_val.float()[mask]
 
         return decoded.reshape(self.out_features, self.in_features)
 
@@ -167,7 +171,7 @@ class VQLinear(nn.Module):
         return out.to(x.dtype)
 
     def extra_repr(self) -> str:
-        nnz = self.corr_indices.shape[1] if self.corr_indices.numel() else 0
+        nnz = int(self.corr_col.numel())
         return (
             f"out={self.out_features}, in={self.in_features}, "
             f"stages={self.n_stages}, G={self.group_size}, B={self.block_size}, "
@@ -327,12 +331,16 @@ def build_vq_linear(
         fin_arr = np.fromiter(final_vals.values(), dtype=np.float32, count=len(final_vals))
         vq_at = _vq_decoded_at(pos_arr)
         delta = fin_arr - vq_at
-        rows = (pos_arr // in_features).astype(np.int32)
-        cols = (pos_arr % in_features).astype(np.int32)
-        layer.corr_indices.resize_(2, len(rows))
-        layer.corr_indices[0].copy_(torch.from_numpy(rows))
-        layer.corr_indices[1].copy_(torch.from_numpy(cols))
-        layer.corr_values.resize_(len(delta))
-        layer.corr_values.copy_(torch.from_numpy(delta))
+        rows = (pos_arr // in_features).astype(np.int64)
+        cols = (pos_arr % in_features).astype(np.int64)
+        # CSR: sort by row, build rowptr, store col (sorted) + val (fp16).
+        order = np.argsort(rows, kind="stable")
+        cols_s = cols[order].astype(np.int32)
+        delta_s = delta[order].astype(np.float16)
+        rowptr = np.zeros(out_features + 1, dtype=np.int64)
+        rowptr[1:] = np.cumsum(np.bincount(rows, minlength=out_features))
+        layer.corr_rowptr.copy_(torch.from_numpy(rowptr.astype(np.int32)))
+        layer.corr_col.resize_(len(cols_s)).copy_(torch.from_numpy(cols_s))
+        layer.corr_val.resize_(len(delta_s)).copy_(torch.from_numpy(delta_s))
 
     return layer.to(device)
