@@ -19,8 +19,12 @@ import unittest
 import numpy as np
 
 from orka.transforms.normalize import (
+    NORMALIZATION_REGISTRY,
+    NormalizationResult,
     _apply_block_max_scales_numpy,
     _apply_normalization,
+    normalization_modes,
+    register_normalization,
 )
 
 BLOCK = 16
@@ -104,6 +108,28 @@ class NormalizationDispatchTest(unittest.TestCase):
         self.assertIsNone(row_scales)
         self.assertIsNone(awq_cols)
         np.testing.assert_allclose(np.asarray(tensor).reshape(-1), w.reshape(-1), rtol=0, atol=0)
+
+
+class NormalizationRegistryTest(unittest.TestCase):
+    def test_modes_match_registry(self):
+        self.assertEqual(
+            set(normalization_modes()),
+            {"slrq-block", "awq", "awq-block-max", "channel-block-max", "block-max"},
+        )
+
+    def test_register_new_mode_dispatches_without_editing_chain(self):
+        sentinel = object()
+
+        def _passthrough_marker(tensor, **_):
+            arr = np.asarray(tensor, dtype=np.float32)
+            return NormalizationResult(tensor=arr, source_flat=arr.reshape(-1), awq_col_scales=sentinel)
+
+        register_normalization("unit-test-mode", _passthrough_marker)
+        try:
+            _, _, _, awq_cols, _, _ = _norm(_fixed_input(), "unit-test-mode")
+            self.assertIs(awq_cols, sentinel)  # routed to the freshly-registered handler
+        finally:
+            NORMALIZATION_REGISTRY.pop("unit-test-mode", None)
 
 
 if __name__ == "__main__":

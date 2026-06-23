@@ -60,3 +60,9 @@ gates, not the loop - so the loop never changes.
 Base transforms (normalization / rotation / outliers / RVQ) are not post-assignment
 strategies - they run pre-stage and stay in `transforms` / `codebook`, catalogued by
 reference above.
+
+The **normalization** axis is itself pluggable: `orka.transforms.normalize` keeps a
+`NORMALIZATION_REGISTRY` (mode string -> handler returning a `NormalizationResult`).
+`_apply_normalization` is a registry lookup, so a new mode plugs in via
+`register_normalization("my-mode", handler)` - no edit to the dispatcher (open/closed).
+Unknown / `none` falls through to a passthrough handler.
