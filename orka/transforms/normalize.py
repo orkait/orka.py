@@ -6,7 +6,8 @@ Each mode has numpy + torch implementations side by side. Dispatcher
 
 from __future__ import annotations
 
-from typing import Sequence
+from dataclasses import dataclass
+from typing import Callable, Sequence
 
 from orka._format import _fp16_storage_roundtrip
 from orka._tensor import _numpy_float32_array, _torch_f32
@@ -317,6 +318,100 @@ def _normalize_tensor_awq_numpy(tensor, X, alpha):
     return normalized, scales.astype(np.float32), arr.reshape(-1)
 
 
+@dataclass
+class NormalizationResult:
+    """Outcome of one normalization mode. Named slots replace the old positional
+    6-tuple; each handler fills only the slots its mode produces (the rest stay None)."""
+
+    tensor: object
+    row_scales: object = None
+    source_flat: object = None
+    awq_col_scales: object = None
+    salient_weights: object = None
+    salient_indices: object = None
+
+
+# A handler maps (tensor + resolved context) -> NormalizationResult. The context is passed
+# as keyword args; handlers accept **_ so the registry can call them uniformly.
+NormalizationHandler = Callable[..., NormalizationResult]
+
+
+def _normalize_none(tensor, *, is_torch, device, **_) -> NormalizationResult:
+    if is_torch:
+        _, arr = _torch_f32(tensor, device)
+        return NormalizationResult(tensor=arr, source_flat=arr.reshape(-1).detach().cpu())
+    arr = _numpy_float32_array(tensor)
+    return NormalizationResult(tensor=arr, source_flat=arr.reshape(-1))
+
+
+def _normalize_slrq_block(tensor, *, is_torch, device, block_scale_size, slrq_salient, **_) -> NormalizationResult:
+    fn = _normalize_tensor_slrq_block_torch if is_torch else _normalize_tensor_slrq_block_numpy
+    args = (tensor, block_scale_size, device) if is_torch else (tensor, block_scale_size)
+    t, row_scales, sal_w, sal_i, source_flat = fn(*args, salient_enabled=slrq_salient)
+    return NormalizationResult(
+        tensor=t, row_scales=row_scales, source_flat=source_flat,
+        salient_weights=sal_w, salient_indices=sal_i,
+    )
+
+
+def _normalize_awq(tensor, *, is_torch, device, name, awq_activations, awq_alpha, has_awq, **_) -> NormalizationResult:
+    if not has_awq:
+        return _normalize_none(tensor, is_torch=is_torch, device=device)
+    if is_torch:
+        t, row_scales, source_flat = _normalize_tensor_awq_torch(tensor, awq_activations[name], awq_alpha, device)
+    else:
+        t, row_scales, source_flat = _normalize_tensor_awq_numpy(tensor, awq_activations[name], awq_alpha)
+    return NormalizationResult(tensor=t, row_scales=row_scales, source_flat=source_flat)
+
+
+def _normalize_awq_block_max(tensor, *, is_torch, device, name, awq_activations, awq_alpha, has_awq, block_scale_size, **_) -> NormalizationResult:
+    if not is_torch:
+        raise RuntimeError("awq-block-max requires --backend torch")
+    if not has_awq:
+        t, row_scales, source_flat = _normalize_tensor_block_max_torch(tensor, block_scale_size, device)
+        return NormalizationResult(tensor=t, row_scales=row_scales, source_flat=source_flat)
+    t, row_scales, source_flat, awq_col_scales = _normalize_tensor_awq_block_max_torch(
+        tensor, awq_activations[name], awq_alpha, block_scale_size, device)
+    return NormalizationResult(tensor=t, row_scales=row_scales, source_flat=source_flat, awq_col_scales=awq_col_scales)
+
+
+def _normalize_channel_block_max(tensor, *, is_torch, device, block_scale_size, **_) -> NormalizationResult:
+    if is_torch:
+        t, row_scales, source_flat = _normalize_tensor_channel_block_max_torch(tensor, block_scale_size, device)
+    else:
+        t, row_scales, source_flat = _normalize_tensor_channel_block_max_numpy(tensor, block_scale_size)
+    return NormalizationResult(tensor=t, row_scales=row_scales, source_flat=source_flat)
+
+
+def _normalize_block_max(tensor, *, is_torch, device, block_scale_size, **_) -> NormalizationResult:
+    if is_torch:
+        t, row_scales, source_flat = _normalize_tensor_block_max_torch(tensor, block_scale_size, device)
+    else:
+        t, row_scales, source_flat = _normalize_tensor_block_max_numpy(tensor, block_scale_size)
+    return NormalizationResult(tensor=t, row_scales=row_scales, source_flat=source_flat)
+
+
+# Mode -> handler. Unknown / "none" falls through to _normalize_none. Register a new mode
+# with register_normalization() - the dispatcher does not change (open/closed).
+NORMALIZATION_REGISTRY: dict[str, NormalizationHandler] = {
+    "slrq-block": _normalize_slrq_block,
+    "awq": _normalize_awq,
+    "awq-block-max": _normalize_awq_block_max,
+    "channel-block-max": _normalize_channel_block_max,
+    "block-max": _normalize_block_max,
+}
+
+
+def register_normalization(mode: str, handler: NormalizationHandler) -> None:
+    """Register a normalization mode handler so it dispatches without editing the chain."""
+    NORMALIZATION_REGISTRY[mode] = handler
+
+
+def normalization_modes() -> list[str]:
+    """Modes the dispatcher recognizes (plus the implicit 'none' fallback)."""
+    return sorted(NORMALIZATION_REGISTRY)
+
+
 def _apply_normalization(
     tensor, name, normalization, awq_activations, awq_alpha,
     block_scale_size, backend, device, awq_fallbacks,
@@ -324,65 +419,22 @@ def _apply_normalization(
 ):
     is_torch = backend == "torch"
     has_awq = awq_activations is not None and name in awq_activations
-    
-    # Defaults
-    row_scales = None
-    source_flat = None
-    awq_col_scales = None
-    salient_weights = None
-    salient_indices = None
-
-    def _get_none():
-        if is_torch:
-            _, arr = _torch_f32(tensor, device)
-            return arr, None, arr.reshape(-1).detach().cpu()
-        arr = _numpy_float32_array(tensor)
-        return arr, None, arr.reshape(-1)
-
-    if normalization == "slrq-block":
-        if is_torch:
-            tensor, row_scales, salient_weights, salient_indices, source_flat = _normalize_tensor_slrq_block_torch(
-                tensor, block_scale_size, device, salient_enabled=slrq_salient)
-        else:
-            tensor, row_scales, salient_weights, salient_indices, source_flat = _normalize_tensor_slrq_block_numpy(
-                tensor, block_scale_size, salient_enabled=slrq_salient)
-    
-    elif normalization == "awq":
-        if not has_awq:
-            tensor, row_scales, source_flat = _get_none()
-        elif is_torch:
-            tensor, row_scales, source_flat = _normalize_tensor_awq_torch(
-                tensor, awq_activations[name], awq_alpha, device)
-        else:
-            tensor, row_scales, source_flat = _normalize_tensor_awq_numpy(
-                tensor, awq_activations[name], awq_alpha)
-                
-    elif normalization == "awq-block-max":
-        if not is_torch:
-            raise RuntimeError("awq-block-max requires --backend torch")
-        if not has_awq:
-            tensor, row_scales, source_flat = _normalize_tensor_block_max_torch(tensor, block_scale_size, device)
-        else:
-            tensor, row_scales, source_flat, awq_col_scales = _normalize_tensor_awq_block_max_torch(
-                tensor, awq_activations[name], awq_alpha, block_scale_size, device)
-                
-    elif normalization == "channel-block-max":
-        if is_torch:
-            tensor, row_scales, source_flat = _normalize_tensor_channel_block_max_torch(tensor, block_scale_size, device)
-        else:
-            tensor, row_scales, source_flat = _normalize_tensor_channel_block_max_numpy(tensor, block_scale_size)
-
-    elif normalization == "block-max":
-        if is_torch:
-            tensor, row_scales, source_flat = _normalize_tensor_block_max_torch(tensor, block_scale_size, device)
-        else:
-            tensor, row_scales, source_flat = _normalize_tensor_block_max_numpy(tensor, block_scale_size)
-            
-    else:
-        # No normalization
-        tensor, row_scales, source_flat = _get_none()
-
-    return tensor, row_scales, source_flat, awq_col_scales, salient_weights, salient_indices
+    handler = NORMALIZATION_REGISTRY.get(normalization, _normalize_none)
+    res = handler(
+        tensor,
+        name=name,
+        is_torch=is_torch,
+        device=device,
+        awq_activations=awq_activations,
+        awq_alpha=awq_alpha,
+        has_awq=has_awq,
+        block_scale_size=block_scale_size,
+        slrq_salient=slrq_salient,
+    )
+    return (
+        res.tensor, res.row_scales, res.source_flat,
+        res.awq_col_scales, res.salient_weights, res.salient_indices,
+    )
 
 
 def _apply_col_l2_scales(flat, shape, scales):
