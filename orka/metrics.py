@@ -240,6 +240,8 @@ def _denorm_metrics_from_flat(candidate: dict, source_flat, decoded_flat) -> dic
             decoded_flat, candidate["shape"], candidate["row_scales"]
         )
         return quality_metrics_from_flat(candidate["source_flat"], denorm)
+    # block-scales-only inverse: awq-block-max is handled in its own branch below (block +
+    # col scales). This is the narrower grouping, intentionally not stores_block_scales().
     if norm in ("block-max", "channel-block-max", "slrq-block"):
         block_size = candidate.get("block_scale_size") or 32
         if _is_numpy_array(decoded_flat):

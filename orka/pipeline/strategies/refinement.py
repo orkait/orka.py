@@ -23,6 +23,7 @@ from orka.codebook import learn_codebook_auto, quantize_vectors_auto
 from orka.metrics import _stage_quality_metrics
 from orka.pipeline.pack_config import LS_SCALE_DENOM_FLOOR, LS_SCALE_MIN_MAGNITUDE
 from orka.pipeline.pack_helpers import _sample_vectors_and_weights
+from orka.transforms.normalize import stores_block_scales
 from orka.pipeline.strategies.base import PostAssignmentStrategy
 
 
@@ -200,9 +201,7 @@ def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_di
     if (c.get("rotation") or "none") != "none":
         c.pop("_mse_v", None)
         return
-    if c.get("normalization") not in (
-        "slrq-block", "block-max", "channel-block-max", "awq-block-max"
-    ):
+    if not stores_block_scales(c.get("normalization")):
         c.pop("_mse_v", None)
         return
     scales = c.get("row_scales")

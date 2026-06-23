@@ -80,6 +80,7 @@ from orka.transforms import (
     _apply_normalization,
     _extract_outliers,
     _rotate_tensor_to_2d,
+    stores_block_scales,
 )
 
 
@@ -310,10 +311,7 @@ def _prefetch_worker(
                 "salient_weights": salient_weights, "salient_indices": salient_indices,
                 "normalization": normalization,
                 "block_scale_size": (
-                    block_scale_size
-                    if normalization
-                    in ("block-max", "channel-block-max", "awq-block-max", "slrq-block")
-                    else None
+                    block_scale_size if stores_block_scales(normalization) else None
                 ),
                 "family": family, "rotation_seed": tensor_seed,
                 "rotation": tensor_rotation,
