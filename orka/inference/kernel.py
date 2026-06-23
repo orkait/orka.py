@@ -271,6 +271,18 @@ def vq_linear_forward(layer, x: torch.Tensor) -> torch.Tensor:
             y = y + layer.bias
         return y.reshape(*orig_shape[:-1], M).to(x.dtype)
 
+    # N>1 prefill: for long-enough prompts, fused decode-to-dense + cuBLAS beats the
+    # Triton gather-GEMM (~2x). Falls back to Triton below the token threshold / on any
+    # failure / unsupported layer.
+    try:
+        from orka.inference import cuda_decode
+        if cuda_decode.supported_prefill(layer, N):
+            out = cuda_decode.forward_prefill(layer, x)
+            if out is not None:
+                return out
+    except Exception:
+        pass
+
     y = torch.empty((N, M), dtype=torch.float16, device=x_2d.device)
 
     GPR = K // G

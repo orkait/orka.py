@@ -87,6 +87,34 @@ void correct(torch::Tensor y, torch::Tensor rp, torch::Tensor col, torch::Tensor
   spmv_warp<<<bx, th>>>(rp.data_ptr<int>(), col.data_ptr<int>(), (const __half*)val.data_ptr<at::Half>(),
                         (const __half*)x.data_ptr<at::Half>(), y.data_ptr<float>(), M);
 }
+
+// Decode the full weight to dense [M,K] fp16 (row-major) for the N>1 prefill path:
+// one thread per group (g,m) writes W[m, g*8..g*8+7] = scale * (cb0[i0]+cb1[i1]).
+// The gather is paid once, then cuBLAS reuses W over all N tokens (vs the Triton
+// gather-GEMM re-gathering per tile per token).
+__global__ void ddense(
+    const unsigned short* __restrict__ i0, const unsigned short* __restrict__ i1,
+    const float4* __restrict__ cb0, const float4* __restrict__ cb1,
+    const __half* __restrict__ scale, __half* __restrict__ W, int M, int GROUPS, int GPB){
+  int gm = blockIdx.x * blockDim.x + threadIdx.x; if (gm >= M * GROUPS) return;
+  int g = gm / M, m = gm % M; int blk = g / GPB;     // group-major: i0[g*M+m]
+  float4 w0 = __ldg(&cb0[i0[gm]]), w1 = __ldg(&cb1[i1[gm]]);
+  __half2 sh = __half2half2(scale[blk * M + m]);
+  const __half2* p0 = (const __half2*)&w0; const __half2* p1 = (const __half2*)&w1;
+  __half2* out = (__half2*)(W + m * (GROUPS * 8) + g * 8);
+  #pragma unroll
+  for (int e = 0; e < 4; e++) out[e] = __hmul2(sh, __hadd2(p0[e], p1[e]));
+}
+torch::Tensor decode_dense(torch::Tensor i0, torch::Tensor i1, torch::Tensor cb0, torch::Tensor cb1,
+                           torch::Tensor scale, int M, int GROUPS, int GPB){
+  auto W = torch::empty({M, GROUPS * 8}, torch::dtype(torch::kFloat16).device(i0.device()));
+  int n = M * GROUPS, th = 256, bx = (n + th - 1) / th;
+  ddense<<<bx, th>>>(
+    (const unsigned short*)i0.data_ptr<int16_t>(), (const unsigned short*)i1.data_ptr<int16_t>(),
+    (const float4*)cb0.data_ptr<at::Half>(), (const float4*)cb1.data_ptr<at::Half>(),
+    (const __half*)scale.data_ptr<at::Half>(), (__half*)W.data_ptr<at::Half>(), M, GROUPS, GPB);
+  return W;
+}
 '''
 
 _MODULE = None          # compiled extension, or False if compilation failed
@@ -104,10 +132,12 @@ def _get_module():
             cpp_sources=(
                 "torch::Tensor decode(torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,"
                 "torch::Tensor,torch::Tensor,int,int,int,int,int);\n"
-                "void correct(torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,int);"
+                "void correct(torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,int);\n"
+                "torch::Tensor decode_dense(torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,"
+                "torch::Tensor,int,int,int);"
             ),
             cuda_sources=_CUDA_SRC,
-            functions=["decode", "correct"],
+            functions=["decode", "correct", "decode_dense"],
             verbose=False,
         )
     except Exception:
@@ -202,6 +232,53 @@ def forward_n1(layer, x: torch.Tensor):
         mod.correct(yf, csr[0], csr[1], csr[2], xf, M)
 
     y = yf.view(1, M).to(torch.float16)
+    if layer.bias is not None:
+        y = y + layer.bias
+    return y.reshape(*x.shape[:-1], M).to(x.dtype)
+
+
+# N>1 prefill: above this token count, fused decode-to-dense + cuBLAS beats the Triton
+# gather-GEMM (~2x). Below it the one-time decode cost is not amortized; use Triton.
+PREFILL_MIN_TOKENS = 256
+
+
+def supported_prefill(layer, n_tokens: int) -> bool:
+    return (
+        n_tokens >= PREFILL_MIN_TOKENS
+        and getattr(layer, "n_stages", 0) == 2
+        and getattr(layer, "group_size", 0) == 8
+        and getattr(layer, "block_size", 0) == 32
+        and getattr(layer, "_group_major", False)
+        and layer.scales.is_cuda
+        and _get_module() is not None
+    )
+
+
+def forward_prefill(layer, x: torch.Tensor):
+    """N>1 prefill via fused decode-to-dense + cuBLAS. Decodes the weight once (the
+    gather is paid once, not per token), then F.linear reuses it over all N tokens.
+    The dense weight is transient (one layer at a time, freed) so VRAM stays compressed
+    for the decode path. Returns the output, or None to fall back to Triton."""
+    import torch.nn.functional as F
+    mod = _get_module()
+    if mod is None:
+        return None
+    K, M = layer.in_features, layer.out_features
+    GPR, GPB = K // layer.group_size, layer.block_size // layer.group_size
+    c = getattr(layer, "_ddense_buf", None)
+    if c is None:
+        c = (layer.indices_0.contiguous(), layer.indices_1.contiguous(),
+             layer.codebook_0.reshape(-1).contiguous(), layer.codebook_1.reshape(-1).contiguous(),
+             layer.scales.contiguous())
+        layer._ddense_buf = c
+    i0, i1, c0, c1, sc = c
+    W = mod.decode_dense(i0, i1, c0, c1, sc, M, GPR, GPB)   # [M,K] fp16, transient
+    if layer.corr_col.numel() > 0:
+        cnt = (layer.corr_rowptr[1:] - layer.corr_rowptr[:-1]).long()
+        rows = torch.repeat_interleave(torch.arange(M, device=W.device), cnt)
+        W[rows, layer.corr_col.long()] += layer.corr_val.to(W.dtype)
+    x2 = x.reshape(-1, K)
+    y = F.linear(x2, W.to(x.dtype))
     if layer.bias is not None:
         y = y + layer.bias
     return y.reshape(*x.shape[:-1], M).to(x.dtype)
