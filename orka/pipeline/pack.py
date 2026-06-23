@@ -74,6 +74,34 @@ from orka.transforms import (
 )
 
 
+# --- Tunable thresholds ---------------------------------------------------------
+# Named so they are not magic numbers buried in the pipeline body. Values are the
+# previously-inlined literals; behaviour is unchanged.
+
+# Mixed precision: keep a layer dense (skip VQ) when its measured loss-delta from the
+# sensitivity map exceeds this.
+SENSITIVITY_SKIP_LOSS_DELTA = 1.5
+
+# Embedding tensors cap their VQ group width here even when a larger group_size is
+# requested - wide groups at a fixed codebook size collapse embedding fidelity.
+EMBEDDING_MAX_GROUP_SIZE = 8
+
+# Floor for Hessian-proxy importance weights, so no dimension/vector gets zero weight
+# (which would drop it from the weighted k-means distance metric).
+IMPORTANCE_WEIGHT_FLOOR = 1e-6
+
+# MSE-optimal scale refinement (_refine_scales_ls): a block whose residual energy <r,r>
+# is below DENOM_FLOOR is degenerate (keep its old scale); a refined scale whose
+# magnitude is below MIN_MAGNITUDE is treated as numerically zero (keep the old scale).
+LS_SCALE_DENOM_FLOOR = 1e-8
+LS_SCALE_MIN_MAGNITUDE = 1e-12
+
+# Per-tensor streaming prefetch: how many tensors the producer reads ahead, and the
+# poll timeout the consumer waits on the queue with.
+PREFETCH_QUEUE_DEPTH = 4
+PREFETCH_POLL_TIMEOUT_S = 0.1
+
+
 # Vector-prep helpers (_weights_digest, _sample_vectors_and_weights,
 # _numpy_vectors_from_tensor, _torch_vectors_from_tensor) live in
 # orka.pipeline.pack_helpers and are imported above.
@@ -475,7 +503,7 @@ def pack_checkpoint(
     if sensitivity_map is not None:
         for entry in sensitivity_map.get("layers", []):
             if (
-                entry["loss_delta"] > 1.5
+                entry["loss_delta"] > SENSITIVITY_SKIP_LOSS_DELTA
                 or "embed" in entry["layer"]
                 or "lm_head" in entry["layer"]
             ):
@@ -576,7 +604,7 @@ def pack_checkpoint(
     _passthrough: dict[str, object] = {}
 
     # Prefetch Queue for Concurrency
-    prefetch_queue = queue.Queue(maxsize=4)
+    prefetch_queue = queue.Queue(maxsize=PREFETCH_QUEUE_DEPTH)
     prefetch_done = threading.Event()
     _prefetch_exc: list[BaseException] = []
     _prefetch_state = {"candidate_count": 0}
@@ -683,7 +711,7 @@ def pack_checkpoint(
                 resolved_group_size = group_size
                 if codebook_mode == "per-tensor" and tensor_stages_resolved is None:
                     if family == "embedding":
-                        resolved_group_size = min(group_size, 8)
+                        resolved_group_size = min(group_size, EMBEDDING_MAX_GROUP_SIZE)
                     # attention/mlp/expert: keep the base group_size. Enlarging the
                     # group at fixed codebook size collapses fidelity - k centroids
                     # must tile a higher-dimensional space (measured: mlp 10.6 dB @
@@ -725,10 +753,10 @@ def pack_checkpoint(
                         )
                     groups_per_row = cols // resolved_group_size
                     h_groups = H_diag.reshape(groups_per_row, resolved_group_size)
-                    vw = h_groups.mean(dim=0).clamp(min=1e-6).tolist()
+                    vw = h_groups.mean(dim=0).clamp(min=IMPORTANCE_WEIGHT_FLOOR).tolist()
                     rows_count = padded_values // cols
                     if rows_count * cols == padded_values:
-                        sw_row = h_groups.mean(dim=1).clamp(min=1e-6)
+                        sw_row = h_groups.mean(dim=1).clamp(min=IMPORTANCE_WEIGHT_FLOOR)
                         sw_row = sw_row / sw_row.mean()
                         sw_full = sw_row.repeat(rows_count)
                         if backend == "torch":
@@ -953,10 +981,10 @@ def pack_checkpoint(
         den = (rb * rb).sum(1)
         # v is the NORMALIZED weight (orig = scale_old * v), so the LS-optimal scale
         # is s* = scale_old * <v, r> / <r, r>.
-        factor = torch.where(den > 1e-8, num / den, torch.ones(nb))
+        factor = torch.where(den > LS_SCALE_DENOM_FLOOR, num / den, torch.ones(nb))
         s_new = sc * factor
         s_new = torch.where(skip_block, sc, s_new)  # outlier blocks keep block-max
-        s_new = torch.where(torch.isfinite(s_new) & (s_new.abs() > 1e-12), s_new, sc)
+        s_new = torch.where(torch.isfinite(s_new) & (s_new.abs() > LS_SCALE_MIN_MAGNITUDE), s_new, sc)
         c["row_scales"] = _fp16_storage_roundtrip(s_new.numpy().astype(np.float32))
 
     def _process_streamed_per_tensor_candidate(c: dict, stream_index: int) -> None:
@@ -1147,7 +1175,7 @@ def pack_checkpoint(
         if _prefetch_exc:
             break
         try:
-            c = prefetch_queue.get(timeout=0.1)
+            c = prefetch_queue.get(timeout=PREFETCH_POLL_TIMEOUT_S)
         except queue.Empty:
             continue
             
