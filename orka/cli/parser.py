@@ -30,10 +30,215 @@ from orka.cli.commands import (
 )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Orka model compiler prototype")
-    sub = parser.add_subparsers(dest="command", required=True)
+def _add_pack_args(p):
+    p.add_argument("--group-size", type=int, default=8)
+    p.add_argument("--codebook-size", type=int, default=256)
+    p.add_argument(
+        "--codebook-sizes",
+        type=int,
+        nargs="+",
+        default=None,
+        help="explicit per-stage codebook sizes (overrides --codebook-size and --quant-mode)",
+    )
+    p.add_argument(
+        "--quant-mode",
+        default=None,
+        help="compositional spec like vq-8 or rvq-16-8 (per-stage bits 1..64, total <= 64; multi-stage requires the rvq- prefix)",
+    )
+    p.add_argument(
+        "--codebook-mode",
+        choices=["per-tensor", "global", "family"],
+        default="per-tensor",
+    )
+    p.add_argument(
+        "--backend", choices=["auto", "numpy", "torch"], default="auto"
+    )
+    p.add_argument(
+        "--device",
+        default="cpu",
+        help="torch backend device, for example cpu, cuda, cuda:0, or auto",
+    )
+    p.add_argument(
+        "--normalization",
+        choices=["none", "block-max", "channel-block-max", "awq", "awq-block-max", "slrq-block"],
+        default="none",
+    )
+    p.add_argument(
+        "--block-scale-size",
+        type=int,
+        default=32,
+        help="elements per block when --normalization block-max (typical 16 or 32)",
+    )
+    p.add_argument(
+        "--rotation",
+        choices=["none", "orthogonal", "hadamard"],
+        default="none",
+        help="rotation along inner axis before VQ. orthogonal: per-tensor seeded random orthogonal (any size). hadamard: block-diagonal FWHT (uses largest pow2 divisor of last dim; full FWHT if last dim is pow2).",
+    )
+    p.add_argument(
+        "--em-aq-passes",
+        type=int,
+        default=3,
+        help="number of EM-AQ joint refinement passes after greedy RVQ. 0 disables.",
+    )
+    p.add_argument(
+        "--no-slrq-salient",
+        dest="slrq_salient",
+        action="store_false",
+        default=True,
+        help="disable salient-weight extraction inside slrq-block (keeps power-of-2 anchor only).",
+    )
+    p.add_argument(
+        "--tensor-partition-count",
+        type=int,
+        default=None,
+        help="run only this partition of quantizable tensors for multi-GPU/CPU partitioning",
+    )
+    p.add_argument(
+        "--tensor-partition-index",
+        type=int,
+        default=None,
+        help="zero-based partition index, only used with --tensor-partition-count",
+    )
+    p.add_argument(
+        "--partition-worker-count",
+        type=int,
+        default=1,
+        help="max concurrent partition workers when orchestrating multi-GPU Kaggle packing",
+    )
+    p.add_argument(
+        "--rotation-seed",
+        type=int,
+        default=None,
+        help="seed for orthogonal rotation (deterministic)",
+    )
+    p.add_argument("--sample-vectors", type=int, default=None)
+    p.add_argument("--iterations", type=int, default=12)
+    p.add_argument("--max-values-per-tensor", type=int, default=None)
+    p.add_argument(
+        "--max-gpu-mem-gb",
+        type=float,
+        default=None,
+        help="strict cap on per-process GPU memory (GB)",
+    )
+    p.add_argument(
+        "--max-system-ram-gb",
+        type=float,
+        default=None,
+        help="strict cap on total system RAM (GB), enforced by the 100ms RSS poll-monitor. Hard ceiling 25GB.",
+    )
+    p.add_argument(
+        "--workload-budget-gb",
+        type=float,
+        default=None,
+        help="estimated process RAM budget (GB) used by preflight check. "
+             "Typical: SmolLM2=5, Pythia=5, Bloom=7, Qwen3-0.6B=9. "
+             "Required when --max-system-ram-gb is set.",
+    )
+    p.add_argument(
+        "--max-cpu-threads",
+        type=int,
+        default=None,
+        help="cap CPU threads (torch + OMP/MKL/OPENBLAS env + sched_setaffinity).",
+    )
+    p.add_argument(
+        "--outlier-frac",
+        type=float,
+        default=0.0,
+        help="fraction of top-magnitude weights kept as fp16 sidecar (e.g. 0.001 = 0.1%%)",
+    )
+    p.add_argument(
+        "--awq-calibration",
+        default=None,
+        help="prompts file for AWQ calibration; enables activation-aware VQ",
+    )
+    p.add_argument(
+        "--awq-model-dir",
+        default=None,
+        help="HF model dir for AWQ activation collection",
+    )
+    p.add_argument(
+        "--awq-activations-file",
+        default=None,
+        help="JSON file containing pre-calculated AWQ activations to reuse",
+    )
+    p.add_argument(
+        "--awq-alpha",
+        type=float,
+        default=0.5,
+        help="activation magnitude scaling power (default 0.5)",
+    )
+    p.add_argument("--calibration-max-prompts", type=int, default=32)
+    p.add_argument("--calibration-max-length", type=int, default=256)
+    p.add_argument(
+        "--calibration-max-samples",
+        type=int,
+        default=4096,
+        help="max activation samples retained per layer for AWQ calibration",
+    )
+    p.add_argument(
+        "--no-hessian",
+        action="store_true",
+        help="disable default Hessian-weighting (skip auto activation collection "
+        "from the bundled calibration corpus); packs unweighted and faster",
+    )
+    p.add_argument("--progress-file", help="file to write real-time progress status")
+    p.add_argument(
+        "--sensitivity-map",
+        help="JSON file from sensitivity.py to enable mixed-precision",
+    )
+    p.add_argument(
+        "--max-tensors",
+        type=int,
+        default=None,
+        help="limit pack to first N tensors (for fail-fast iteration)",
+    )
+    p.add_argument(
+        "--only-tensors",
+        nargs="+",
+        default=None,
+        help="list of exact tensor names to process; skip all others",
+    )
+    p.add_argument(
+        "--codebook-cache",
+        default=None,
+        help="dir to cache stage-0 codebooks (zero-loss reuse on identical configs)",
+    )
+    p.add_argument(
+        "--codebook-dtype",
+        choices=["float16", "int8", "float32"],
+        default="float16",
+        help="on-disk codebook precision. int8 (per-column symmetric) halves "
+             "codebook bytes - biggest win on small models where codebooks "
+             "are ~25%% of the artifact",
+    )
+    p.add_argument(
+        "--error-compensation",
+        action="store_true",
+        help="GPTQ-style block-OBS error compensation: column groups are "
+             "re-assigned left-to-right with committed error propagated into "
+             "remaining columns via the calibration Hessian inverse. Needs "
+             "--awq-calibration activations, torch backend, rotation none; "
+             "replaces EM-AQ on compensated tensors.",
+    )
+    p.add_argument(
+        "--mse-scale",
+        action="store_true",
+        help="MSE-optimal block scales: after quantization, replace each block's "
+             "max scale with the least-squares-optimal scale for its assigned "
+             "codewords (excludes salient/outlier positions). Free quality gain "
+             "(no extra bits, no inference cost). rotation none + block-max-family "
+             "normalization only.",
+    )
+    p.add_argument(
+        "--allocation-map",
+        default=None,
+        help="JSON from 'orka allocate': per-tensor measured stage specs "
+             "(requires --codebook-mode per-tensor; disables family group sizing)",
+    )
 
+
+def _add_calc_parser(sub):
     calc = sub.add_parser("calc", help="estimate Orka payload size")
     calc.add_argument(
         "--params", required=True, help="parameter count, for example 8.03b"
@@ -44,225 +249,22 @@ def build_parser() -> argparse.ArgumentParser:
     calc.add_argument("--scale-bits", type=int, default=16)
     calc.set_defaults(func=cmd_calc)
 
+
+def _add_inspect_parser(sub):
     inspect = sub.add_parser(
         "inspect", help="inspect a safetensors or PyTorch checkpoint"
     )
     inspect.add_argument("source")
     inspect.set_defaults(func=cmd_inspect)
 
-    def add_pack_args(p):
-        p.add_argument("--group-size", type=int, default=8)
-        p.add_argument("--codebook-size", type=int, default=256)
-        p.add_argument(
-            "--codebook-sizes",
-            type=int,
-            nargs="+",
-            default=None,
-            help="explicit per-stage codebook sizes (overrides --codebook-size and --quant-mode)",
-        )
-        p.add_argument(
-            "--quant-mode",
-            default=None,
-            help="compositional spec like vq-8 or rvq-16-8 (per-stage bits 1..64, total <= 64; multi-stage requires the rvq- prefix)",
-        )
-        p.add_argument(
-            "--codebook-mode",
-            choices=["per-tensor", "global", "family"],
-            default="per-tensor",
-        )
-        p.add_argument(
-            "--backend", choices=["auto", "numpy", "torch"], default="auto"
-        )
-        p.add_argument(
-            "--device",
-            default="cpu",
-            help="torch backend device, for example cpu, cuda, cuda:0, or auto",
-        )
-        p.add_argument(
-            "--normalization",
-            choices=["none", "block-max", "channel-block-max", "awq", "awq-block-max", "slrq-block"],
-            default="none",
-        )
-        p.add_argument(
-            "--block-scale-size",
-            type=int,
-            default=32,
-            help="elements per block when --normalization block-max (typical 16 or 32)",
-        )
-        p.add_argument(
-            "--rotation",
-            choices=["none", "orthogonal", "hadamard"],
-            default="none",
-            help="rotation along inner axis before VQ. orthogonal: per-tensor seeded random orthogonal (any size). hadamard: block-diagonal FWHT (uses largest pow2 divisor of last dim; full FWHT if last dim is pow2).",
-        )
-        p.add_argument(
-            "--em-aq-passes",
-            type=int,
-            default=3,
-            help="number of EM-AQ joint refinement passes after greedy RVQ. 0 disables.",
-        )
-        p.add_argument(
-            "--no-slrq-salient",
-            dest="slrq_salient",
-            action="store_false",
-            default=True,
-            help="disable salient-weight extraction inside slrq-block (keeps power-of-2 anchor only).",
-        )
-        p.add_argument(
-            "--tensor-partition-count",
-            type=int,
-            default=None,
-            help="run only this partition of quantizable tensors for multi-GPU/CPU partitioning",
-        )
-        p.add_argument(
-            "--tensor-partition-index",
-            type=int,
-            default=None,
-            help="zero-based partition index, only used with --tensor-partition-count",
-        )
-        p.add_argument(
-            "--partition-worker-count",
-            type=int,
-            default=1,
-            help="max concurrent partition workers when orchestrating multi-GPU Kaggle packing",
-        )
-        p.add_argument(
-            "--rotation-seed",
-            type=int,
-            default=None,
-            help="seed for orthogonal rotation (deterministic)",
-        )
-        p.add_argument("--sample-vectors", type=int, default=None)
-        p.add_argument("--iterations", type=int, default=12)
-        p.add_argument("--max-values-per-tensor", type=int, default=None)
-        p.add_argument(
-            "--max-gpu-mem-gb",
-            type=float,
-            default=None,
-            help="strict cap on per-process GPU memory (GB)",
-        )
-        p.add_argument(
-            "--max-system-ram-gb",
-            type=float,
-            default=None,
-            help="strict cap on total system RAM (GB), enforced by the 100ms RSS poll-monitor. Hard ceiling 25GB.",
-        )
-        p.add_argument(
-            "--workload-budget-gb",
-            type=float,
-            default=None,
-            help="estimated process RAM budget (GB) used by preflight check. "
-                 "Typical: SmolLM2=5, Pythia=5, Bloom=7, Qwen3-0.6B=9. "
-                 "Required when --max-system-ram-gb is set.",
-        )
-        p.add_argument(
-            "--max-cpu-threads",
-            type=int,
-            default=None,
-            help="cap CPU threads (torch + OMP/MKL/OPENBLAS env + sched_setaffinity).",
-        )
-        p.add_argument(
-            "--outlier-frac",
-            type=float,
-            default=0.0,
-            help="fraction of top-magnitude weights kept as fp16 sidecar (e.g. 0.001 = 0.1%%)",
-        )
-        p.add_argument(
-            "--awq-calibration",
-            default=None,
-            help="prompts file for AWQ calibration; enables activation-aware VQ",
-        )
-        p.add_argument(
-            "--awq-model-dir",
-            default=None,
-            help="HF model dir for AWQ activation collection",
-        )
-        p.add_argument(
-            "--awq-activations-file",
-            default=None,
-            help="JSON file containing pre-calculated AWQ activations to reuse",
-        )
-        p.add_argument(
-            "--awq-alpha",
-            type=float,
-            default=0.5,
-            help="activation magnitude scaling power (default 0.5)",
-        )
-        p.add_argument("--calibration-max-prompts", type=int, default=32)
-        p.add_argument("--calibration-max-length", type=int, default=256)
-        p.add_argument(
-            "--calibration-max-samples",
-            type=int,
-            default=4096,
-            help="max activation samples retained per layer for AWQ calibration",
-        )
-        p.add_argument(
-            "--no-hessian",
-            action="store_true",
-            help="disable default Hessian-weighting (skip auto activation collection "
-            "from the bundled calibration corpus); packs unweighted and faster",
-        )
-        p.add_argument("--progress-file", help="file to write real-time progress status")
-        p.add_argument(
-            "--sensitivity-map",
-            help="JSON file from sensitivity.py to enable mixed-precision",
-        )
-        p.add_argument(
-            "--max-tensors",
-            type=int,
-            default=None,
-            help="limit pack to first N tensors (for fail-fast iteration)",
-        )
-        p.add_argument(
-            "--only-tensors",
-            nargs="+",
-            default=None,
-            help="list of exact tensor names to process; skip all others",
-        )
-        p.add_argument(
-            "--codebook-cache",
-            default=None,
-            help="dir to cache stage-0 codebooks (zero-loss reuse on identical configs)",
-        )
-        p.add_argument(
-            "--codebook-dtype",
-            choices=["float16", "int8", "float32"],
-            default="float16",
-            help="on-disk codebook precision. int8 (per-column symmetric) halves "
-                 "codebook bytes - biggest win on small models where codebooks "
-                 "are ~25%% of the artifact",
-        )
-        p.add_argument(
-            "--error-compensation",
-            action="store_true",
-            help="GPTQ-style block-OBS error compensation: column groups are "
-                 "re-assigned left-to-right with committed error propagated into "
-                 "remaining columns via the calibration Hessian inverse. Needs "
-                 "--awq-calibration activations, torch backend, rotation none; "
-                 "replaces EM-AQ on compensated tensors.",
-        )
-        p.add_argument(
-            "--mse-scale",
-            action="store_true",
-            help="MSE-optimal block scales: after quantization, replace each block's "
-                 "max scale with the least-squares-optimal scale for its assigned "
-                 "codewords (excludes salient/outlier positions). Free quality gain "
-                 "(no extra bits, no inference cost). rotation none + block-max-family "
-                 "normalization only.",
-        )
-        p.add_argument(
-            "--allocation-map",
-            default=None,
-            help="JSON from 'orka allocate': per-tensor measured stage specs "
-                 "(requires --codebook-mode per-tensor; disables family group sizing)",
-        )
 
+def _add_pack_parser(sub):
     pack = sub.add_parser(
         "pack", help="pack candidate weight tensors into an .orka directory"
     )
     pack.add_argument("source")
     pack.add_argument("--out", required=True)
-    add_pack_args(pack)
+    _add_pack_args(pack)
     pack.add_argument(
         "--sequential-calibration",
         action="store_true",
@@ -272,6 +274,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pack.set_defaults(func=cmd_pack)
 
+
+def _add_kaggle_pack_parser(sub):
     kp = sub.add_parser(
         "kaggle-pack", help="Download from HF, pack on Kaggle, and upload back to HF"
     )
@@ -282,7 +286,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="output .orka directory (default on Kaggle: /kaggle/working/<slug>.orka)",
     )
     kp.add_argument("--upload-repo", help="HF repo to upload the result to")
-    add_pack_args(kp)
+    _add_pack_args(kp)
     kp.add_argument("--run-eval", action="store_true",
                     help="run perplexity eval after packing")
     kp.add_argument("--eval-prompts", default=None,
@@ -291,10 +295,14 @@ def build_parser() -> argparse.ArgumentParser:
     kp.add_argument("--eval-max-length", type=int, default=128)
     kp.set_defaults(func=cmd_kaggle_pack)
 
+
+def _add_report_parser(sub):
     report = sub.add_parser("report", help="summarize an .orka artifact")
     report.add_argument("artifact")
     report.set_defaults(func=cmd_report)
 
+
+def _add_allocate_parser(sub):
     allocate = sub.add_parser(
         "allocate",
         help="measure per-tensor rate-distortion and solve a bit allocation "
@@ -318,6 +326,8 @@ def build_parser() -> argparse.ArgumentParser:
     allocate.add_argument("--progress-file", default=None)
     allocate.set_defaults(func=cmd_allocate)
 
+
+def _add_export_vllm_parser(sub):
     export_cmd = sub.add_parser(
         "export-vllm",
         help="export to a Hugging Face model directory loadable by vLLM / "
@@ -341,6 +351,8 @@ def build_parser() -> argparse.ArgumentParser:
     export_cmd.add_argument("--device", default="cpu")
     export_cmd.set_defaults(func=cmd_export_vllm)
 
+
+def _add_correct_parser(sub):
     correct = sub.add_parser(
         "correct",
         help="add low-rank correction sidecars: W ~ decode(W) + A@B^T (fp16, "
@@ -352,6 +364,8 @@ def build_parser() -> argparse.ArgumentParser:
     correct.add_argument("--max-tensors", type=int, default=None)
     correct.set_defaults(func=cmd_correct)
 
+
+def _add_distill_parser(sub):
     distill = sub.add_parser(
         "distill",
         help="post-pack codebook distillation: indices frozen, codebooks optimized "
@@ -380,6 +394,8 @@ def build_parser() -> argparse.ArgumentParser:
     distill.add_argument("--calibration-max-samples", type=int, default=4096)
     distill.set_defaults(func=cmd_distill)
 
+
+def _add_merge_orka_parser(sub):
     merge = sub.add_parser(
         "merge-orka",
         help="merge partitioned .orka artifacts into one complete artifact",
@@ -392,12 +408,16 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("--out", required=True)
     merge.set_defaults(func=cmd_merge_orka)
 
+
+def _add_verify_parser(sub):
     verify = sub.add_parser(
         "verify", help="decode an .orka artifact and recompute source MSE"
     )
     verify.add_argument("artifact")
     verify.set_defaults(func=cmd_verify)
 
+
+def _add_reconstruct_parser(sub):
     reconstruct = sub.add_parser(
         "reconstruct", help="decode an .orka artifact into a standard format"
     )
@@ -411,6 +431,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reconstruct.set_defaults(func=cmd_reconstruct)
 
+
+def _add_sweep_parser(sub):
     sweep = sub.add_parser(
         "sweep", help="run a pack/report matrix and write a JSON summary"
     )
@@ -541,6 +563,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sweep.set_defaults(func=cmd_sweep)
 
+
+def _add_eval_parser(sub):
     eval_cmd = sub.add_parser(
         "eval", help="evaluate an .orka artifact with Hugging Face prompt loss"
     )
@@ -571,6 +595,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help="strict cap on per-process GPU memory (GB).")
     eval_cmd.set_defaults(func=cmd_eval)
 
+
+def _add_pulse_check_parser(sub):
     pulse_check_cmd = sub.add_parser(
         "pulse-check", help="fast logit-based eval (KL Divergence & Top-1 Agreement)"
     )
@@ -601,6 +627,8 @@ def build_parser() -> argparse.ArgumentParser:
                                  help="strict cap on per-process GPU memory (GB).")
     pulse_check_cmd.set_defaults(func=cmd_pulse_check)
 
+
+def _add_eval_sweep_parser(sub):
     eval_sweep_cmd = sub.add_parser(
         "eval-sweep", help="evaluate every artifact recorded in a sweep JSON"
     )
@@ -641,6 +669,8 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="strict cap on per-process GPU memory (GB).")
     eval_sweep_cmd.set_defaults(func=cmd_eval_sweep)
 
+
+def _add_sem_analyze_parser(sub):
     sem_analyze = sub.add_parser(
         "sem-analyze", help="Phase 1-3: Ingest vocabulary and discover linguistic roots/clusters"
     )
@@ -656,6 +686,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sem_analyze.set_defaults(func=cmd_sem_analyze)
 
+
+def _add_sem_map_parser(sub):
     sem_map = sub.add_parser(
         "sem-map", help="Phase 4: Link character roots to geometric concept hubs"
     )
@@ -665,11 +697,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sem_map.set_defaults(func=cmd_sem_map)
 
+
+def _add_sem_calc_parser(sub):
     sem_calc = sub.add_parser(
         "sem-calc", help="Pre-calculate AWQ activations and linguistic pillars"
     )
     sem_calc.add_argument("source", help="source checkpoint (.safetensors / .pt / .bin)")
-    add_pack_args(sem_calc)
+    _add_pack_args(sem_calc)
     sem_calc.add_argument("--out", required=True, help="output JSON for the calculated data")
     sem_calc.set_defaults(func=cmd_sem_calc)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Orka model compiler prototype")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    _add_calc_parser(sub)
+    _add_inspect_parser(sub)
+    _add_pack_parser(sub)
+    _add_kaggle_pack_parser(sub)
+    _add_report_parser(sub)
+    _add_allocate_parser(sub)
+    _add_export_vllm_parser(sub)
+    _add_correct_parser(sub)
+    _add_distill_parser(sub)
+    _add_merge_orka_parser(sub)
+    _add_verify_parser(sub)
+    _add_reconstruct_parser(sub)
+    _add_sweep_parser(sub)
+    _add_eval_parser(sub)
+    _add_pulse_check_parser(sub)
+    _add_eval_sweep_parser(sub)
+    _add_sem_analyze_parser(sub)
+    _add_sem_map_parser(sub)
+    _add_sem_calc_parser(sub)
     return parser
