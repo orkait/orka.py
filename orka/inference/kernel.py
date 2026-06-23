@@ -1,19 +1,19 @@
-"""Triton VQ-GEMM kernel: fused VQ decode + matmul.
+"""Triton VQ-GEMM kernels + the VQLinear forward dispatcher.
 
-Operation: y = x @ W.T  where W is stored as RVQ codebooks + indices.
+This file holds two things:
+  1. The Triton kernels: _vq_decode_kernel (N=1 decode matvec) and _vq_gemm_kernel
+     (N>1 tiled gather-GEMM). Both read indices/scales group-major or row-major via a
+     GROUP_MAJOR constexpr. They are the FALLBACK backend.
+  2. vq_linear_forward(): the dispatcher VQLinear.forward calls. It prefers the CUDA
+     backend (orka.inference.cuda_decode: float4 decode for N=1, fused decode-to-dense
+     + cuBLAS for N>1 prefill) and falls back to these Triton kernels when the CUDA
+     extension is unavailable or the layer is unsupported. See orka/inference/__init__.py
+     for the full dispatch map.
 
-Kernel strategy: tile over (M output features, N tokens). For each K-tile of
-BLOCK_K columns (BLOCK_K a multiple of B=32 so tl.dot's inner dim >= 16):
-  1. Vectorized 2D gather of W_vq tile [BLOCK_M, BLOCK_K]:
-       group_of_col = col // G ; within = col % G
-       flat_group   = row * GPR + group_of_col
-       idx_vals     = indices[flat_group]            (2D load)
-       w_tile      += codebook[idx_vals*G + within]  (2D gather, per stage)
-  2. Apply block scales [BLOCK_M, BLOCK_K]
-  3. acc += x_tile [BLOCK_N, BLOCK_K] @ w_tile.T [BLOCK_K, BLOCK_M]
-
-Salient + outlier corrections applied as sparse matmul after the kernel.
-All loads are 1D/2D (Triton 3.x rejects 3D pointer loads).
+Triton GEMM strategy (N>1 fallback): tile over (M out-features, N tokens); per K-tile
+gather the W_vq tile (codebook[indices] summed over stages), apply block scales, then
+acc += x_tile @ w_tile.T. Salient/outlier corrections are applied as a sparse matmul
+after the kernel. All loads are 1D/2D (Triton 3.x rejects 3D pointer loads).
 """
 
 from __future__ import annotations
@@ -231,11 +231,18 @@ def _vq_gemm_kernel(
 
 
 def vq_linear_forward(layer, x: torch.Tensor) -> torch.Tensor:
-    """Run VQLinear forward: Triton VQ-GEMM + sparse correction.
+    """VQLinear forward dispatcher. Routes to the CUDA backend (cuda_decode) first,
+    falling back to the Triton kernels in this file on any failure / unsupported layer:
 
-    x: [..., in_features]
-    returns: [..., out_features]
+        N == 1 : cuda_decode.forward_n1     -> Triton _vq_decode_kernel
+        N  > 1 : cuda_decode.forward_prefill (N>=256) -> Triton _vq_gemm_kernel
+
+    x: [..., in_features] -> [..., out_features].
     """
+    try:
+        from orka.inference import cuda_decode
+    except Exception:
+        cuda_decode = None
     G = layer.group_size
     B = layer.block_size
     K = layer.in_features
@@ -255,14 +262,14 @@ def vq_linear_forward(layer, x: torch.Tensor) -> torch.Tensor:
     # when available - ~6x over this Triton path, dense-fp16 parity at >=1B. Any
     # failure (no nvcc, unsupported layer) returns None and we fall back below.
     if N == 1:
-        try:
-            from orka.inference import cuda_decode
-            if cuda_decode.supported(layer, N):
-                out = cuda_decode.forward_n1(layer, x)
-                if out is not None:
-                    return out
-        except Exception:
-            pass
+        if cuda_decode is not None:
+            try:
+                if cuda_decode.supported(layer, N):
+                    out = cuda_decode.forward_n1(layer, x)
+                    if out is not None:
+                        return out
+            except Exception:
+                pass
         y = _vq_decode_n1(layer, x_2d)
         if layer.corr_col.numel() > 0:
             sp = layer._correction_sparse()
@@ -274,14 +281,14 @@ def vq_linear_forward(layer, x: torch.Tensor) -> torch.Tensor:
     # N>1 prefill: for long-enough prompts, fused decode-to-dense + cuBLAS beats the
     # Triton gather-GEMM (~2x). Falls back to Triton below the token threshold / on any
     # failure / unsupported layer.
-    try:
-        from orka.inference import cuda_decode
-        if cuda_decode.supported_prefill(layer, N):
-            out = cuda_decode.forward_prefill(layer, x)
-            if out is not None:
-                return out
-    except Exception:
-        pass
+    if cuda_decode is not None:
+        try:
+            if cuda_decode.supported_prefill(layer, N):
+                out = cuda_decode.forward_prefill(layer, x)
+                if out is not None:
+                    return out
+        except Exception:
+            pass
 
     y = torch.empty((N, M), dtype=torch.float16, device=x_2d.device)
 
