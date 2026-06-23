@@ -31,6 +31,7 @@ from orka._format import (
 from orka._tensor import _numpy_float32_array
 from orka.metrics import quality_metrics_from_flat
 from orka.pipeline.decode import _decode_tensor
+from orka.transforms.normalize import stores_block_scales
 from orka.transforms.rotate import _generate_orthogonal_numpy, _hadamard_block_size
 
 
@@ -152,7 +153,7 @@ def _load_decode_consts(out_dir: Path, tm: dict, device: str) -> dict:
     norm = tm.get("normalization", "none")
     consts["normalization"] = norm
     scale_np_dtype = _float_value_dtype(tm.get("scale_dtype") or "float32")
-    if norm in ("block-max", "channel-block-max", "slrq-block", "awq-block-max"):
+    if stores_block_scales(norm):
         scales = _read_float_vector(out_dir / tm["scales"], int(tm["scale_count"]), tm.get("scale_dtype") or "float32")
         consts["block_scales"] = torch.from_numpy(scales).to(device)
         consts["block_scale_size"] = int(tm.get("block_scale_size") or 32)

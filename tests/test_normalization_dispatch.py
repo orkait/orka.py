@@ -19,12 +19,14 @@ import unittest
 import numpy as np
 
 from orka.transforms.normalize import (
+    BLOCK_SCALE_NORMALIZATIONS,
     NORMALIZATION_REGISTRY,
     NormalizationResult,
     _apply_block_max_scales_numpy,
     _apply_normalization,
     normalization_modes,
     register_normalization,
+    stores_block_scales,
 )
 
 BLOCK = 16
@@ -130,6 +132,20 @@ class NormalizationRegistryTest(unittest.TestCase):
             self.assertIs(awq_cols, sentinel)  # routed to the freshly-registered handler
         finally:
             NORMALIZATION_REGISTRY.pop("unit-test-mode", None)
+
+
+class BlockScalePredicateTest(unittest.TestCase):
+    def test_membership_is_the_four_block_family_modes(self):
+        self.assertEqual(
+            set(BLOCK_SCALE_NORMALIZATIONS),
+            {"block-max", "channel-block-max", "slrq-block", "awq-block-max"},
+        )
+
+    def test_predicate_true_only_for_block_family(self):
+        for mode in ("block-max", "channel-block-max", "slrq-block", "awq-block-max"):
+            self.assertTrue(stores_block_scales(mode), mode)
+        for mode in ("none", "awq", None, "bogus"):
+            self.assertFalse(stores_block_scales(mode), mode)
 
 
 if __name__ == "__main__":
