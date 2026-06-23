@@ -65,7 +65,11 @@ from orka.pipeline.pack_helpers import (
     _torch_vectors_from_tensor,
     _weights_digest,
 )
-from orka.pipeline.pack_refine import _run_em_aq_refinement
+from orka.pipeline.strategies import (
+    _refine_scales_ls,
+    _run_em_aq_refinement,
+    maybe_compensate_candidate,
+)
 from orka.transforms import (
     _apply_normalization,
     _extract_outliers,
@@ -76,8 +80,6 @@ from orka.transforms import (
 from orka.pipeline.pack_config import (
     EMBEDDING_MAX_GROUP_SIZE,
     IMPORTANCE_WEIGHT_FLOOR,
-    LS_SCALE_DENOM_FLOOR,
-    LS_SCALE_MIN_MAGNITUDE,
     PREFETCH_POLL_TIMEOUT_S,
     PREFETCH_QUEUE_DEPTH,
     SENSITIVITY_SKIP_LOSS_DELTA,
@@ -364,7 +366,7 @@ def _persist_manifest(
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 # The EM-AQ joint-optimization phase (_run_em_aq_refinement) and _offload_to_cpu
-# live in orka.pipeline.pack_refine and are imported above.
+# live in orka.pipeline.strategies.refinement and are imported above.
 
 
 def pack_checkpoint(
@@ -752,182 +754,11 @@ def pack_checkpoint(
             return None
         return stages_spec[stage_i]
 
-    def _maybe_compensate_candidate(c: dict) -> bool:
-        """GPTQ-style block-OBS re-assignment with frozen codebooks.
+    # _maybe_compensate_candidate (GPTQ-style error compensation) lives in
+    # orka.pipeline.strategies.error_compensation; called below with captured config.
 
-        Returns True when applied (EM-AQ is then skipped: it would re-learn
-        codebooks against uncompensated residuals and undo the compensation).
-        """
-        if backend != "torch":
-            return False
-        if awq_activations is None or c["name"] not in awq_activations:
-            return False
-        if c.get("rotation", "none") != "none":
-            return False
-        shape = c["shape"]
-        if len(shape) < 2:
-            return False
-        rows = int(shape[0])
-        cols = 1
-        for s in shape[1:]:
-            cols *= int(s)
-        group = int(c["group_size"])
-        if (
-            cols % group != 0
-            or int(c["packed_values"]) != rows * cols
-            or int(c["padded_values"]) != int(c["packed_values"])
-        ):
-            return False
-        if any(
-            sd.get("group_size", group) != group
-            for sd in c["stages_data"].values()
-        ):
-            return False  # scalar stages use a different vector layout
-
-        import numpy as np
-        import torch
-
-        from orka.compensation import compensated_assign
-
-        X = torch.as_tensor(awq_activations[c["name"]], dtype=torch.float32)
-        if X.dim() != 2 or int(X.shape[1]) != cols:
-            return False
-
-        W = c["vectors_orig"]
-        W = (
-            W if _is_torch_tensor(W) else torch.as_tensor(np.asarray(W))
-        ).to(device=resolved_device, dtype=torch.float32).reshape(rows, cols)
-        stage_keys = sorted(c["stages_data"].keys())
-        cbs = []
-        for s_key in stage_keys:
-            cb = c["stages_data"][s_key]["cb"]
-            cbs.append(
-                (
-                    cb
-                    if _is_torch_tensor(cb)
-                    else torch.as_tensor(np.asarray(cb), dtype=torch.float32)
-                ).to(resolved_device)
-            )
-        _report_progress(
-            progress_file, f"  Error-compensated re-assignment: {c['name']}"
-        )
-        idxs, decoded = compensated_assign(W, cbs, group, X)
-        for s_key, idx in zip(stage_keys, idxs):
-            stage_meta = c["stages_meta"][s_key]
-            _write_indices(
-                out_dir / stage_meta["indices"],
-                idx.cpu(),
-                stage_meta["index_bits"],
-                stage_meta.get("encoding", "raw"),
-            )
-            c["stages_data"][s_key]["indices"] = idx
-        c["decoded_sum"] = decoded.reshape(-1, group)
-        c["vectors_residual"] = None
-        c["refined_metrics"] = None
-        return True
-
-    def _refine_scales_ls(c: dict) -> None:
-        """MSE-optimal block scales (post-assignment refinement).
-
-        orka stores scale = block max, so the codebook fit per block is dominated by
-        the single largest weight. For the FIXED codeword assignment, the least-squares
-        scale s* = <w, r> / <r, r> (r = normalized VQ reconstruction) minimizes the
-        per-block reconstruction error - the same idea as llm-compressor's MSE observer,
-        adapted to vector quant. Strictly reduces error at zero extra bits / inference cost.
-
-        Excludes salient/outlier override positions from the fit, and leaves outlier-
-        containing blocks at block-max (outlier sidecar values are stored scale-relative).
-        Gated to rotation=none + block-max-family normalization, where the scale acts
-        directly on the stored weights.
-        """
-        if not mse_scale:
-            return
-        if (c.get("rotation") or "none") != "none":
-            c.pop("_mse_v", None)
-            return
-        if c.get("normalization") not in (
-            "slrq-block", "block-max", "channel-block-max", "awq-block-max"
-        ):
-            c.pop("_mse_v", None)
-            return
-        scales = c.get("row_scales")
-        v = c.pop("_mse_v", None)  # clean normalized weights stashed pre-stages
-        meta = c.get("stages_meta")
-        if scales is None or v is None or not meta:
-            return
-        import numpy as np
-        import torch
-
-        from orka._format import _fp16_storage_roundtrip, _read_codebook, _read_indices
-
-        def _num(x, npd, tdt):
-            # Flat-CPU conversion; forces dtype so object-arrays of py ints/floats
-            # convert. Returns None on any non-numeric input (skip gracefully).
-            if x is None:
-                return None
-            try:
-                if _is_torch_tensor(x):
-                    return x.detach().cpu().reshape(-1).to(tdt)
-                return torch.as_tensor(np.asarray(x, dtype=npd)).reshape(-1).to(tdt)
-            except Exception:
-                return None
-
-        v = _num(v, np.float32, torch.float32)
-        sc = _num(scales, np.float32, torch.float32)
-        if v is None or sc is None:
-            return
-        total = int(v.numel())
-        bs = int(c.get("block_scale_size") or block_scale_size)
-        if bs <= 0 or total % bs != 0 or int(sc.numel()) != total // bs:
-            return
-        nb = total // bs
-        # Final normalized VQ reconstruction r = sum_s codebook_s[indices_s]. The
-        # in-memory indices are freed by EM-AQ, so read the final stored codebook +
-        # indices back from disk (exactly what decode reconstructs).
-        r = torch.zeros(total, dtype=torch.float32)
-        try:
-            for sm in meta:
-                g = int(sm.get("group_size", 8))
-                if g <= 0 or total % g != 0:
-                    return
-                cb_np = _read_codebook(
-                    out_dir / sm["codebook"], g, sm.get("codebook_dtype", "float16")
-                )
-                idx_np = _read_indices(
-                    out_dir / sm["indices"], int(sm["index_bits"]), total // g,
-                    packed=bool(sm.get("packed", False)),
-                    encoding=sm.get("encoding", "raw"),
-                )
-                cb = torch.as_tensor(np.asarray(cb_np, dtype=np.float32))
-                idx = torch.as_tensor(np.asarray(idx_np, dtype=np.int64)).reshape(-1)
-                rr = cb[idx].reshape(-1)
-                if int(rr.numel()) != total:
-                    return
-                r += rr
-        except Exception:
-            return
-        mask = torch.ones(total, dtype=torch.float32)
-        sal = _num(c.get("salient_indices"), np.int64, torch.long)
-        if sal is not None and int(sal.numel()) == nb:
-            fs = torch.arange(nb) * bs + sal
-            mask[fs[(fs >= 0) & (fs < total)]] = 0.0
-        skip_block = torch.zeros(nb, dtype=torch.bool)
-        op = _num(c.get("outlier_positions"), np.int64, torch.long)
-        if op is not None and int(op.numel()) > 0:
-            op = op[(op >= 0) & (op < total)]
-            mask[op] = 0.0
-            skip_block[(op // bs).clamp_(max=nb - 1)] = True
-        vb = (v * mask).reshape(nb, bs)
-        rb = (r * mask).reshape(nb, bs)
-        num = (vb * rb).sum(1)
-        den = (rb * rb).sum(1)
-        # v is the NORMALIZED weight (orig = scale_old * v), so the LS-optimal scale
-        # is s* = scale_old * <v, r> / <r, r>.
-        factor = torch.where(den > LS_SCALE_DENOM_FLOOR, num / den, torch.ones(nb))
-        s_new = sc * factor
-        s_new = torch.where(skip_block, sc, s_new)  # outlier blocks keep block-max
-        s_new = torch.where(torch.isfinite(s_new) & (s_new.abs() > LS_SCALE_MIN_MAGNITUDE), s_new, sc)
-        c["row_scales"] = _fp16_storage_roundtrip(s_new.numpy().astype(np.float32))
+    # _refine_scales_ls (MSE-optimal block-scale refinement) lives in
+    # orka.pipeline.strategies.refinement; called below with the captured config.
 
     def _process_streamed_per_tensor_candidate(c: dict, stream_index: int) -> None:
         nonlocal total_index_bytes
@@ -1075,7 +906,14 @@ def pack_checkpoint(
 
         compensated = False
         if error_compensation:
-            compensated = _maybe_compensate_candidate(c)
+            compensated = maybe_compensate_candidate(
+                c,
+                backend=backend,
+                awq_activations=awq_activations,
+                resolved_device=resolved_device,
+                progress_file=progress_file,
+                out_dir=out_dir,
+            )
 
         if n_stages > 1 and em_aq_passes > 0 and not compensated:
             _run_em_aq_refinement(
@@ -1091,7 +929,7 @@ def pack_checkpoint(
             )
 
         try:
-            _refine_scales_ls(c)
+            _refine_scales_ls(c, mse_scale=mse_scale, block_scale_size=block_scale_size, out_dir=out_dir)
         except Exception as _e:  # refinement is optional; never fail the pack
             c.pop("_mse_v", None)
             _report_progress(progress_file, f"  mse_scale refinement skipped: {_e}")
