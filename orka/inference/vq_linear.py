@@ -210,6 +210,7 @@ def _register_layer_buffers(layer, artifact_dir, stages, group_size, block_size,
     registered buffers. Returns the loaded scales array (or None)."""
     import numpy as np
     from orka._format import _read_codebook, _read_indices, _read_float_vector
+    from orka.transforms.normalize import stores_block_scales
 
     # --- Load codebooks + indices ---
     for s, stage in enumerate(stages):
@@ -233,7 +234,7 @@ def _register_layer_buffers(layer, artifact_dir, stages, group_size, block_size,
     # --- Load scales ---
     norm = tensor_meta.get("normalization", "none")
     scales_np = None
-    if norm in ("slrq-block", "block-max", "channel-block-max", "awq-block-max"):
+    if stores_block_scales(norm):
         scale_dtype = tensor_meta.get("scale_dtype") or "float32"
         n_scale = math.ceil(total / block_size)
         scales_full = _read_float_vector(artifact_dir / tensor_meta["scales"], int(tensor_meta["scale_count"]), scale_dtype)

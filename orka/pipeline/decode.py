@@ -18,6 +18,7 @@ from orka._format import (
 from orka.transforms.normalize import (
     _apply_block_max_scales_numpy,
     _apply_col_l2_scales_numpy,
+    stores_block_scales,
 )
 from orka.transforms.rotate import (
     _block_fwht_torch,
@@ -138,6 +139,9 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict):
             out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"]), scale_dtype
         )
         decoded = _apply_col_l2_scales_numpy(decoded, tensor_meta["shape"], scales)
+    # block-scales-only inverse: awq-block-max is NOT here - it needs block + col scales
+    # and is handled in its own branch below (this is the narrower grouping, not
+    # stores_block_scales()).
     elif norm in ("block-max", "channel-block-max", "slrq-block"):
         scales = _read_float_vector(
             out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"]), scale_dtype
@@ -243,7 +247,9 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
 
     norm = tm.get("normalization", "none")
     scale_np_dtype = _float_value_dtype(tm.get("scale_dtype") or "float32")
-    if norm in ("block-max", "channel-block-max", "awq-block-max", "slrq-block"):
+    # torch path: block scales for all four block-family modes; awq-block-max applies an
+    # extra col-scale step inside this branch (so it stays the all-four grouping here).
+    if stores_block_scales(norm):
         scales = _read_float_vector(out_dir / tm["scales"], int(tm["scale_count"]), tm.get("scale_dtype") or "float32")
         block_size = int(tm.get("block_scale_size") or 32)
         scales_t = torch.from_numpy(scales).to(device)

@@ -19,6 +19,7 @@ from orka._format import (
 )
 from orka._util import _index_bits_for_size, _report_progress, _safe_tensor_name
 from orka.metrics import _stage_quality_metrics
+from orka.transforms.normalize import stores_block_scales
 
 
 def _persist_tensor_sidecars(c: dict, tensor_dir: Path, out_dir: Path) -> tuple:
@@ -37,7 +38,7 @@ def _persist_tensor_sidecars(c: dict, tensor_dir: Path, out_dir: Path) -> tuple:
         scale_dtype = _write_float_vector(scale_path, c["row_scales"], dtype="float16")
         scale_bytes = scale_path.stat().st_size
         scale_count = len(c["row_scales"])
-    elif norm in ("block-max", "channel-block-max", "slrq-block", "awq-block-max"):
+    elif stores_block_scales(norm):
         scale_path = tensor_dir / f"{safe}.block_max_scale.f32"
         scale_dtype = _write_float_vector(scale_path, c["row_scales"], dtype="float16")
         scale_bytes = scale_path.stat().st_size
@@ -169,10 +170,7 @@ def _build_tensor_manifest_entry(
         "scale_bytes": scale_bytes,
         "scale_dtype": c.get("scale_dtype"),
         "block_scale_size": (
-            block_scale_size
-            if c["normalization"]
-            in ("block-max", "channel-block-max", "awq-block-max", "slrq-block")
-            else None
+            block_scale_size if stores_block_scales(c["normalization"]) else None
         ),
         "awq_col_scales": awq_col_meta,
         "outliers": outlier_meta,

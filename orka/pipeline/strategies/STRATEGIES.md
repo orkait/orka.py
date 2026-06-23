@@ -71,3 +71,11 @@ The **rotation** axis is pluggable the same way: `orka.transforms.rotate` keeps 
 `ROTATION_REGISTRY` (mode -> `RotationStrategy(name, rotate, unrotate)`), so a new
 invertible rotation registers via `register_rotation(RotationStrategy(...))` - the
 `_rotate_tensor_to_2d` / `_unrotate_flat` dispatchers do not change. `none` is identity.
+
+Whether a normalization mode persists a per-block scale sidecar is answered by one
+predicate - `orka.transforms.normalize.stores_block_scales` (backed by
+`BLOCK_SCALE_NORMALIZATIONS`). Pack, manifest, the torch/numpy decode paths, distill,
+the mse_scale refinement gate, and the inference loader all call it, so the membership
+cannot drift across sites. The decode/metrics numpy inverse uses a deliberately narrower
+three-mode branch (awq-block-max handled separately, since it also needs col scales);
+those two spots are commented so the narrower set is not mistaken for drift.

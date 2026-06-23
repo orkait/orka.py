@@ -412,6 +412,24 @@ def normalization_modes() -> list[str]:
     return sorted(NORMALIZATION_REGISTRY)
 
 
+# Single source of truth for "this mode persists a per-block scale sidecar"
+# (the block_max_scale vector). awq-block-max is included: it stores block scales AND
+# awq column scales. Shared by pack, manifest, decode, distill, refinement, and the
+# inference loader so the membership cannot drift across call sites.
+#
+# NOTE: this is the "stores block scales at all" grouping (all four). The decode/metrics
+# inverse paths use a narrower three-mode branch (awq-block-max handled separately because
+# it also needs col scales) - that grouping is intentionally NOT this set.
+BLOCK_SCALE_NORMALIZATIONS = frozenset(
+    {"block-max", "channel-block-max", "slrq-block", "awq-block-max"}
+)
+
+
+def stores_block_scales(normalization) -> bool:
+    """True if the normalization mode persists a per-block scale sidecar."""
+    return normalization in BLOCK_SCALE_NORMALIZATIONS
+
+
 def _apply_normalization(
     tensor, name, normalization, awq_activations, awq_alpha,
     block_scale_size, backend, device, awq_fallbacks,
