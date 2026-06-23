@@ -2,7 +2,7 @@
 
 No pack-specific state - vector extraction from a tensor, deterministic training-row
 sampling (with aligned per-sample weights), and the importance-weight cache digest.
-Shared by pack.py (pack_checkpoint) and pack_refine.py.
+Shared by pack.py (pack_checkpoint) and the strategies in orka.pipeline.strategies.
 """
 
 from __future__ import annotations
