@@ -1,10 +1,14 @@
-"""EM-AQ joint optimization: the post-assignment codebook refinement phase of packing.
+"""Post-assignment refinement strategies (no extra bits, pack-time cost only):
 
-For each tensor, decode the current multi-stage additive sum, then iterate
-expectation-maximization over the additive quantizer: re-learn each stage's codebook
-against the residual target (full sum minus that stage's contribution), re-quantize, and
-update the running sum in place. Refined codebooks/indices are streamed to disk via the
-background writer. Split out of pack.py so the refinement algorithm reads independently.
+  _run_em_aq_refinement  EM-AQ joint optimization. Per tensor, decode the multi-stage
+                         additive sum, then EM over the additive quantizer: re-learn
+                         each stage's codebook against the residual target, re-quantize,
+                         update the running sum in place. Refined codebooks/indices are
+                         streamed to disk via the background writer.
+  _refine_scales_ls      MSE-optimal block scales. Replace block-max scale with the
+                         least-squares s* = <w, r> / <r, r> for the fixed assignment.
+
+Both are catalogued in orka.pipeline.strategies.STRATEGY_REGISTRY.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from orka._tensor import _decode_to_vectors_format, _is_torch_tensor, _vectors_s
 from orka._util import _report_progress, _safe_tensor_name
 from orka.codebook import learn_codebook_auto, quantize_vectors_auto
 from orka.metrics import _stage_quality_metrics
+from orka.pipeline.pack_config import LS_SCALE_DENOM_FLOOR, LS_SCALE_MIN_MAGNITUDE
 from orka.pipeline.pack_helpers import _sample_vectors_and_weights
 
 
@@ -173,3 +178,107 @@ def _run_em_aq_refinement(
 
         import gc
         gc.collect()
+
+
+def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_dir) -> None:
+    """MSE-optimal block scales (post-assignment refinement).
+
+    orka stores scale = block max, so the codebook fit per block is dominated by
+    the single largest weight. For the FIXED codeword assignment, the least-squares
+    scale s* = <w, r> / <r, r> (r = normalized VQ reconstruction) minimizes the
+    per-block reconstruction error - the same idea as llm-compressor's MSE observer,
+    adapted to vector quant. Strictly reduces error at zero extra bits / inference cost.
+
+    Excludes salient/outlier override positions from the fit, and leaves outlier-
+    containing blocks at block-max (outlier sidecar values are stored scale-relative).
+    Gated to rotation=none + block-max-family normalization, where the scale acts
+    directly on the stored weights.
+    """
+    if not mse_scale:
+        return
+    if (c.get("rotation") or "none") != "none":
+        c.pop("_mse_v", None)
+        return
+    if c.get("normalization") not in (
+        "slrq-block", "block-max", "channel-block-max", "awq-block-max"
+    ):
+        c.pop("_mse_v", None)
+        return
+    scales = c.get("row_scales")
+    v = c.pop("_mse_v", None)  # clean normalized weights stashed pre-stages
+    meta = c.get("stages_meta")
+    if scales is None or v is None or not meta:
+        return
+    import numpy as np
+    import torch
+
+    from orka._format import _fp16_storage_roundtrip, _read_codebook, _read_indices
+
+    def _num(x, npd, tdt):
+        # Flat-CPU conversion; forces dtype so object-arrays of py ints/floats
+        # convert. Returns None on any non-numeric input (skip gracefully).
+        if x is None:
+            return None
+        try:
+            if _is_torch_tensor(x):
+                return x.detach().cpu().reshape(-1).to(tdt)
+            return torch.as_tensor(np.asarray(x, dtype=npd)).reshape(-1).to(tdt)
+        except Exception:
+            return None
+
+    v = _num(v, np.float32, torch.float32)
+    sc = _num(scales, np.float32, torch.float32)
+    if v is None or sc is None:
+        return
+    total = int(v.numel())
+    bs = int(c.get("block_scale_size") or block_scale_size)
+    if bs <= 0 or total % bs != 0 or int(sc.numel()) != total // bs:
+        return
+    nb = total // bs
+    # Final normalized VQ reconstruction r = sum_s codebook_s[indices_s]. The
+    # in-memory indices are freed by EM-AQ, so read the final stored codebook +
+    # indices back from disk (exactly what decode reconstructs).
+    r = torch.zeros(total, dtype=torch.float32)
+    try:
+        for sm in meta:
+            g = int(sm.get("group_size", 8))
+            if g <= 0 or total % g != 0:
+                return
+            cb_np = _read_codebook(
+                out_dir / sm["codebook"], g, sm.get("codebook_dtype", "float16")
+            )
+            idx_np = _read_indices(
+                out_dir / sm["indices"], int(sm["index_bits"]), total // g,
+                packed=bool(sm.get("packed", False)),
+                encoding=sm.get("encoding", "raw"),
+            )
+            cb = torch.as_tensor(np.asarray(cb_np, dtype=np.float32))
+            idx = torch.as_tensor(np.asarray(idx_np, dtype=np.int64)).reshape(-1)
+            rr = cb[idx].reshape(-1)
+            if int(rr.numel()) != total:
+                return
+            r += rr
+    except Exception:
+        return
+    mask = torch.ones(total, dtype=torch.float32)
+    sal = _num(c.get("salient_indices"), np.int64, torch.long)
+    if sal is not None and int(sal.numel()) == nb:
+        fs = torch.arange(nb) * bs + sal
+        mask[fs[(fs >= 0) & (fs < total)]] = 0.0
+    skip_block = torch.zeros(nb, dtype=torch.bool)
+    op = _num(c.get("outlier_positions"), np.int64, torch.long)
+    if op is not None and int(op.numel()) > 0:
+        op = op[(op >= 0) & (op < total)]
+        mask[op] = 0.0
+        skip_block[(op // bs).clamp_(max=nb - 1)] = True
+    vb = (v * mask).reshape(nb, bs)
+    rb = (r * mask).reshape(nb, bs)
+    num = (vb * rb).sum(1)
+    den = (rb * rb).sum(1)
+    # v is the NORMALIZED weight (orig = scale_old * v), so the LS-optimal scale
+    # is s* = scale_old * <v, r> / <r, r>.
+    factor = torch.where(den > LS_SCALE_DENOM_FLOOR, num / den, torch.ones(nb))
+    s_new = sc * factor
+    s_new = torch.where(skip_block, sc, s_new)  # outlier blocks keep block-max
+    s_new = torch.where(torch.isfinite(s_new) & (s_new.abs() > LS_SCALE_MIN_MAGNITUDE), s_new, sc)
+    c["row_scales"] = _fp16_storage_roundtrip(s_new.numpy().astype(np.float32))
