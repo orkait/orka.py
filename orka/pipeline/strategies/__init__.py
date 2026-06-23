@@ -78,7 +78,7 @@ STRATEGY_REGISTRY = [
     {
         "name": "outliers",
         "summary": "Exact-store the largest-magnitude weights in a sparse sidecar.",
-        "module": "orka.transforms (_extract_outliers)",
+        "module": "orka.transforms.outliers (_extract_outliers)",
         "enabled_by": "outlier_frac>0",
         "wired_at": "pre-stage, per tensor",
         "effect": "removes the worst quant errors; adds a sparse (index,value) sidecar.",
@@ -86,15 +86,15 @@ STRATEGY_REGISTRY = [
     {
         "name": "salient",
         "summary": "SLRQ - keep one exact salient weight per block (Hessian-guided escape).",
-        "module": "orka.pipeline.pack (salient extraction)",
+        "module": "orka.transforms.normalize (_normalize_tensor_slrq_block_* emit salient w/i)",
         "enabled_by": "slrq_salient + normalization=slrq-block",
-        "wired_at": "pre-stage, per tensor",
+        "wired_at": "pre-stage, per tensor (inside _apply_normalization)",
         "effect": "protects the highest-importance weight per block; small sidecar.",
     },
     {
         "name": "hessian_weighting",
         "summary": "AWQ-style importance weights (E[x^2] per column) feed weighted k-means.",
-        "module": "orka.pipeline.pack (vector_weights / sample_weights)",
+        "module": "orka.pipeline.pack (sample_weights); digest in orka.pipeline.pack_helpers._weights_digest",
         "enabled_by": "awq_activations provided",
         "wired_at": "per-tensor, before stage learning",
         "effect": "centroids pulled toward high-energy columns; no extra bpw.",
