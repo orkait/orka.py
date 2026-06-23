@@ -49,6 +49,47 @@ def _apply_lowrank_numpy(decoded, shape, lr_meta, out_dir: Path):
     return (mat + a @ b.T).reshape(-1)
 
 
+def _resolve_stages(tm: dict, group_size: int):
+    """Backend-agnostic stage list: explicit stages, else single-stage fallback.
+
+    Identical control flow for the numpy and torch decode paths; only the
+    numeric accumulation differs per backend.
+    """
+    stages = tm.get("stages")
+    if not stages:
+        stages = [
+            {
+                "codebook": tm["codebook"],
+                "codebook_size": int(tm["codebook_size"]),
+                "index_bits": int(tm["index_bits"]),
+                "indices": tm["indices"],
+            }
+        ]
+    return stages
+
+
+def _read_stage_arrays(out_dir: Path, stage: dict, group_size: int, padded_values: int):
+    """Backend-agnostic per-stage read: returns (codebook, indices) numpy arrays.
+
+    The stage metadata math (s_group_size, s_index_count) and the codebook /
+    indices I/O are byte-identical regardless of backend; each backend gathers
+    ``codebook[indices]`` in its own numeric primitives.
+    """
+    s_group_size = int(stage.get("group_size", group_size))
+    s_index_count = math.ceil(padded_values / s_group_size)
+    cb = _read_codebook(
+        out_dir / stage["codebook"],
+        s_group_size,
+        stage.get("codebook_dtype", "float32"),
+    )
+    idxs = _read_indices(
+        out_dir / stage["indices"], int(stage["index_bits"]), s_index_count,
+        packed=bool(stage.get("packed", False)),
+        encoding=stage.get("encoding", "raw"),
+    )
+    return cb, idxs
+
+
 def _decode_tensor(out_dir: Path, tensor_meta: dict):
     import numpy as np
 
@@ -56,31 +97,11 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict):
     padded_values = int(tensor_meta["padded_values"])
     packed_values = int(tensor_meta["packed_values"])
     index_count = math.ceil(padded_values / group_size)
-    stages = tensor_meta.get("stages")
-    if not stages:
-        stages = [
-            {
-                "codebook": tensor_meta["codebook"],
-                "codebook_size": int(tensor_meta["codebook_size"]),
-                "index_bits": int(tensor_meta["index_bits"]),
-                "indices": tensor_meta["indices"],
-            }
-        ]
+    stages = _resolve_stages(tensor_meta, group_size)
 
     decoded_np = np.zeros(index_count * group_size, dtype=np.float32)
     for stage in stages:
-        s_group_size = int(stage.get("group_size", group_size))
-        s_index_count = math.ceil(padded_values / s_group_size)
-        cb = _read_codebook(
-            out_dir / stage["codebook"],
-            s_group_size,
-            stage.get("codebook_dtype", "float32"),
-        )
-        idxs = _read_indices(
-            out_dir / stage["indices"], int(stage["index_bits"]), s_index_count,
-            packed=bool(stage.get("packed", False)),
-            encoding=stage.get("encoding", "raw"),
-        )
+        cb, idxs = _read_stage_arrays(out_dir, stage, group_size, padded_values)
         decoded_np += cb[idxs.astype(np.int64, copy=False)].reshape(-1)
 
     decoded = decoded_np[:packed_values].copy()
@@ -171,30 +192,12 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
     index_count = math.ceil(padded_values / group_size)
     shape = [int(x) for x in tm["shape"]]
 
-    stages = tm.get("stages") or [{
-        "codebook": tm["codebook"],
-        "codebook_size": int(tm["codebook_size"]),
-        "index_bits": int(tm["index_bits"]),
-        "indices": tm["indices"],
-    }]
+    stages = _resolve_stages(tm, group_size)
 
     decoded = torch.zeros(index_count * group_size, dtype=torch.float32, device=device)
     for stage in stages:
-        s_group_size = int(stage.get("group_size", group_size))
-        s_index_count = math.ceil(padded_values / s_group_size)
-
-        cb_np = _read_codebook(
-            out_dir / stage["codebook"], s_group_size,
-            stage.get("codebook_dtype", "float32"),
-        )
-        idxs_np = np.asarray(
-            _read_indices(
-                out_dir / stage["indices"], int(stage["index_bits"]), s_index_count,
-                packed=bool(stage.get("packed", False)),
-                encoding=stage.get("encoding", "raw"),
-            ),
-            dtype=np.int64,
-        )
+        cb_np, idxs_raw = _read_stage_arrays(out_dir, stage, group_size, padded_values)
+        idxs_np = np.asarray(idxs_raw, dtype=np.int64)
         cb = torch.from_numpy(cb_np).to(device)
         idxs = torch.from_numpy(idxs_np).to(device)
         decoded.add_(cb[idxs].reshape(-1))
