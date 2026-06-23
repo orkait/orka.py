@@ -50,7 +50,6 @@ from orka._util import (
     _source_signature,
 )
 from orka._checkpoint import _load_tensors
-from orka._features import AWQ_DISABLED_MESSAGE, awq_feature_enabled
 from orka.codebook import (
     _codebook_cache_key,
     _codebook_cache_load,
@@ -74,32 +73,16 @@ from orka.transforms import (
 )
 
 
-# --- Tunable thresholds ---------------------------------------------------------
-# Named so they are not magic numbers buried in the pipeline body. Values are the
-# previously-inlined literals; behaviour is unchanged.
-
-# Mixed precision: keep a layer dense (skip VQ) when its measured loss-delta from the
-# sensitivity map exceeds this.
-SENSITIVITY_SKIP_LOSS_DELTA = 1.5
-
-# Embedding tensors cap their VQ group width here even when a larger group_size is
-# requested - wide groups at a fixed codebook size collapse embedding fidelity.
-EMBEDDING_MAX_GROUP_SIZE = 8
-
-# Floor for Hessian-proxy importance weights, so no dimension/vector gets zero weight
-# (which would drop it from the weighted k-means distance metric).
-IMPORTANCE_WEIGHT_FLOOR = 1e-6
-
-# MSE-optimal scale refinement (_refine_scales_ls): a block whose residual energy <r,r>
-# is below DENOM_FLOOR is degenerate (keep its old scale); a refined scale whose
-# magnitude is below MIN_MAGNITUDE is treated as numerically zero (keep the old scale).
-LS_SCALE_DENOM_FLOOR = 1e-8
-LS_SCALE_MIN_MAGNITUDE = 1e-12
-
-# Per-tensor streaming prefetch: how many tensors the producer reads ahead, and the
-# poll timeout the consumer waits on the queue with.
-PREFETCH_QUEUE_DEPTH = 4
-PREFETCH_POLL_TIMEOUT_S = 0.1
+from orka.pipeline.pack_config import (
+    EMBEDDING_MAX_GROUP_SIZE,
+    IMPORTANCE_WEIGHT_FLOOR,
+    LS_SCALE_DENOM_FLOOR,
+    LS_SCALE_MIN_MAGNITUDE,
+    PREFETCH_POLL_TIMEOUT_S,
+    PREFETCH_QUEUE_DEPTH,
+    SENSITIVITY_SKIP_LOSS_DELTA,
+    validate_pack_args,
+)
 
 
 # Vector-prep helpers (_weights_digest, _sample_vectors_and_weights,
@@ -419,35 +402,15 @@ def pack_checkpoint(
     error_compensation: bool = False,
     mse_scale: bool = False,
 ) -> dict:
-    if codebook_mode not in {"per-tensor", "global", "family"}:
-        raise ValueError(
-            "codebook_mode must be 'per-tensor', 'global', or 'family'"
-        )
-    if backend not in {"auto", "numpy", "torch"}:
-        raise ValueError("backend must be 'auto', 'numpy', or 'torch'")
-    if normalization not in {
-        "none",
-        "block-max",
-        "channel-block-max",
-        "awq",
-        "awq-block-max",
-        "slrq-block",
-    }:
-        raise ValueError(
-            "normalization must be 'none', 'block-max', 'channel-block-max', 'awq', 'awq-block-max', or 'slrq-block'"
-        )
-    # The feature gate guards only the legacy AWQ *normalization* modes.
-    # Calibration activations alone are allowed: they feed Hessian-proxy
-    # importance weighting, which changes codebook learning, not the format.
-    if normalization in {"awq", "awq-block-max"} and not awq_feature_enabled():
-        raise RuntimeError(AWQ_DISABLED_MESSAGE)
-    if normalization == "awq" and awq_activations is None:
-        raise ValueError(
-            "normalization 'awq' requires calibration activations "
-            "(--awq-calibration with --awq-model-dir, or --awq-activations-file)"
-        )
-    if rotation not in {"none", "orthogonal", "hadamard"}:
-        raise ValueError("rotation must be 'none', 'orthogonal', or 'hadamard'")
+    validate_pack_args(
+        codebook_mode=codebook_mode,
+        backend=backend,
+        normalization=normalization,
+        rotation=rotation,
+        awq_activations=awq_activations,
+        tensor_partition_count=tensor_partition_count,
+        tensor_partition_index=tensor_partition_index,
+    )
     if backend == "torch":
         device = _maybe_fallback_cuda_to_cpu(device, backend)
         resolved_device = str(_resolve_torch_device(device))
@@ -469,27 +432,6 @@ def pack_checkpoint(
             file=_sys.stderr,
         )
         error_compensation = False
-
-    if tensor_partition_count is not None:
-        if tensor_partition_count < 1:
-            raise ValueError("tensor_partition_count must be >= 1")
-        if tensor_partition_index is None:
-            raise ValueError(
-                "tensor_partition_index is required when tensor_partition_count is set"
-            )
-        if tensor_partition_index < 0 or tensor_partition_index >= tensor_partition_count:
-            raise ValueError(
-                "tensor_partition_index must be in [0, tensor_partition_count)"
-            )
-
-    if (
-        tensor_partition_count is not None
-        and tensor_partition_count > 1
-        and codebook_mode != "per-tensor"
-    ):
-        raise ValueError(
-            "tensor partitions require per-tensor codebooks. Use --codebook-mode per-tensor."
-        )
 
     if tensor_partition_count == 1:
         tensor_partition_count = 1
