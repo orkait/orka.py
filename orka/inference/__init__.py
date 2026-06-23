@@ -14,20 +14,19 @@ Architecture (how the pieces fit):
                        (corr_rowptr / corr_col / corr_val).
     build_vq_linear()  populate them from the artifact.
 
-  forward dispatch (VQLinear.forward -> kernel.vq_linear_forward)
+  forward dispatch (VQLinear.forward -> dispatch.vq_linear_forward) - dispatch.py
     N == 1 (decode, memory-bound matvec):
       cuda_decode.forward_n1        float4 gather GEMV + warp-spmv correction
-        -> fallback kernel._vq_decode_kernel (Triton)
+        -> fallback triton_kernels._vq_decode_kernel
            -> fallback VQLinear._forward_python (dense)
     N  > 1 (prefill):
       cuda_decode.forward_prefill   fused decode-to-dense + cuBLAS (N >= 256)
-        -> fallback kernel._vq_gemm_kernel (Triton gather-GEMM)
+        -> fallback triton_kernels._vq_gemm_kernel (gather-GEMM)
 
   backends
-    cuda_decode.py  CUDA kernels (gemv_f4 N=1, spmv_warp correction, ddense prefill),
-                    compiled lazily; any failure falls back to Triton transparently.
-    kernel.py       Triton kernels (_vq_decode_kernel, _vq_gemm_kernel) + the
-                    vq_linear_forward dispatcher above.
+    cuda_decode.py     CUDA kernels (gemv_f4 N=1, spmv_warp correction, ddense prefill),
+                       compiled lazily; any failure falls back to Triton transparently.
+    triton_kernels.py  Triton kernels (_vq_decode_kernel, _vq_gemm_kernel) - the fallback.
 
 Indices/scales are stored group-major so both backends read them coalesced (the
 `_group_major` flag gates this; legacy row-major still works via the GROUP_MAJOR
