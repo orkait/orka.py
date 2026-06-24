@@ -75,6 +75,16 @@ class OrkaQuantizerRegistrationTest(unittest.TestCase):
         self.assertIn("orka", AUTO_QUANTIZER_MAPPING)
         self.assertIn("orka", AUTO_QUANTIZATION_CONFIG_MAPPING)
 
+    def test_lm_head_and_embeddings_treated_dense(self):
+        # tied-embedding models (Qwen/Llama): lm_head must stay dense, else the
+        # tied-weight finalization calls get_parameter on a VQLinear property and fails.
+        from orka.hf_quantizer import _is_embedding
+
+        self.assertTrue(_is_embedding("lm_head.weight"))
+        self.assertTrue(_is_embedding("model.embed_tokens.weight"))
+        self.assertTrue(_is_embedding("gpt_neox.embed_in.weight"))
+        self.assertFalse(_is_embedding("model.layers.0.self_attn.q_proj.weight"))
+
     def test_config_round_trips(self):
         import orka.hf_quantizer  # noqa: F401 (ensures registration)
         from transformers.quantizers.auto import AUTO_QUANTIZATION_CONFIG_MAPPING
