@@ -174,12 +174,21 @@ def _rotate_orthogonal(tensor, *, name, rotation_seed, backend, device):
     return (arr.reshape(rows, cols) @ q).reshape(shape), seed
 
 
-def _unrotate_hadamard(arr, *, cols, seed):
+def _unrotate_hadamard(arr, *, cols, seed, backend="numpy", device="cpu"):
     block_size = _hadamard_block_size(cols)
+    if backend == "torch":
+        return _block_fwht_torch(arr, block_size)
     return _block_fwht_numpy(arr, block_size)
 
 
-def _unrotate_orthogonal(arr, *, cols, seed):
+def _unrotate_orthogonal(arr, *, cols, seed, backend="numpy", device="cpu"):
+    # The orthogonal Q is generated on numpy (seeded); invert with its transpose. On the
+    # torch path Q is moved to the device so the matmul stays where `arr` lives.
+    if backend == "torch":
+        import torch
+
+        q = torch.from_numpy(_generate_orthogonal_numpy(cols, seed)).to(device)
+        return arr @ q.T
     q = _generate_orthogonal_numpy(cols, seed)
     return arr @ q.T
 
@@ -190,7 +199,7 @@ class RotationStrategy:
 
     name: str
     rotate: Callable[..., tuple]    # (tensor, *, name, rotation_seed, backend, device) -> (rotated, stored_seed)
-    unrotate: Callable[..., object]  # (arr2d, *, cols, seed) -> unrotated 2d
+    unrotate: Callable[..., object]  # (arr2d, *, cols, seed, backend, device) -> unrotated 2d
 
 
 # Mode -> strategy. "none" is handled inline (identity). Register a new rotation with
