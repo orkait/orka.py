@@ -45,8 +45,12 @@ _TOKENIZER_FILES = (
 
 
 def _is_embedding(name: str) -> bool:
-    # The kernel only backs nn.Linear; embeddings (lookup / tied LM head) stay dense.
-    return "embed" in name.lower()
+    # The kernel only backs nn.Linear, and the LM head is frequently tied to the input
+    # embedding (transformers' tied-weight finalization calls get_parameter on its
+    # `.weight`, which a VQLinear exposes only as a sentinel property). Keep both the
+    # token embedding and the LM head dense so tied-embedding models load.
+    low = name.lower()
+    return "embed" in low or "lm_head" in low
 
 
 def export_orka_hf_repo(artifact_dir, config_dir, out_dir) -> dict:
