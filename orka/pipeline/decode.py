@@ -21,6 +21,7 @@ from orka.transforms.normalize import (
     stores_block_scales,
 )
 from orka.transforms.rotate import (
+    ROTATION_REGISTRY,
     _block_fwht_torch,
     _generate_orthogonal_numpy,
     _hadamard_block_size,
@@ -230,19 +231,16 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
             decoded[pos_t] = val_t
 
     rotation = tm.get("rotation", "none")
-    if rotation in {"orthogonal", "hadamard"}:
+    rotation_strategy = ROTATION_REGISTRY.get(rotation)
+    if rotation_strategy is not None:
         seed = int(tm.get("rotation_seed") or 0)
         rows = shape[0]
         cols = 1
         for s in shape[1:]:
             cols *= int(s)
         arr = decoded[:rows * cols].reshape(rows, cols)
-        if rotation == "hadamard":
-            block_size = _hadamard_block_size(cols)
-            unrotated = _block_fwht_torch(arr, block_size)
-        else:
-            q = torch.from_numpy(_generate_orthogonal_numpy(cols, seed)).to(device)
-            unrotated = arr @ q.T
+        # Strategy owns the inverse for both backends; torch keeps the matmul on-device.
+        unrotated = rotation_strategy.unrotate(arr, cols=cols, seed=seed, backend="torch", device=device)
         decoded = unrotated.reshape(-1)
 
     norm = tm.get("normalization", "none")
