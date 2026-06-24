@@ -74,10 +74,11 @@ invertible rotation registers via `register_rotation(RotationStrategy(...))` - t
 
 Inverses are owned by the transform modules, not reimplemented per decode path.
 `RotationStrategy.unrotate` is backend-parametric (numpy + torch), so the torch decode
-path routes through the registry instead of inline FWHT / Q.T. The block-max inverse is
-`orka.transforms.normalize.apply_block_scales(..., backend=...)`, shared by the numpy
-decode/reconstruct path and the torch inference path. (The awq col-scale inverse stays
-inline in decode for now - not yet covered by the numpy<->torch parity gate.)
+path routes through the registry instead of inline FWHT / Q.T. Normalization inverses are
+backend-parametric primitives in `orka.transforms.normalize` - `apply_block_scales`
+(block-max family) and `apply_col_scales` (awq col-l2) - shared by the numpy
+decode/reconstruct path and the torch inference path. Both are covered by the
+numpy<->torch decode parity gate (`tests/test_decode_inverse.py`, awq modes included).
 
 Whether a normalization mode persists a per-block scale sidecar is answered by one
 predicate - `orka.transforms.normalize.stores_block_scales` (backed by

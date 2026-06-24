@@ -283,6 +283,24 @@ def apply_block_scales(decoded, scales, block_size: int, *, backend="numpy", dev
     return _apply_block_max_scales_numpy(decoded, scales, block_size)
 
 
+def apply_col_scales(decoded, shape, scales, *, backend="numpy", device="cpu"):
+    """Inverse of awq col-l2 normalization: multiply each column by its stored scale.
+
+    Backend-parametric, mirroring ``apply_block_scales``. Column layout follows the numpy
+    helper: rows = shape[0], cols = product(shape[1:]). ``scales`` is the numpy col-scale
+    vector read from the sidecar.
+    """
+    if backend == "torch":
+        import torch
+
+        rows = int(shape[0])
+        cols = _product([int(s) for s in shape[1:]])
+        scales_t = torch.from_numpy(scales).to(device)
+        flat = decoded[: rows * cols].reshape(rows, cols)
+        return (flat * scales_t[None, :]).reshape(-1)
+    return _apply_col_l2_scales_numpy(decoded, shape, scales)
+
+
 def _apply_block_max_scales(flat, scales, block_size: int):
     return _apply_block_max_scales_numpy(flat, scales, block_size).tolist()
 
