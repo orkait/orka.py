@@ -19,6 +19,7 @@ from orka.transforms.normalize import (
     _apply_block_max_scales_numpy,
     _apply_col_l2_scales_numpy,
     apply_block_scales,
+    apply_col_scales,
     stores_block_scales,
 )
 from orka.transforms.rotate import (
@@ -140,7 +141,7 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict):
         scales = _read_float_vector(
             out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"]), scale_dtype
         )
-        decoded = _apply_col_l2_scales_numpy(decoded, tensor_meta["shape"], scales)
+        decoded = apply_col_scales(decoded, tensor_meta["shape"], scales, backend="numpy")
     # block-scales-only inverse: awq-block-max is NOT here - it needs block + col scales
     # and is handled in its own branch below (this is the narrower grouping, not
     # stores_block_scales()).
@@ -162,7 +163,7 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict):
                 out_dir / awq_meta["path"], int(awq_meta["count"]),
                 awq_meta.get("dtype") or "float32",
             )
-            decoded = _apply_col_l2_scales_numpy(decoded, tensor_meta["shape"], awq_scales)
+            decoded = apply_col_scales(decoded, tensor_meta["shape"], awq_scales, backend="numpy")
 
     salient = tensor_meta.get("salient")
     if salient:
@@ -256,16 +257,10 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
             awq_meta = tm.get("awq_col_scales")
             if awq_meta:
                 awq_scales = _read_float_vector(out_dir / awq_meta["path"], int(awq_meta["count"]), awq_meta.get("dtype") or "float32")
-                awq_t = torch.from_numpy(awq_scales).to(device)
-                cols = shape[-1]
-                rows = decoded.numel() // cols
-                decoded = (decoded[:rows * cols].reshape(rows, cols) * awq_t[None, :]).reshape(-1)
+                decoded = apply_col_scales(decoded, shape, awq_scales, backend="torch", device=device)
     elif norm == "awq":
         scales = _read_float_vector(out_dir / tm["scales"], int(tm["scale_count"]), tm.get("scale_dtype") or "float32")
-        scales_t = torch.from_numpy(scales).to(device)
-        cols = scales_t.numel()
-        rows = decoded.numel() // cols
-        decoded = (decoded[:rows * cols].reshape(rows, cols) * scales_t[None, :]).reshape(-1)
+        decoded = apply_col_scales(decoded, shape, scales, backend="torch", device=device)
 
     salient = tm.get("salient")
     if salient:
