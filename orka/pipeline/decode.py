@@ -18,6 +18,7 @@ from orka._format import (
 from orka.transforms.normalize import (
     _apply_block_max_scales_numpy,
     _apply_col_l2_scales_numpy,
+    apply_block_scales,
     stores_block_scales,
 )
 from orka.transforms.rotate import (
@@ -148,13 +149,13 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict):
             out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"]), scale_dtype
         )
         block_size = int(tensor_meta.get("block_scale_size") or 32)
-        decoded = _apply_block_max_scales_numpy(decoded, scales, block_size)
+        decoded = apply_block_scales(decoded, scales, block_size, backend="numpy")
     elif norm == "awq-block-max":
         block_scales = _read_float_vector(
             out_dir / tensor_meta["scales"], int(tensor_meta["scale_count"]), scale_dtype
         )
         block_size = int(tensor_meta.get("block_scale_size") or 32)
-        decoded = _apply_block_max_scales_numpy(decoded, block_scales, block_size)
+        decoded = apply_block_scales(decoded, block_scales, block_size, backend="numpy")
         awq_meta = tensor_meta.get("awq_col_scales")
         if awq_meta:
             awq_scales = _read_float_vector(
@@ -250,14 +251,7 @@ def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
     if stores_block_scales(norm):
         scales = _read_float_vector(out_dir / tm["scales"], int(tm["scale_count"]), tm.get("scale_dtype") or "float32")
         block_size = int(tm.get("block_scale_size") or 32)
-        scales_t = torch.from_numpy(scales).to(device)
-        n = decoded.numel()
-        pad = (-n) % block_size
-        if pad:
-            decoded = torch.cat([decoded, torch.zeros(pad, dtype=torch.float32, device=device)])
-        decoded = (decoded.reshape(-1, block_size) * scales_t[:decoded.numel() // block_size, None]).reshape(-1)
-        if pad:
-            decoded = decoded[:n]
+        decoded = apply_block_scales(decoded, scales, block_size, backend="torch", device=device)
         if norm == "awq-block-max":
             awq_meta = tm.get("awq_col_scales")
             if awq_meta:

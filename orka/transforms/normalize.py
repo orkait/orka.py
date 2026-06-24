@@ -262,6 +262,27 @@ def _normalize_tensor_slrq_block_numpy(tensor, block_size: int, salient_enabled:
     )
 
 
+def apply_block_scales(decoded, scales, block_size: int, *, backend="numpy", device="cpu"):
+    """Inverse of block-max-family normalization: multiply each block by its stored scale.
+
+    Backend-parametric so the numpy decode/reconstruct path and the torch inference path
+    share one implementation instead of each reimplementing the pad/reshape/scale math.
+    ``decoded`` is a flat numpy array (numpy) or a flat torch tensor on ``device`` (torch);
+    ``scales`` is the numpy scale vector read from the sidecar.
+    """
+    if backend == "torch":
+        import torch
+
+        scales_t = torch.from_numpy(scales).to(device)
+        n = decoded.numel()
+        pad = (-n) % block_size
+        if pad:
+            decoded = torch.cat([decoded, torch.zeros(pad, dtype=torch.float32, device=device)])
+        out = (decoded.reshape(-1, block_size) * scales_t[: decoded.numel() // block_size, None]).reshape(-1)
+        return out[:n] if pad else out
+    return _apply_block_max_scales_numpy(decoded, scales, block_size)
+
+
 def _apply_block_max_scales(flat, scales, block_size: int):
     return _apply_block_max_scales_numpy(flat, scales, block_size).tolist()
 

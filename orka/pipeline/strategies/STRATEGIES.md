@@ -72,6 +72,13 @@ The **rotation** axis is pluggable the same way: `orka.transforms.rotate` keeps 
 invertible rotation registers via `register_rotation(RotationStrategy(...))` - the
 `_rotate_tensor_to_2d` / `_unrotate_flat` dispatchers do not change. `none` is identity.
 
+Inverses are owned by the transform modules, not reimplemented per decode path.
+`RotationStrategy.unrotate` is backend-parametric (numpy + torch), so the torch decode
+path routes through the registry instead of inline FWHT / Q.T. The block-max inverse is
+`orka.transforms.normalize.apply_block_scales(..., backend=...)`, shared by the numpy
+decode/reconstruct path and the torch inference path. (The awq col-scale inverse stays
+inline in decode for now - not yet covered by the numpy<->torch parity gate.)
+
 Whether a normalization mode persists a per-block scale sidecar is answered by one
 predicate - `orka.transforms.normalize.stores_block_scales` (backed by
 `BLOCK_SCALE_NORMALIZATIONS`). Pack, manifest, the torch/numpy decode paths, distill,
