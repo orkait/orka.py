@@ -119,3 +119,15 @@ index bytes.
 PoC (phase 1) is the go/no-go: if a shared-codebook CUDA RVQ mat-vec hits k-quant speed on
 one tensor, the rest is engineering. If it can't (RVQ gather inherently slower than k-quant
 arithmetic), the runtime gap is structural and orka stays a compression/research tool.
+
+## Status (in progress)
+
+| Track | State |
+|---|---|
+| vLLM quant method | scaffold merged (`orka/vllm_quant.py`, PR #90) - `OrkaQuantConfig` + `OrkaLinearMethod` reuse VQLinear; tested vllm-free core; glue needs a vllm env. Removes the ~2.3x transformers-eager overhead. |
+| llama.cpp fork | branch `orka-rvq-type` in the vendored `llama.cpp` (commit `9f57be5`): `GGML_TYPE_ORKA_RVQ` registered (enum + stub trait), **tree compiles** with CUDA. Next: block layout + CPU/CUDA dequant + mat-vec + `.orka->.gguf` converter. |
+
+### Next concrete steps (llama.cpp)
+1. Define `block_orka_rvq` + real `blck_size`/`type_size`; wire `to_float` (CPU dequant) against `reconstruct_weight` as the reference.
+2. `.orka -> .gguf` converter emitting the type (reuse `_pack_index_planes`); per-tensor codebook stored once (Option A: per-block ref).
+3. CUDA `mul_mat_vec` for the type (shared-mem codebook) - the go/no-go PoC: hit k-quant decode speed on one tensor.
