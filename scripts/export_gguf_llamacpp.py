@@ -97,7 +97,20 @@ def passthrough(name):
 # dense tensors
 emb = np.asarray(_decode_tensor(ART, next(t for t in manifest["tensors"] if t["name"]=="gpt_neox.embed_in.weight")), dtype=np.float32).reshape(n_vocab, n_embd)
 w.add_tensor("token_embd.weight", emb.astype(np.float16))
-out = np.asarray(_decode_tensor(ART, next(t for t in manifest["tensors"] if t["name"]=="embed_out.weight")), dtype=np.float32).reshape(n_vocab, n_embd)
+# Output head is extremely precision-sensitive (a few % weight error => ppl blows up).
+# Standard practice (llama.cpp keeps `output` at Q6/F16) - keep it fp16, never RVQ it.
+# Prefer an fp16 head from ORKA_FP16_HEAD (the base model dir) if provided; else the
+# artifact's reconstruction (which, if the packer quantized the head, will be degraded).
+import os as _os
+head_dir = _os.environ.get("ORKA_FP16_HEAD")
+if head_dir:
+    from safetensors import safe_open as _so
+    import glob as _glob
+    sf = _glob.glob(_os.path.join(head_dir, "*.safetensors"))[0]
+    with _so(sf, "pt") as f:
+        out = f.get_tensor("embed_out.weight").float().numpy().reshape(n_vocab, n_embd)
+else:
+    out = np.asarray(_decode_tensor(ART, next(t for t in manifest["tensors"] if t["name"]=="embed_out.weight")), dtype=np.float32).reshape(n_vocab, n_embd)
 w.add_tensor("output.weight", out.astype(np.float16))
 def pf(hf, lc):
     a = passthrough(hf)
