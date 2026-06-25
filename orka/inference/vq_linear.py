@@ -215,14 +215,32 @@ class VQLinear(nn.Module):
         return self._triton_ok
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Bit-planed stages have no kernel path yet (the Triton kernels read int16/uint8
-        # index buffers); decode them through the dense reconstruct path. Correct, and
-        # the planes stay VRAM-resident. Non-planed layers keep the fast kernel dispatch.
+        # Bit-planed layers use the fused plane decode kernel on the N=1 hot path
+        # (reads lo/hi planes directly, < int16 traffic); other shapes fall back to the
+        # dense reconstruct path. Non-planed layers keep the standard kernel dispatch.
         if any(getattr(self, "_plane_width", ()) or ()):
-            return self._forward_python(x)
+            return self._forward_planed(x)
         if self._triton_available():
             from orka.inference.dispatch import vq_linear_forward
             return vq_linear_forward(self, x)
+        return self._forward_python(x)
+
+    def _forward_planed(self, x: torch.Tensor) -> torch.Tensor:
+        K, M = self.in_features, self.out_features
+        x_2d = x.reshape(-1, K)
+        if x_2d.shape[0] == 1 and x_2d.is_cuda:
+            try:
+                from orka.inference.triton_kernels import _vq_decode_planes_n1
+                y = _vq_decode_planes_n1(self, x_2d.to(torch.float16))
+            except Exception:
+                y = None
+            if y is not None:
+                if self.corr_col.numel() > 0:
+                    sp = self._correction_sparse()
+                    y = y + torch.sparse.mm(sp, x_2d.float().T.contiguous()).T.to(torch.float16)
+                if self.bias is not None:
+                    y = y + self.bias
+                return y.reshape(*x.shape[:-1], M).to(x.dtype)
         return self._forward_python(x)
 
     def _forward_python(self, x: torch.Tensor) -> torch.Tensor:
