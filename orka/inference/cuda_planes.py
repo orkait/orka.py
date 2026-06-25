@@ -1,0 +1,134 @@
+"""CUDA warp-per-row GEMV for N=1 decode of bit-planed RVQ indices (group_size=4).
+
+The decode matvec is the hot path. A naive one-thread-per-row kernel is ~7-10x a dense
+cuBLAS GEMV (the GPR-group reduction runs serially per thread, latency-bound). Splitting
+that reduction across a **warp** (32 lanes, shfl-reduce) - the same trick as the group-8
+``cuda_decode.gemv_f4`` - makes it match/beat dense while reading ~9x less data: an
+isolated [3072,1024] tensor measured 23 us vs 26 us dense (0.92x), max rel err 3e-4.
+
+Each index is rebuilt from a uint8 low plane + a (HI_BITS)-packed high plane
+(idx = lo | ((hi_byte>>shift)&mask)<<8); the group-4 codeword (4 halves) is one float2
+load summed across stages, then dotted with x via __half2 FMA. 2-stage, uniform
+HI_BITS in {2,4}, group_size 4. Opt-in; transparent fallback to the Triton path.
+"""
+
+from __future__ import annotations
+
+import torch
+
+_CUDA_SRC = r'''
+#include <torch/extension.h>
+#include <cuda_fp16.h>
+
+// One warp per output row m; the 32 lanes split the GPR-group loop and shfl-reduce.
+// Row-major indices (p = m*GPR + g): sequential per-lane hi-byte reads. G==4 codeword
+// is a single float2 load per stage.
+__global__ void gemv_planes(
+    const unsigned char* __restrict__ lo0, const unsigned char* __restrict__ hi0,
+    const unsigned char* __restrict__ lo1, const unsigned char* __restrict__ hi1,
+    const __half* __restrict__ cb0, const __half* __restrict__ cb1,
+    const __half* __restrict__ scale, const __half* __restrict__ x,
+    float* __restrict__ y, int M, int GPR, int BPR, int GPB, int G, int HI_BITS){
+  int gid = blockIdx.x * blockDim.x + threadIdx.x;
+  int m = gid >> 5, lane = gid & 31;
+  if (m >= M) return;
+  int per = 8 / HI_BITS, himask = (1 << HI_BITS) - 1;
+  const __half2* x2 = (const __half2*)x;
+  float acc = 0.0f;
+  for (int g = lane; g < GPR; g += 32) {
+    int p = m * GPR + g;
+    int blk = g / GPB;
+    float s = __half2float(scale[m * BPR + blk]);
+    int sh = 8 - ((p % per) + 1) * HI_BITS;
+    int bo = (p * HI_BITS) >> 3;
+    int i0 = lo0[p] | ((((int)__ldg(&hi0[bo]) >> sh) & himask) << 8);
+    int i1 = lo1[p] | ((((int)__ldg(&hi1[bo]) >> sh) & himask) << 8);
+    float2 r0 = __ldg((const float2*)(cb0 + (i0 << 2)));
+    float2 r1 = __ldg((const float2*)(cb1 + (i1 << 2)));
+    const __half2* a = (const __half2*)&r0; const __half2* b = (const __half2*)&r1;
+    const __half2* xv = x2 + g * 2;
+    __half2 w0 = __hadd2(a[0], b[0]), w1 = __hadd2(a[1], b[1]);
+    float2 wf0 = __half22float2(w0), wf1 = __half22float2(w1);
+    float2 xf0 = __half22float2(__ldg(&xv[0])), xf1 = __half22float2(__ldg(&xv[1]));
+    acc += s * (wf0.x * xf0.x + wf0.y * xf0.y + wf1.x * xf1.x + wf1.y * xf1.y);
+  }
+  #pragma unroll
+  for (int o = 16; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffff, acc, o);
+  if (lane == 0) y[m] = acc;
+}
+
+torch::Tensor decode_planes(
+    torch::Tensor lo0, torch::Tensor hi0, torch::Tensor lo1, torch::Tensor hi1,
+    torch::Tensor cb0, torch::Tensor cb1, torch::Tensor scale, torch::Tensor x,
+    int M, int GPR, int BPR, int GPB, int G, int HI_BITS){
+  auto y = torch::zeros({M}, torch::dtype(torch::kFloat32).device(x.device()));
+  int th = 256, bx = (M * 32 + th - 1) / th;
+  gemv_planes<<<bx, th>>>(
+    lo0.data_ptr<unsigned char>(), hi0.data_ptr<unsigned char>(),
+    lo1.data_ptr<unsigned char>(), hi1.data_ptr<unsigned char>(),
+    (const __half*)cb0.data_ptr<at::Half>(), (const __half*)cb1.data_ptr<at::Half>(),
+    (const __half*)scale.data_ptr<at::Half>(), (const __half*)x.data_ptr<at::Half>(),
+    y.data_ptr<float>(), M, GPR, BPR, GPB, G, HI_BITS);
+  return y;
+}
+'''
+
+_MODULE = None
+
+
+def _get_module():
+    global _MODULE
+    if _MODULE is not None:
+        return _MODULE or None
+    try:
+        from torch.utils.cpp_extension import load_inline
+        _MODULE = load_inline(
+            name="orka_cuda_planes",
+            cpp_sources=(
+                "torch::Tensor decode_planes(torch::Tensor,torch::Tensor,torch::Tensor,"
+                "torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,"
+                "int,int,int,int,int,int);"
+            ),
+            cuda_sources=_CUDA_SRC,
+            functions=["decode_planes"],
+            verbose=False,
+        )
+    except Exception:
+        _MODULE = False
+        return None
+    return _MODULE
+
+
+def supported(layer) -> bool:
+    widths = getattr(layer, "_plane_width", None)
+    if not widths or layer.n_stages != 2:
+        return False
+    if widths[0] == 0 or any(w != widths[0] for w in widths):
+        return False
+    if (widths[0] - 8) not in (2, 4):
+        return False
+    return (
+        layer.group_size == 4                       # float2 codeword path
+        and not getattr(layer, "_group_major", False)  # kernel reads row-major indices
+        and layer.corr_col.numel() == 0
+        and layer.scales.is_cuda
+        and _get_module() is not None
+    )
+
+
+def forward_n1(layer, x_2d: torch.Tensor):
+    """N=1 decode via the warp-per-row CUDA plane GEMV. x_2d [1,K] -> y [1,M] fp16, or None."""
+    mod = _get_module()
+    if mod is None:
+        return None
+    G, B = layer.group_size, layer.block_size
+    K, M = layer.in_features, layer.out_features
+    GPR, BPR = K // G, K // B
+    hi_bits = layer._plane_width[0] - 8
+    xf = x_2d.reshape(K).to(torch.float16).contiguous()
+    y = mod.decode_planes(
+        layer.indices_lo_0, layer.indices_hi_0, layer.indices_lo_1, layer.indices_hi_1,
+        layer.codebook_0.reshape(-1), layer.codebook_1.reshape(-1),
+        layer.scales, xf, M, GPR, BPR, B // G, G, hi_bits,
+    )
+    return y.view(1, M).to(torch.float16)
