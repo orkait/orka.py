@@ -227,6 +227,24 @@ class VQLinear(nn.Module):
 
     def _forward_planed(self, x: torch.Tensor) -> torch.Tensor:
         K, M = self.in_features, self.out_features
+        # Compile-traceable path: a single custom op (no graph break) for the uniform
+        # 2-stage, correction-free case. torch.compile/CUDA-graphs can capture this.
+        from orka.inference.plane_ops import plane_op_supported, vq_plane_linear
+        if x.is_cuda and plane_op_supported(self):
+            xf = x.reshape(-1, K).to(torch.float16)
+            y = vq_plane_linear(
+                xf,
+                self.indices_lo_0, self.indices_hi_0, self.indices_lo_1, self.indices_hi_1,
+                self.codebook_0, self.codebook_1, self.scales,
+                M, K // self.group_size, K // self.block_size,
+                self.group_size, self.block_size, self._plane_width[0] - 8,
+                bool(getattr(self, "_group_major", False)),
+            )
+            if self.bias is not None:
+                y = y + self.bias
+            return y.reshape(*x.shape[:-1], M).to(x.dtype)
+
+        # Eager fallback: layers with sparse correction / non-uniform plane widths.
         x_2d = x.reshape(-1, K)
         if x_2d.is_cuda:
             xf = x_2d.to(torch.float16)
