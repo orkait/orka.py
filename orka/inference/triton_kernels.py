@@ -327,5 +327,118 @@ def _vq_gemm_kernel(
     )
 
 
+# ---------------------------------------------------------------------------
+# Tiled gather-GEMM reading bit-PLANED indices (N>1 prefill)
+# ---------------------------------------------------------------------------
+# Same tiling as _vq_gemm_kernel; each index reconstructed from lo/hi planes
+# (idx = lo | hi<<8) instead of an int16 buffer. 2-stage, uniform HI_BITS in {2,4}.
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": 64,  "BLOCK_N": 64,  "BLOCK_K": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 64,  "BLOCK_N": 32,  "BLOCK_K": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 32,  "BLOCK_K": 32}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8, num_stages=4),
+        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 64}, num_warps=8, num_stages=3),
+    ],
+    key=["M", "N", "K"],
+)
+@triton.jit
+def _vq_gemm_planes_kernel(
+    x_ptr, x_stride_n, x_stride_k,
+    y_ptr, y_stride_n, y_stride_m,
+    lo0_ptr, hi0_ptr, lo1_ptr, hi1_ptr,
+    cb0_ptr, cb1_ptr,
+    scale_ptr,
+    M, N, K, GPR, BPR,
+    G: tl.constexpr, B: tl.constexpr, N_STAGES: tl.constexpr,
+    HI_BITS: tl.constexpr,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    GROUP_MAJOR: tl.constexpr,
+):
+    m_start = tl.program_id(0) * BLOCK_M
+    n_start = tl.program_id(1) * BLOCK_N
+    m_ids = m_start + tl.arange(0, BLOCK_M)
+    n_ids = n_start + tl.arange(0, BLOCK_N)
+    m_mask = m_ids < M
+    n_mask = n_ids < N
+    acc = tl.zeros([BLOCK_N, BLOCK_M], dtype=tl.float32)
+    per = 8 // HI_BITS
+    himask = (1 << HI_BITS) - 1
+
+    for k_start in tl.range(0, K, BLOCK_K):
+        col_ids = k_start + tl.arange(0, BLOCK_K)
+        k_mask = col_ids < K
+        group_of_col = col_ids // G
+        within = col_ids % G
+        block_of_col = col_ids // B
+        if GROUP_MAJOR:
+            flat_group = group_of_col[None, :] * M + m_ids[:, None]
+        else:
+            flat_group = m_ids[:, None] * GPR + group_of_col[None, :]
+        tile_mask = m_mask[:, None] & k_mask[None, :]
+        byte_off = (flat_group * HI_BITS) // 8
+        shift = 8 - ((flat_group % per) + 1) * HI_BITS
+
+        lo0 = tl.load(lo0_ptr + flat_group, mask=tile_mask, other=0).to(tl.int32)
+        b0 = tl.load(hi0_ptr + byte_off, mask=tile_mask, other=0).to(tl.int32)
+        idx0 = lo0 | (((b0 >> shift) & himask) << 8)
+        w_tile = tl.load(cb0_ptr + idx0 * G + within[None, :], mask=tile_mask, other=0.0).to(tl.float32)
+
+        if N_STAGES >= 2:
+            lo1 = tl.load(lo1_ptr + flat_group, mask=tile_mask, other=0).to(tl.int32)
+            b1 = tl.load(hi1_ptr + byte_off, mask=tile_mask, other=0).to(tl.int32)
+            idx1 = lo1 | (((b1 >> shift) & himask) << 8)
+            w_tile = w_tile + tl.load(cb1_ptr + idx1 * G + within[None, :], mask=tile_mask, other=0.0).to(tl.float32)
+
+        if GROUP_MAJOR:
+            scale_off = block_of_col[None, :] * M + m_ids[:, None]
+        else:
+            scale_off = m_ids[:, None] * BPR + block_of_col[None, :]
+        scales = tl.load(scale_ptr + scale_off, mask=tile_mask, other=1.0).to(tl.float32)
+        w_tile = w_tile * scales
+
+        x_tile = tl.load(
+            x_ptr + n_ids[:, None] * x_stride_n + col_ids[None, :] * x_stride_k,
+            mask=n_mask[:, None] & k_mask[None, :], other=0.0,
+        ).to(tl.float32)
+        acc = tl.dot(x_tile, tl.trans(w_tile), acc)
+
+    tl.store(
+        y_ptr + n_ids[:, None] * y_stride_n + m_ids[None, :] * y_stride_m,
+        acc.to(tl.float16),
+        mask=n_mask[:, None] & m_mask[None, :],
+    )
+
+
+def _vq_gemm_planes(layer, x_2d: torch.Tensor):
+    """N>1 prefill reading bit-planed indices. x_2d [N,K] -> y [N,M] fp16, or None if
+    the plane layout is unsupported (non-uniform hi-bits / >2 stages / not planed)."""
+    widths = getattr(layer, "_plane_width", None)
+    if not widths or layer.n_stages != 2:
+        return None
+    if widths[0] == 0 or any(w != widths[0] for w in widths):
+        return None
+    hi_bits = widths[0] - 8
+    if hi_bits not in (2, 4):
+        return None
+    K, M = layer.in_features, layer.out_features
+    GPR, BPR = K // layer.group_size, K // layer.block_size
+    N = x_2d.shape[0]
+    y = torch.empty((N, M), dtype=torch.float16, device=x_2d.device)
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(N, meta["BLOCK_N"]))  # noqa: E731
+    _vq_gemm_planes_kernel[grid](
+        x_2d, x_2d.stride(0), x_2d.stride(1),
+        y, y.stride(0), y.stride(1),
+        layer.indices_lo_0, layer.indices_hi_0, layer.indices_lo_1, layer.indices_hi_1,
+        layer.codebook_0, layer.codebook_1,
+        layer.scales,
+        M, N, K, GPR, BPR,
+        layer.group_size, layer.block_size, layer.n_stages, hi_bits,
+        GROUP_MAJOR=bool(getattr(layer, "_group_major", False)),
+    )
+    return y
+
+
 # The VQLinear forward dispatcher lives in orka.inference.dispatch (it orchestrates
 # this Triton backend and the CUDA backend in cuda_decode).
