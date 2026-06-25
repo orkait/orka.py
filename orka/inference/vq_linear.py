@@ -228,10 +228,12 @@ class VQLinear(nn.Module):
     def _forward_planed(self, x: torch.Tensor) -> torch.Tensor:
         K, M = self.in_features, self.out_features
         x_2d = x.reshape(-1, K)
-        if x_2d.shape[0] == 1 and x_2d.is_cuda:
+        if x_2d.is_cuda:
+            xf = x_2d.to(torch.float16)
+            y = None
             try:
-                from orka.inference.triton_kernels import _vq_decode_planes_n1
-                y = _vq_decode_planes_n1(self, x_2d.to(torch.float16))
+                from orka.inference.triton_kernels import _vq_decode_planes_n1, _vq_gemm_planes
+                y = _vq_decode_planes_n1(self, xf) if xf.shape[0] == 1 else _vq_gemm_planes(self, xf)
             except Exception:
                 y = None
             if y is not None:
