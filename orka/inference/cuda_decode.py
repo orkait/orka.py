@@ -154,6 +154,7 @@ def supported(layer, n_tokens: int) -> bool:
         and getattr(layer, "block_size", 0) == 32
         and layer.in_features % 32 == 0
         and getattr(layer, "_group_major", False)  # kernel reads group-major directly
+        and layer.indices_0.dtype == torch.int16    # float4 kernel reads int16 indices
         and layer.scales.is_cuda
         and _get_module() is not None
     )
@@ -249,6 +250,7 @@ def supported_prefill(layer, n_tokens: int) -> bool:
         and getattr(layer, "group_size", 0) == 8
         and getattr(layer, "block_size", 0) == 32
         and getattr(layer, "_group_major", False)
+        and layer.indices_0.dtype == torch.int16    # ddense kernel reads int16 indices
         and layer.scales.is_cuda
         and _get_module() is not None
     )

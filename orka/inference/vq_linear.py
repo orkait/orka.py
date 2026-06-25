@@ -66,8 +66,13 @@ class VQLinear(nn.Module):
         n_scale_blocks = math.ceil(total / block_size)
 
         for s in range(n_stages):
-            # int16 holds [0, 4095] (max cb_size=4096) without overflow
-            self.register_buffer(f"indices_{s}", torch.zeros(n_groups, dtype=torch.int16))
+            # Index width follows the codebook size: uint8 holds [0,255] for <=256-entry
+            # codebooks (8-bit stages, e.g. rvq-8-8) - half the VRAM of int16; int16 holds
+            # up to 4096. The Triton kernels infer the pointer dtype, so they read either
+            # transparently; the CUDA float4 path is int16-only and self-gates (see
+            # cuda_decode.supported). uint8 not int8: 256 entries need [0,255] unsigned.
+            idx_dtype = torch.uint8 if self.cb_sizes[s] <= 256 else torch.int16
+            self.register_buffer(f"indices_{s}", torch.zeros(n_groups, dtype=idx_dtype))
             self.register_buffer(f"codebook_{s}", torch.zeros(self.cb_sizes[s], group_size, dtype=torch.float16))
 
         self.register_buffer("scales", torch.ones(n_scale_blocks, dtype=torch.float16))
@@ -228,7 +233,8 @@ def _register_layer_buffers(layer, artifact_dir, stages, group_size, block_size,
             s_group,
             stage.get("codebook_dtype", "float16"),
         )
-        getattr(layer, f"indices_{s}").copy_(torch.from_numpy(idxs.astype(np.int16)))
+        idx_buf = getattr(layer, f"indices_{s}")
+        idx_buf.copy_(torch.from_numpy(np.ascontiguousarray(idxs).copy()).to(idx_buf.dtype))
         getattr(layer, f"codebook_{s}").copy_(torch.from_numpy(cb).to(torch.float16))
 
     # --- Load scales ---
