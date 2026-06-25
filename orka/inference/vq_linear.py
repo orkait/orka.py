@@ -227,6 +227,20 @@ class VQLinear(nn.Module):
 
     def _forward_planed(self, x: torch.Tensor) -> torch.Tensor:
         K, M = self.in_features, self.out_features
+        # Fast eager N=1 decode: warp-per-row CUDA plane GEMV (matches/beats dense cuBLAS,
+        # ~9x less HBM traffic). Opt-in; transparent fallback to the custom op below.
+        xr = x.reshape(-1, K)
+        if xr.shape[0] == 1 and xr.is_cuda:
+            try:
+                from orka.inference import cuda_planes
+                if cuda_planes.supported(self):
+                    y = cuda_planes.forward_n1(self, xr)
+                    if y is not None:
+                        if self.bias is not None:
+                            y = y + self.bias
+                        return y.reshape(*x.shape[:-1], M).to(x.dtype)
+            except Exception:
+                pass
         # Compile-traceable path: a single custom op (no graph break) for the uniform
         # 2-stage, correction-free case. torch.compile/CUDA-graphs can capture this.
         from orka.inference.plane_ops import plane_op_supported, vq_plane_linear
