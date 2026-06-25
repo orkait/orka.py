@@ -82,8 +82,46 @@ def export_gguf(artifact_dir, config_dir, out_path) -> dict:
         writer.add_uint32(meta + "group_major", int(bool(getattr(layer, "_group_major", False))))
         n_quant += 1
 
+    # Passthrough tensors (layernorms, biases, rotary inv_freq) - needed for a full forward.
+    n_pass = 0
+    passthrough = artifact_dir / "passthrough.safetensors"
+    if passthrough.exists():
+        from safetensors import safe_open
+        with safe_open(str(passthrough), "pt") as f:
+            for k in f.keys():
+                if k.endswith(".attention.bias") or k.endswith(".masked_bias"):
+                    continue  # causal-mask buffers, rebuilt at runtime
+                writer.add_tensor(k, f.get_tensor(k).float().numpy().astype(np.float32))
+                n_pass += 1
+
+    # Architecture hyperparameters from config.json (for the runner to build the graph).
+    cfg_path = Path(config_dir) / "config.json"
+    if cfg_path.exists():
+        cfg = json.loads(cfg_path.read_text())
+        def hp(*names, default=None):
+            for n in names:
+                if n in cfg:
+                    return cfg[n]
+            return default
+        kv = {
+            "n_layer": hp("n_layer", "num_hidden_layers"),
+            "n_head": hp("n_head", "num_attention_heads"),
+            "n_embd": hp("n_embd", "hidden_size"),
+            "n_ff": hp("n_ff", "intermediate_size"),
+            "n_vocab": hp("n_vocab", "vocab_size"),
+            "n_ctx": hp("n_ctx", "max_position_embeddings", default=2048),
+        }
+        for k, v in kv.items():
+            if v is not None:
+                writer.add_uint32(ORKA_META_PREFIX + "arch." + k, int(v))
+        rp = hp("rotary_pct", "partial_rotary_factor", default=1.0)
+        writer.add_float32(ORKA_META_PREFIX + "arch.rotary_pct", float(rp))
+        writer.add_float32(ORKA_META_PREFIX + "arch.rotary_base", float(hp("rotary_emb_base", "rope_theta", default=10000.0)))
+        writer.add_float32(ORKA_META_PREFIX + "arch.ln_eps", float(hp("layer_norm_eps", "layer_norm_epsilon", default=1e-5)))
+        writer.add_uint32(ORKA_META_PREFIX + "arch.parallel_residual", int(bool(hp("use_parallel_residual", default=True))))
+
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file()
     writer.close()
-    return {"out": str(out_path), "quantized_linears": n_quant}
+    return {"out": str(out_path), "quantized_linears": n_quant, "passthrough": n_pass}
