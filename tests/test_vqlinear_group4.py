@@ -35,7 +35,7 @@ class VQLinearGroup4ParityTest(unittest.TestCase):
         from orka.pipeline.decode import _decode_tensor
         from orka.inference.vq_linear import build_vq_linear
 
-        M, K = 128, 128
+        M, K = 256, 256   # 16384 vectors at group 4 - enough for codebooks up to 8192
         rng = np.random.RandomState(0)
         w = rng.standard_normal((M, K)).astype(np.float32)
         with tempfile.TemporaryDirectory() as tmp:
@@ -60,13 +60,19 @@ class VQLinearGroup4ParityTest(unittest.TestCase):
             layer = build_vq_linear(art, tm, bias=None, device="cuda").to("cuda").eval()
             return layer, W, M, K
 
-    def _check(self, group_size, block_scale_size, codebook_size, expect_dtype):
+    def _check(self, group_size, block_scale_size, codebook_size, tier):
         import torch
         import torch.nn.functional as F
 
         layer, W, M, K = self._pack_and_load(group_size, block_scale_size, codebook_size)
-        # index width follows codebook size (uint8 for <=256, else int16)
-        self.assertEqual(layer.indices_0.dtype, getattr(torch, expect_dtype))
+        # storage tier by index width: uint8 (<=8b) / planed (10,12b) / int16 (else)
+        if tier == "planed":
+            self.assertTrue(hasattr(layer, "indices_lo_0"))
+            self.assertFalse(hasattr(layer, "indices_0"))
+            self.assertGreater(layer._plane_width[0], 8)
+        else:
+            self.assertEqual(layer.indices_0.dtype, getattr(torch, tier))
+            self.assertEqual(layer._plane_width[0], 0)
         for N in (1, 8):
             x = torch.randn(N, K, device="cuda", dtype=torch.float16)
             with torch.no_grad():
@@ -74,16 +80,24 @@ class VQLinearGroup4ParityTest(unittest.TestCase):
                 y_dense = F.linear(x, W).float()
             torch.testing.assert_close(y_kernel, y_dense, rtol=3e-2, atol=3e-2)
 
-    def test_group4_uint8_indices_match_dense(self):
-        # rvq-8-8-style: 256-entry codebook -> uint8 indices (half the VRAM)
-        self._check(group_size=4, block_scale_size=16, codebook_size=256, expect_dtype="uint8")
+    def test_uint8_indices_match_dense(self):
+        # 256-entry codebook -> uint8 (8-bit), half the int16 VRAM
+        self._check(group_size=4, block_scale_size=16, codebook_size=256, tier="uint8")
 
-    def test_group4_int16_indices_match_dense(self):
-        # rvq-12-12-style: >256-entry codebook -> int16 indices
-        self._check(group_size=4, block_scale_size=16, codebook_size=512, expect_dtype="int16")
+    def test_planed10_indices_match_dense(self):
+        # 1024-entry -> 10-bit -> bit-planes (lo uint8 + 2-bit hi)
+        self._check(group_size=4, block_scale_size=16, codebook_size=1024, tier="planed")
+
+    def test_planed12_indices_match_dense(self):
+        # 4096-entry -> 12-bit -> bit-planes (lo uint8 + 4-bit hi); the rvq-12-12 regime
+        self._check(group_size=4, block_scale_size=16, codebook_size=4096, tier="planed")
+
+    def test_int16_indices_match_dense(self):
+        # 8192-entry -> 13-bit -> int16 (planes only engage for 10/12)
+        self._check(group_size=4, block_scale_size=16, codebook_size=8192, tier="int16")
 
     def test_group8_still_matches_dense(self):
-        self._check(group_size=8, block_scale_size=32, codebook_size=256, expect_dtype="uint8")
+        self._check(group_size=8, block_scale_size=32, codebook_size=256, tier="uint8")
 
 
 if __name__ == "__main__":
