@@ -99,6 +99,10 @@ class VQLinearGroup4ParityTest(unittest.TestCase):
     def test_group8_still_matches_dense(self):
         self._check(group_size=8, block_scale_size=32, codebook_size=256, tier="uint8")
 
+    def test_planed_group8_matches_dense(self):
+        # group-8 + 1024 codebook -> 10-bit planes -> warp kernel G=8 half2 path
+        self._check(group_size=8, block_scale_size=32, codebook_size=1024, tier="planed")
+
 
 if __name__ == "__main__":
     unittest.main()
