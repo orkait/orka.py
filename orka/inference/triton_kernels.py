@@ -125,6 +125,106 @@ def _vq_decode_n1(layer, x_2d: torch.Tensor) -> torch.Tensor:
     return y.view(1, M).to(torch.float16)
 
 
+# ---------------------------------------------------------------------------
+# Decode kernel reading bit-PLANED indices (N=1 hot path)
+# ---------------------------------------------------------------------------
+# Same matvec as _vq_decode_kernel, but each index is reconstructed from two
+# byte-aligned planes instead of an int16/uint8 buffer:
+#   idx = lo | (hi << 8),  hi extracted from a (HI_BITS)-packed byte (MSB-first).
+# HBM traffic = lo (1 B) + hi (HI_BITS/8 B) per index = the packed width, < int16.
+# Uniform HI_BITS across stages; 2-stage; HI_BITS in {2,4} so a value never straddles.
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": 64},  num_warps=2),
+        triton.Config({"BLOCK_M": 128}, num_warps=4),
+        triton.Config({"BLOCK_M": 256}, num_warps=4),
+        triton.Config({"BLOCK_M": 256}, num_warps=8),
+    ],
+    key=["M", "GPR"],
+)
+@triton.jit
+def _vq_decode_planes_kernel(
+    x_ptr,
+    lo0_ptr, hi0_ptr, lo1_ptr, hi1_ptr,
+    cb0_ptr, cb1_ptr,
+    scale_ptr, y_ptr,
+    M, GPR, BPR,
+    G: tl.constexpr,
+    GROUPS_PER_BLOCK: tl.constexpr,
+    N_STAGES: tl.constexpr,
+    HI_BITS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    GROUP_MAJOR: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    m_ids = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    m_mask = m_ids < M
+    e = tl.arange(0, G)
+    acc = tl.zeros([BLOCK_M], dtype=tl.float32)
+    per = 8 // HI_BITS
+    himask = (1 << HI_BITS) - 1
+
+    for g in tl.range(0, GPR):
+        x_g = tl.load(x_ptr + g * G + e).to(tl.float32)
+        b = g // GROUPS_PER_BLOCK
+        if GROUP_MAJOR:
+            i_off = g * M + m_ids
+            s_off = b * M + m_ids
+        else:
+            i_off = m_ids * GPR + g
+            s_off = m_ids * BPR + b
+        scale = tl.load(scale_ptr + s_off, mask=m_mask, other=0.0).to(tl.float32)
+
+        lo0 = tl.load(lo0_ptr + i_off, mask=m_mask, other=0).to(tl.int32)
+        byte0 = tl.load(hi0_ptr + (i_off * HI_BITS) // 8, mask=m_mask, other=0).to(tl.int32)
+        shift0 = 8 - ((i_off % per) + 1) * HI_BITS
+        idx0 = lo0 | (((byte0 >> shift0) & himask) << 8)
+        cbe0 = tl.load(cb0_ptr + idx0[:, None] * G + e[None, :], mask=m_mask[:, None], other=0.0).to(tl.float32)
+        dot = tl.sum(cbe0 * x_g[None, :], axis=1)
+
+        if N_STAGES >= 2:
+            lo1 = tl.load(lo1_ptr + i_off, mask=m_mask, other=0).to(tl.int32)
+            byte1 = tl.load(hi1_ptr + (i_off * HI_BITS) // 8, mask=m_mask, other=0).to(tl.int32)
+            shift1 = 8 - ((i_off % per) + 1) * HI_BITS
+            idx1 = lo1 | (((byte1 >> shift1) & himask) << 8)
+            cbe1 = tl.load(cb1_ptr + idx1[:, None] * G + e[None, :], mask=m_mask[:, None], other=0.0).to(tl.float32)
+            dot += tl.sum(cbe1 * x_g[None, :], axis=1)
+
+        acc += scale * dot
+
+    tl.store(y_ptr + m_ids, acc, mask=m_mask)
+
+
+def _vq_decode_planes_n1(layer, x_2d: torch.Tensor):
+    """N=1 decode reading bit-planed indices. Returns y [1,M] fp16, or None if the
+    layer's plane layout is unsupported (non-uniform hi-bits / >2 stages / not planed)."""
+    widths = getattr(layer, "_plane_width", None)
+    if not widths or layer.n_stages != 2:
+        return None
+    if widths[0] == 0 or any(w != widths[0] for w in widths):
+        return None
+    hi_bits = widths[0] - 8
+    if hi_bits not in (2, 4):
+        return None
+    G, B = layer.group_size, layer.block_size
+    K, M = layer.in_features, layer.out_features
+    GPR, BPR = K // G, K // B
+    x_flat = x_2d.view(K).contiguous()
+    y = torch.empty(M, dtype=torch.float32, device=x_2d.device)
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)  # noqa: E731
+    _vq_decode_planes_kernel[grid](
+        x_flat,
+        layer.indices_lo_0, layer.indices_hi_0, layer.indices_lo_1, layer.indices_hi_1,
+        layer.codebook_0, layer.codebook_1,
+        layer.scales, y,
+        M, GPR, BPR,
+        G, B // G, layer.n_stages, hi_bits,
+        GROUP_MAJOR=bool(getattr(layer, "_group_major", False)),
+    )
+    return y.view(1, M).to(torch.float16)
+
+
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_M": 64,  "BLOCK_N": 64,  "BLOCK_K": 64}, num_warps=4, num_stages=2),
