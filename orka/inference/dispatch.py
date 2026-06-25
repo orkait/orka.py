@@ -32,8 +32,11 @@ def vq_linear_forward(layer, x: torch.Tensor) -> torch.Tensor:
     K = layer.in_features
     M = layer.out_features
 
-    assert G == 8, f"kernel requires group_size=8, got {G}"
-    assert B == 32, f"kernel requires block_size=32, got {B}"
+    # The Triton kernels (_vq_decode_n1 / _vq_gemm_kernel) are general over group_size
+    # and block_size (G/B are constexpr args). The CUDA float4 fast path is the only
+    # group_size==8 specialization, and it self-gates via cuda_decode.supported()
+    # (returns False for other G -> transparent Triton fallback). So the dispatcher only
+    # needs the divisibility invariants the layout relies on, not a fixed G/B.
     assert K % G == 0, f"in_features={K} must be divisible by G={G}"
     assert K % B == 0, f"in_features={K} must be divisible by B={B}"
 
