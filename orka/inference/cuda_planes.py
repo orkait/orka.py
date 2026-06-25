@@ -21,8 +21,9 @@ _CUDA_SRC = r'''
 #include <cuda_fp16.h>
 
 // One warp per output row m; the 32 lanes split the GPR-group loop and shfl-reduce.
-// Row-major indices (p = m*GPR + g): sequential per-lane hi-byte reads. G==4 codeword
-// is a single float2 load per stage.
+// Row-major indices (p = m*GPR + g): sequential per-lane hi-byte reads. General over
+// even group_size G: the G-half codeword is G/2 __half2 (G==4 takes the float2 fast
+// path, one 8-byte load per stage; larger G loops the half2 reads, all L2-resident).
 __global__ void gemv_planes(
     const unsigned char* __restrict__ lo0, const unsigned char* __restrict__ hi0,
     const unsigned char* __restrict__ lo1, const unsigned char* __restrict__ hi1,
@@ -32,7 +33,7 @@ __global__ void gemv_planes(
   int gid = blockIdx.x * blockDim.x + threadIdx.x;
   int m = gid >> 5, lane = gid & 31;
   if (m >= M) return;
-  int per = 8 / HI_BITS, himask = (1 << HI_BITS) - 1;
+  int per = 8 / HI_BITS, himask = (1 << HI_BITS) - 1, GH = G >> 1;
   const __half2* x2 = (const __half2*)x;
   float acc = 0.0f;
   for (int g = lane; g < GPR; g += 32) {
@@ -43,14 +44,25 @@ __global__ void gemv_planes(
     int bo = (p * HI_BITS) >> 3;
     int i0 = lo0[p] | ((((int)__ldg(&hi0[bo]) >> sh) & himask) << 8);
     int i1 = lo1[p] | ((((int)__ldg(&hi1[bo]) >> sh) & himask) << 8);
-    float2 r0 = __ldg((const float2*)(cb0 + (i0 << 2)));
-    float2 r1 = __ldg((const float2*)(cb1 + (i1 << 2)));
-    const __half2* a = (const __half2*)&r0; const __half2* b = (const __half2*)&r1;
-    const __half2* xv = x2 + g * 2;
-    __half2 w0 = __hadd2(a[0], b[0]), w1 = __hadd2(a[1], b[1]);
-    float2 wf0 = __half22float2(w0), wf1 = __half22float2(w1);
-    float2 xf0 = __half22float2(__ldg(&xv[0])), xf1 = __half22float2(__ldg(&xv[1]));
-    acc += s * (wf0.x * xf0.x + wf0.y * xf0.y + wf1.x * xf1.x + wf1.y * xf1.y);
+    const __half2* c0 = (const __half2*)(cb0 + i0 * G);
+    const __half2* c1 = (const __half2*)(cb1 + i1 * G);
+    const __half2* xv = x2 + g * GH;
+    float dot = 0.0f;
+    if (G == 4) {                               // float2 fast path (one 8B load/stage)
+      float2 r0 = __ldg((const float2*)c0), r1 = __ldg((const float2*)c1);
+      const __half2* a = (const __half2*)&r0; const __half2* b = (const __half2*)&r1;
+      __half2 w0 = __hadd2(a[0], b[0]), w1 = __hadd2(a[1], b[1]);
+      float2 wf0 = __half22float2(w0), wf1 = __half22float2(w1);
+      float2 xf0 = __half22float2(__ldg(&xv[0])), xf1 = __half22float2(__ldg(&xv[1]));
+      dot = wf0.x * xf0.x + wf0.y * xf0.y + wf1.x * xf1.x + wf1.y * xf1.y;
+    } else {
+      for (int e = 0; e < GH; e++) {
+        __half2 w = __hadd2(__ldg(&c0[e]), __ldg(&c1[e]));
+        float2 wf = __half22float2(w), xf = __half22float2(__ldg(&xv[e]));
+        dot += wf.x * xf.x + wf.y * xf.y;
+      }
+    }
+    acc += s * dot;
   }
   #pragma unroll
   for (int o = 16; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffff, acc, o);
@@ -108,7 +120,7 @@ def supported(layer) -> bool:
     if (widths[0] - 8) not in (2, 4):
         return False
     return (
-        layer.group_size == 4                       # float2 codeword path
+        layer.group_size % 2 == 0                    # half2 codeword (float2 fast path at G=4)
         and not getattr(layer, "_group_major", False)  # kernel reads row-major indices
         and layer.corr_col.numel() == 0
         and layer.scales.is_cuda
