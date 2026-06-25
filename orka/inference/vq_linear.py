@@ -65,14 +65,25 @@ class VQLinear(nn.Module):
         n_groups = math.ceil(total / group_size)
         n_scale_blocks = math.ceil(total / block_size)
 
+        # Per-stage index width = bits to address the codebook. Storage tiers:
+        #   width <= 8        -> uint8 buffer indices_{s}        (#83)
+        #   width in {10,12}  -> byte-aligned bit-planes lo/hi   (this change; 5-6 bpw)
+        #   else (9,11,13-16) -> int16 buffer indices_{s}
+        # Planes engage only when the high bits (width-8) divide a byte (2 or 4) so no
+        # index straddles a byte - keeps the read coalesced and the kernel branch-free.
+        self._plane_width = []
         for s in range(n_stages):
-            # Index width follows the codebook size: uint8 holds [0,255] for <=256-entry
-            # codebooks (8-bit stages, e.g. rvq-8-8) - half the VRAM of int16; int16 holds
-            # up to 4096. The Triton kernels infer the pointer dtype, so they read either
-            # transparently; the CUDA float4 path is int16-only and self-gates (see
-            # cuda_decode.supported). uint8 not int8: 256 entries need [0,255] unsigned.
-            idx_dtype = torch.uint8 if self.cb_sizes[s] <= 256 else torch.int16
-            self.register_buffer(f"indices_{s}", torch.zeros(n_groups, dtype=idx_dtype))
+            width = max(1, (self.cb_sizes[s] - 1).bit_length())
+            planed = 8 < width <= 12 and (width - 8) in (2, 4)
+            self._plane_width.append(width if planed else 0)
+            if planed:
+                hi_bits = width - 8
+                hi_bytes = math.ceil(n_groups * hi_bits / 8)
+                self.register_buffer(f"indices_lo_{s}", torch.zeros(n_groups, dtype=torch.uint8))
+                self.register_buffer(f"indices_hi_{s}", torch.zeros(hi_bytes, dtype=torch.uint8))
+            else:
+                idx_dtype = torch.uint8 if self.cb_sizes[s] <= 256 else torch.int16
+                self.register_buffer(f"indices_{s}", torch.zeros(n_groups, dtype=idx_dtype))
             self.register_buffer(f"codebook_{s}", torch.zeros(self.cb_sizes[s], group_size, dtype=torch.float16))
 
         self.register_buffer("scales", torch.ones(n_scale_blocks, dtype=torch.float16))
@@ -129,6 +140,25 @@ class VQLinear(nn.Module):
     # Weight reconstruction (for testing / fallback)
     # ------------------------------------------------------------------
 
+    def _stage_indices_int(self, s: int) -> torch.Tensor:
+        """Return stage ``s`` indices as int64 [n_groups], regardless of storage tier
+        (int16/uint8 buffer, or lo/hi bit-planes reconstructed as ``lo | hi<<8``)."""
+        width = self._plane_width[s] if s < len(self._plane_width) else 0
+        if width == 0:
+            return getattr(self, f"indices_{s}").to(torch.int64)
+        lo = getattr(self, f"indices_lo_{s}")
+        hi = getattr(self, f"indices_hi_{s}")
+        n = lo.numel()
+        hi_bits = width - 8
+        per = 8 // hi_bits
+        mask = (1 << hi_bits) - 1
+        # MSB-first packing: slot j (0=top) occupies bits [8-(j+1)*hi_bits, ...)
+        shifts = torch.tensor(
+            [8 - (j + 1) * hi_bits for j in range(per)], device=hi.device, dtype=torch.int32
+        )
+        hi_vals = ((hi.to(torch.int32)[:, None] >> shifts[None, :]) & mask).reshape(-1)[:n]
+        return lo.to(torch.int64) | (hi_vals.to(torch.int64) << 8)
+
     def reconstruct_weight(self) -> torch.Tensor:
         """Decode full W [out, in] fp32. Expensive - for testing only."""
         dev = self.scales.device
@@ -142,7 +172,7 @@ class VQLinear(nn.Module):
 
         decoded = torch.zeros(padded, dtype=torch.float32, device=dev)
         for s in range(self.n_stages):
-            idxs = getattr(self, f"indices_{s}").long()
+            idxs = self._stage_indices_int(s)
             if gm and idxs.numel() == total // G:
                 idxs = idxs.view(total // G // M, M).t().reshape(-1)
             cb = getattr(self, f"codebook_{s}").float()
@@ -185,6 +215,11 @@ class VQLinear(nn.Module):
         return self._triton_ok
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Bit-planed stages have no kernel path yet (the Triton kernels read int16/uint8
+        # index buffers); decode them through the dense reconstruct path. Correct, and
+        # the planes stay VRAM-resident. Non-planed layers keep the fast kernel dispatch.
+        if any(getattr(self, "_plane_width", ()) or ()):
+            return self._forward_python(x)
         if self._triton_available():
             from orka.inference.dispatch import vq_linear_forward
             return vq_linear_forward(self, x)
@@ -233,8 +268,15 @@ def _register_layer_buffers(layer, artifact_dir, stages, group_size, block_size,
             s_group,
             stage.get("codebook_dtype", "float16"),
         )
-        idx_buf = getattr(layer, f"indices_{s}")
-        idx_buf.copy_(torch.from_numpy(np.ascontiguousarray(idxs).copy()).to(idx_buf.dtype))
+        width = layer._plane_width[s] if s < len(layer._plane_width) else 0
+        if width:
+            from orka._format import _pack_index_planes
+            lo, hi = _pack_index_planes(idxs, width)
+            getattr(layer, f"indices_lo_{s}").copy_(torch.from_numpy(lo))
+            getattr(layer, f"indices_hi_{s}").copy_(torch.from_numpy(hi))
+        else:
+            idx_buf = getattr(layer, f"indices_{s}")
+            idx_buf.copy_(torch.from_numpy(np.ascontiguousarray(idxs).copy()).to(idx_buf.dtype))
         getattr(layer, f"codebook_{s}").copy_(torch.from_numpy(cb).to(torch.float16))
 
     # --- Load scales ---
@@ -276,7 +318,7 @@ def _build_csr_correction(layer, artifact_dir, tensor_meta, n_stages, group_size
         within_g = flat_t % group_size
         dec = torch.zeros(len(flat_t), dtype=torch.float32)
         for s in range(n_stages):
-            idxs_s = getattr(layer, f"indices_{s}").long()[group_ids]
+            idxs_s = layer._stage_indices_int(s)[group_ids]
             cb_s = getattr(layer, f"codebook_{s}").float()
             dec += cb_s[idxs_s, within_g]
         if scales_np is not None:
@@ -355,6 +397,10 @@ def _to_group_major(layer, n_stages, group_size, block_size, in_features, out_fe
     keeps the buffers registered; the transient transpose copy is freed at load
     time (not during inference), so the inference footprint holds only one layout.
     """
+    # Bit-planed tensors stay row-major (the packed high plane cannot be transposed in
+    # place); they decode through the dense reconstruct path, which handles row-major.
+    if any(getattr(layer, "_plane_width", ()) or ()):
+        return
     if in_features % group_size == 0 and in_features % block_size == 0:
         gpr = in_features // group_size
         bpr = in_features // block_size
