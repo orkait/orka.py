@@ -29,7 +29,7 @@ def _has_cuda():
 
 @unittest.skipUnless(_has_cuda(), "CUDA required for VQLinear kernels")
 class VQLinearGroup4ParityTest(unittest.TestCase):
-    def _pack_and_load(self, group_size, block_scale_size, codebook_size):
+    def _pack_and_load(self, group_size, block_scale_size, codebook_size, n_stages=2):
         import torch
         from orka.pipeline.pack import pack_checkpoint
         from orka.pipeline.decode import _decode_tensor
@@ -48,7 +48,7 @@ class VQLinearGroup4ParityTest(unittest.TestCase):
                 src, art, group_size=group_size, codebook_size=codebook_size, iterations=4,
                 codebook_mode="per-tensor", sample_vectors=None, backend="numpy",
                 normalization="block-max", block_scale_size=block_scale_size,
-                codebook_sizes=[codebook_size, codebook_size], em_aq_passes=0,
+                codebook_sizes=[codebook_size] * n_stages, em_aq_passes=0,
             )
             manifest = json.loads((art / "manifest.json").read_text())
             tm = manifest["tensors"][0]
@@ -60,11 +60,12 @@ class VQLinearGroup4ParityTest(unittest.TestCase):
             layer = build_vq_linear(art, tm, bias=None, device="cuda").to("cuda").eval()
             return layer, W, M, K
 
-    def _check(self, group_size, block_scale_size, codebook_size, tier):
+    def _check(self, group_size, block_scale_size, codebook_size, tier, n_stages=2):
         import torch
         import torch.nn.functional as F
 
-        layer, W, M, K = self._pack_and_load(group_size, block_scale_size, codebook_size)
+        layer, W, M, K = self._pack_and_load(group_size, block_scale_size, codebook_size, n_stages)
+        self.assertEqual(layer.n_stages, n_stages)
         # storage tier by index width: uint8 (<=8b) / planed (10,12b) / int16 (else)
         if tier == "planed":
             self.assertTrue(hasattr(layer, "indices_lo_0"))
@@ -102,6 +103,13 @@ class VQLinearGroup4ParityTest(unittest.TestCase):
     def test_planed_group8_matches_dense(self):
         # group-8 + 1024 codebook -> 10-bit planes -> warp kernel G=8 half2 path
         self._check(group_size=8, block_scale_size=32, codebook_size=1024, tier="planed")
+
+
+    def test_planed_1stage_matches_dense(self):
+        self._check(group_size=4, block_scale_size=16, codebook_size=1024, tier="planed", n_stages=1)
+
+    def test_planed_3stage_matches_dense(self):
+        self._check(group_size=4, block_scale_size=16, codebook_size=1024, tier="planed", n_stages=3)
 
 
 if __name__ == "__main__":
