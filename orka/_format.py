@@ -113,6 +113,41 @@ def _unpack_indices(packed, bits: int, count: int):
     return (bitmat * weights).sum(axis=1).astype(np.int64)
 
 
+def _pack_index_planes(indices, width: int):
+    """Split ``width``-bit unsigned indices into two byte-aligned bit-planes:
+
+      lo : uint8[count]          - the low 8 bits of each index (a pure byte array)
+      hi : packed (width-8) bits - the high bits, bit-packed via _pack_indices
+
+    This is the VRAM-resident layout for arbitrary index widths. The low plane is a
+    plain uint8 array (coalesced GPU reads, == the width<=8 / uint8 case); the high
+    plane carries only the bits above 8, so total storage is exactly ``count * width``
+    bits with no int16 padding. A GPU kernel reconstructs ``idx = lo | (hi << 8)``.
+    For width<=8 the high plane is empty.
+    """
+    import numpy as np
+
+    arr = np.asarray(indices, dtype=np.uint64).reshape(-1)
+    lo = (arr & np.uint64(0xFF)).astype(np.uint8)
+    if width <= 8:
+        return lo, np.zeros(0, dtype=np.uint8)
+    hi_vals = arr >> np.uint64(8)
+    return lo, _pack_indices(hi_vals, width - 8)
+
+
+def _unpack_index_planes(lo, hi_packed, width: int, count: int):
+    """Inverse of ``_pack_index_planes``: recover ``count`` width-bit indices."""
+    import numpy as np
+
+    if count == 0:
+        return np.zeros(0, dtype=np.int64)
+    idx = np.asarray(lo, dtype=np.uint64)[:count].copy()
+    if width > 8:
+        hi = _unpack_indices(hi_packed, width - 8, count).astype(np.uint64)
+        idx = idx | (hi << np.uint64(8))
+    return idx.astype(np.int64)
+
+
 def _write_indices(
     path: Path,
     indices: Sequence[int],
