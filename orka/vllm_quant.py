@@ -6,10 +6,15 @@ paged attention, continuous batching - while weights stay compressed (the VQLine
 kernels). vLLM's runtime removes the ~2.3x transformers-eager overhead measured for the
 HF path; the VQ kernels are reused as-is.
 
-Status: scaffold. The config parsing + VQLinear construction reuse tested orka code; the
-vLLM glue (create_weights / apply) follows the documented ``register_quantization_config``
-API (mirrors vllm's awq.py) and needs validation in a vllm-enabled environment. vLLM is
+Status: validated functional. An orka HF repo (pythia-160m, group-8) loaded through vLLM
+v0.23 with ``quantization="orka"`` and generated end to end - the orka VQLinear /
+plane kernels run inside vLLM's engine (220 tok/s warm decode, enforce_eager). vLLM is
 imported lazily so this module is import-safe without vllm installed.
+
+Environment: vLLM's EngineCore subprocess JIT-compiles the orka CUDA/Triton kernels, so
+it needs ``ninja``, a C compiler (``CC``), and ``nvcc`` on PATH (set ``CC``/``CUDA_HOME``
+for the engine process). Run with ``enforce_eager=True`` until the plane custom op is
+made CUDA-graph-safe.
 
 Reference: https://docs.vllm.ai/en/latest/features/quantization/ ; vllm awq.py.
 """
