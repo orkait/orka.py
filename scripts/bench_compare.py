@@ -3,7 +3,8 @@
 Configs: fp16 dense | bitsandbytes-4bit (unsloth's quant backend) | orka RVQ.
 Metrics: disk size, bits/param, VRAM, prefill tok/s, decode tok/s, perplexity (behaviour).
 """
-import os, time, json, gc
+import os, sys, time, json, gc
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
