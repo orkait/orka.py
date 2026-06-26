@@ -94,24 +94,37 @@ def passthrough(name):
     with safe_open(str(ART / "passthrough.safetensors"), "pt") as f:
         return f.get_tensor(name).float().numpy() if name in f.keys() else None
 
-# dense tensors
-emb = np.asarray(_decode_tensor(ART, next(t for t in manifest["tensors"] if t["name"]=="gpt_neox.embed_in.weight")), dtype=np.float32).reshape(n_vocab, n_embd)
-w.add_tensor("token_embd.weight", emb.astype(np.float16))
-# Output head is extremely precision-sensitive (a few % weight error => ppl blows up).
-# Standard practice (llama.cpp keeps `output` at Q6/F16) - keep it fp16, never RVQ it.
-# Prefer an fp16 head from ORKA_FP16_HEAD (the base model dir) if provided; else the
-# artifact's reconstruction (which, if the packer quantized the head, will be degraded).
+# Output head + embeddings: the head is too precision-sensitive for RVQ (a few % weight
+# error => ppl explodes 128->1.2M), but plain int8 is LOSSLESS (pythia ppl 6.85 vs 6.93 fp16)
+# at half the fp16 size, and llama.cpp runs Q8_0 output/embd natively on GPU. So store both
+# token_embd and output as Q8_0 (scalar int8), never RVQ. Source weights come from
+# ORKA_FP16_HEAD (base model) if given, else the artifact's dense reconstruction.
 import os as _os
-head_dir = _os.environ.get("ORKA_FP16_HEAD")
-if head_dir:
+from gguf import GGMLQuantizationType
+from gguf.quants import quantize as _gq
+
+def _from_base(base_key):
+    """Pull a clean (non-RVQ) tensor from the base model dir (ORKA_FP16_HEAD)."""
+    head_dir = _os.environ.get("ORKA_FP16_HEAD")
+    if not head_dir:
+        return None
     from safetensors import safe_open as _so
     import glob as _glob
     sf = _glob.glob(_os.path.join(head_dir, "*.safetensors"))[0]
     with _so(sf, "pt") as f:
-        out = f.get_tensor("embed_out.weight").float().numpy().reshape(n_vocab, n_embd)
-else:
-    out = np.asarray(_decode_tensor(ART, next(t for t in manifest["tensors"] if t["name"]=="embed_out.weight")), dtype=np.float32).reshape(n_vocab, n_embd)
-w.add_tensor("output.weight", out.astype(np.float16))
+        return f.get_tensor(base_key).float().numpy().reshape(n_vocab, n_embd) if base_key in f.keys() else None
+def _from_art(hf_name):
+    return np.asarray(_decode_tensor(ART, next(t for t in manifest["tensors"] if t["name"]==hf_name)), dtype=np.float32).reshape(n_vocab, n_embd)
+
+def _add_q8(name, arr):
+    w.add_tensor(name, _gq(arr.astype(np.float32), GGMLQuantizationType.Q8_0),
+                 raw_dtype=GGMLQuantizationType.Q8_0)
+
+# token_embd: RVQ-decoded embed_in is fine (ppl 130) -> Q8 it. output head: RVQ is
+# catastrophic, so use a clean int8 head (base if provided, else artifact decode).
+_add_q8("token_embd.weight", _from_art("gpt_neox.embed_in.weight"))
+_head = _from_base("embed_out.weight")
+_add_q8("output.weight", _head if _head is not None else _from_art("embed_out.weight"))
 def pf(hf, lc):
     a = passthrough(hf)
     if a is not None: w.add_tensor(lc, a.astype(np.float32))
@@ -132,7 +145,7 @@ for i in range(n_layer):
         GPR, BPR = K // layer.group_size, K // layer.block_size
         is_qkv = (lc == "attn_qkv")
         for s in range(layer.n_stages):
-            idx = layer._stage_indices_int(s).cpu().numpy().astype(np.int16).reshape(M, GPR)
+            idx = layer._stage_indices_int(s).cpu().numpy().astype(np.int32).reshape(M, GPR)
             if is_qkv: idx = idx[PERM]
             w.add_tensor(f"blk.{i}.{lc}.weight.idx{s}", idx.reshape(-1))
             cb = getattr(layer, f"codebook_{s}").cpu().numpy().astype(np.float16)
