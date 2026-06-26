@@ -144,6 +144,18 @@ for i in range(n_layer):
         M, K = layer.out_features, layer.in_features
         GPR, BPR = K // layer.group_size, K // layer.block_size
         is_qkv = (lc == "attn_qkv")
+        if _os.environ.get("ORKA_DENSE"):
+            # decompress-at-export: reconstruct W to a standard llama.cpp weight (full GPU
+            # speed via cuBLAS; disk loses orka compression). Q8_0 to keep size sane.
+            W = layer.reconstruct_weight().float().cpu().numpy()  # [M,K]
+            if is_qkv: W = W[PERM]
+            _add_q8(f"blk.{i}.{lc}.weight", W)
+            b = passthrough(P+hf_sub+".bias")
+            if b is not None:
+                if is_qkv: b = b[PERM]
+                w.add_tensor(f"blk.{i}.{lc}.bias", b.astype(np.float32))
+            n_quant += 1
+            continue
         for s in range(layer.n_stages):
             idx = layer._stage_indices_int(s).cpu().numpy().astype(np.int32).reshape(M, GPR)
             if is_qkv: idx = idx[PERM]
@@ -164,17 +176,18 @@ for i in range(n_layer):
         n_quant += 1
     orka_meta_pending = False
 
-w.add_uint32("orka.rvq", 1)
-w.add_uint32("orka.n_stages", N_STAGES)
-w.add_uint32("orka.group_size", GROUP)
-w.add_uint32("orka.block_size", BLOCK)
-w.add_uint32("orka.group_major", 0)
-# codebook sizes per stage (read from layer 0 qkv)
-tm0 = next(t for t in manifest["tensors"] if t["name"]=="gpt_neox.layers.0.attention.query_key_value.weight")
-l0 = build_vq_linear(ART, tm0, bias=None, device="cpu")
-for s in range(l0.n_stages):
-    cb = getattr(l0, f"codebook_{s}")
-    w.add_uint32(f"orka.cb_size.{s}", int(cb.shape[0]))
+if not _os.environ.get("ORKA_DENSE"):
+    w.add_uint32("orka.rvq", 1)
+    w.add_uint32("orka.n_stages", N_STAGES)
+    w.add_uint32("orka.group_size", GROUP)
+    w.add_uint32("orka.block_size", BLOCK)
+    w.add_uint32("orka.group_major", 0)
+    # codebook sizes per stage (read from layer 0 qkv)
+    tm0 = next(t for t in manifest["tensors"] if t["name"]=="gpt_neox.layers.0.attention.query_key_value.weight")
+    l0 = build_vq_linear(ART, tm0, bias=None, device="cpu")
+    for s in range(l0.n_stages):
+        cb = getattr(l0, f"codebook_{s}")
+        w.add_uint32(f"orka.cb_size.{s}", int(cb.shape[0]))
 
 w.write_header_to_file()
 w.write_kv_data_to_file()
