@@ -588,11 +588,22 @@ def cmd_autoquant(args: argparse.Namespace) -> int:
                 t = f.get_tensor(k)
                 if t.ndim in (1, 2):
                     weights[k] = t.astype("float32")
-    cfg = derive_config(weights, objective=args.objective, use_llm=not args.no_llm)
+    llm_fn = None
+    if not args.no_llm:
+        from orka.autoquant.transport import make_llm_fn, NoLLMBackend
+        try:
+            llm_fn = make_llm_fn()
+        except NoLLMBackend as e:
+            print(f"warning: {e}; using deterministic policy only")
+
+    cfg = derive_config(weights, objective=args.objective,
+                        use_llm=not args.no_llm, llm_fn=llm_fn)
     Path(args.out).write_text(_json.dumps(to_allocation_map(cfg), indent=2) + "\n")
     n_int8 = sum(1 for c in cfg.values() if c.method == "int8")
     n_rvq = sum(1 for c in cfg.values() if c.method == "rvq")
     n_fp16 = sum(1 for c in cfg.values() if c.method == "fp16")
-    print(f"autoquant({args.objective}): {len(cfg)} tensors -> rvq {n_rvq}, int8 {n_int8}, fp16 {n_fp16}")
+    n_llm = sum(1 for c in cfg.values() if c.source in ("llm", "cache"))
+    print(f"autoquant({args.objective}): {len(cfg)} tensors -> rvq {n_rvq}, int8 {n_int8}, "
+          f"fp16 {n_fp16} ({n_llm} via LLM/cache)")
     print(f"wrote {args.out}")
     return 0
