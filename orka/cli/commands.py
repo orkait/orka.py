@@ -566,3 +566,33 @@ def cmd_eval_sweep(args: argparse.Namespace) -> int:
         )
     )
     return 0
+
+
+def cmd_autoquant(args: argparse.Namespace) -> int:
+    import json as _json
+    from pathlib import Path
+    import numpy as np
+    from safetensors import safe_open
+    from orka.autoquant.orchestrator import derive_config
+    from orka.autoquant.schema import to_allocation_map
+
+    model = Path(args.model)
+    sfs = sorted(model.glob("*.safetensors"))
+    if not sfs:
+        print(f"no safetensors in {model}")
+        return 1
+    weights: dict[str, np.ndarray] = {}
+    for sf in sfs:
+        with safe_open(str(sf), "np") as f:
+            for k in f.keys():
+                t = f.get_tensor(k)
+                if t.ndim in (1, 2):
+                    weights[k] = t.astype("float32")
+    cfg = derive_config(weights, objective=args.objective, use_llm=not args.no_llm)
+    Path(args.out).write_text(_json.dumps(to_allocation_map(cfg), indent=2) + "\n")
+    n_int8 = sum(1 for c in cfg.values() if c.method == "int8")
+    n_rvq = sum(1 for c in cfg.values() if c.method == "rvq")
+    n_fp16 = sum(1 for c in cfg.values() if c.method == "fp16")
+    print(f"autoquant({args.objective}): {len(cfg)} tensors -> rvq {n_rvq}, int8 {n_int8}, fp16 {n_fp16}")
+    print(f"wrote {args.out}")
+    return 0
