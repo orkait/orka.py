@@ -114,7 +114,13 @@ def _from_base(base_key):
     with _so(sf, "pt") as f:
         return f.get_tensor(base_key).float().numpy().reshape(n_vocab, n_embd) if base_key in f.keys() else None
 def _from_art(hf_name):
-    return np.asarray(_decode_tensor(ART, next(t for t in manifest["tensors"] if t["name"]==hf_name)), dtype=np.float32).reshape(n_vocab, n_embd)
+    tm = next((t for t in manifest["tensors"] if t["name"] == hf_name), None)
+    if tm is None:                       # not packed (e.g. linears-only artifact) -> base
+        b = _from_base(hf_name)
+        if b is not None:
+            return b
+        raise KeyError(f"{hf_name} not in artifact and no ORKA_FP16_HEAD base")
+    return np.asarray(_decode_tensor(ART, tm), dtype=np.float32).reshape(n_vocab, n_embd)
 
 def _add_q8(name, arr):
     w.add_tensor(name, _gq(arr.astype(np.float32), GGMLQuantizationType.Q8_0),
@@ -157,10 +163,19 @@ for i in range(n_layer):
             n_quant += 1
             continue
         for s in range(layer.n_stages):
-            idx = layer._stage_indices_int(s).cpu().numpy().astype(np.int32).reshape(M, GPR)
-            if is_qkv: idx = idx[PERM]
-            w.add_tensor(f"blk.{i}.{lc}.weight.idx{s}", idx.reshape(-1))
+            # bit-plane indices (lo uint8 + hi packed) = orka's native index_bits storage,
+            # ~2.7x smaller than I32. qkv rows permuted before re-packing (hi is bit-packed,
+            # can't byte-permute). Engine unpacks lo/hi -> I32 at load.
+            from orka._format import _pack_index_planes
             cb = getattr(layer, f"codebook_{s}").cpu().numpy().astype(np.float16)
+            width = max(1, int(round(np.log2(cb.shape[0]))))
+            idx = layer._stage_indices_int(s).cpu().numpy().astype(np.int64).reshape(M, GPR)
+            if is_qkv: idx = idx[PERM]
+            lo, hi = _pack_index_planes(idx.reshape(-1), width)
+            # GGUFWriter has no uint8; store the raw bytes as I8 (engine reads bytes back).
+            w.add_tensor(f"blk.{i}.{lc}.weight.idxlo{s}", lo.view(np.int8))
+            hi = hi if hi.size else np.zeros(1, np.uint8)
+            w.add_tensor(f"blk.{i}.{lc}.weight.idxhi{s}", hi.view(np.int8))
             w.add_tensor(f"blk.{i}.{lc}.weight.cb{s}", cb.reshape(-1))
         sc = layer.scales.cpu().numpy().astype(np.float16).reshape(M, BPR)
         if is_qkv: sc = sc[PERM]
