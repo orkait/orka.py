@@ -10,6 +10,7 @@ import argparse
 from orka.allocate import DEFAULT_CANDIDATE_SPECS, cmd_allocate
 from orka.export import cmd_export_vllm
 from orka.cli.commands import (
+    cmd_autoquant,
     cmd_calc,
     cmd_correct,
     cmd_distill,
@@ -248,6 +249,15 @@ def _add_calc_parser(sub):
     calc.add_argument("--scale-block-vectors", type=int, default=64)
     calc.add_argument("--scale-bits", type=int, default=16)
     calc.set_defaults(func=cmd_calc)
+
+    aq = sub.add_parser("autoquant", help="auto-derive a per-tensor quant config for any model")
+    aq.add_argument("model", help="HF model dir (safetensors)")
+    aq.add_argument("--objective", choices=["min-bits", "max-quality", "knee"], default="knee")
+    aq.add_argument("--out", default="allocation_map.json")
+    aq.add_argument("--target", default=None, help="KL/bpw/MB target for min-bits/max-quality")
+    aq.add_argument("--prompts", default=None, help="pulse-check prompts file")
+    aq.add_argument("--no-llm", action="store_true", help="pure deterministic policy (no LLM)")
+    aq.set_defaults(func=cmd_autoquant)
 
 
 def _add_inspect_parser(sub):
