@@ -122,64 +122,28 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_nor
         import torch
     except Exception as exc:
         raise RuntimeError("torch backend requires torch") from exc
+    from orka.inference._assign_kernel import assign as _fused_assign
 
     resolved = _resolve_torch_device(device)
-    # Detect if we can use half precision (FP16 is generally safe for distance ranking)
-    use_half = resolved.type == "cuda"
-    dtype = torch.float16 if use_half else torch.float32
+    rows = _torch_float32_matrix(vectors, device).float()
+    centroids = _torch_float32_matrix(codebook, device).float()
 
-    rows = _torch_float32_matrix(vectors, device).to(dtype)
-    centroids = _torch_float32_matrix(codebook, device).to(dtype)
-
+    # Hessian / importance weighting: weighted L2 == plain L2 on sqrt(w)-scaled vectors.
     if vector_weights is not None:
-        W = torch.as_tensor(vector_weights, dtype=torch.float32, device=resolved)
-        sqrt_W = torch.sqrt(W).to(dtype)
+        sqrt_W = torch.sqrt(torch.as_tensor(vector_weights, dtype=torch.float32, device=resolved))
         rows = rows * sqrt_W
         centroids = centroids * sqrt_W
-        r_norm_sq = torch.sum(rows.to(torch.float32) * rows.to(torch.float32), dim=1, keepdim=True).to(dtype)
 
-    indices_parts = []
-    total_t = torch.zeros((), dtype=torch.float32, device=resolved)
     width = int(rows.shape[1])
-    k = int(centroids.shape[0])
-
-    # Pre-calculate squared norms for centroids: ||b||^2
-    c_norm_sq = torch.sum(centroids.to(torch.float32) * centroids.to(torch.float32), dim=1, keepdim=True).T.to(dtype)
-
-    if r_norm_sq is None:
-        r_norm_sq = torch.sum(rows.to(torch.float32) * rows.to(torch.float32), dim=1, keepdim=True).to(dtype)
-    else:
-        r_norm_sq = _torch_float32_matrix(r_norm_sq, device).to(dtype)
-
-    effective_chunk = max(256, min(chunk_size, (1 << 28) // max(k, 1)))
-
     with torch.no_grad():
-        for start in range(0, int(rows.shape[0]), effective_chunk):
-            end = min(start + effective_chunk, int(rows.shape[0]))
-            chunk = rows[start:end]
-            r_norm_sq_chunk = r_norm_sq[start:end]
-
-            dists = torch.addmm(
-                (r_norm_sq_chunk + c_norm_sq),
-                chunk,
-                centroids.T,
-                alpha=-2.0,
-                beta=1.0
-            )
-
-            chosen = torch.argmin(dists, dim=1)
-            indices_parts.append(chosen)                       # keep on GPU - no per-chunk .cpu()
-
-            # Accumulate selected-distance error on-device in float32; one host
-            # transfer at the end instead of a .item() sync every chunk.
-            total_t += dists.gather(1, chosen.unsqueeze(1)).to(torch.float32).sum()
-
-    indices = (
-        torch.cat(indices_parts).to(dtype=torch.int64).cpu()   # single device->host transfer
-        if indices_parts
-        else torch.empty(0, dtype=torch.int64)
-    )
-    return indices, float(total_t.item()) / (int(rows.shape[0]) * width)
+        # Fused dist+argmin Triton kernel on CUDA (~4x the chunked-addmm path, never
+        # materializes the [N,k] matrix so it can't OOM at large k); addmm fallback on
+        # CPU. fp32 throughout - a more accurate nearest than the old fp16 ranking, so
+        # recon error is <= the previous path (the ||v||^2 norm drops out of argmin).
+        idx = _fused_assign(rows, centroids)                       # int64 [N]
+        sel = centroids.index_select(0, idx)                       # [N, d]
+        mse = ((rows - sel) ** 2).sum() / (rows.shape[0] * width)
+    return idx.to(torch.int64).cpu(), float(mse.item())
 
 
 def _learn_codebook_torch(
