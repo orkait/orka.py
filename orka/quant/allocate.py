@@ -13,6 +13,7 @@ optionally importance-weighted via calibration activations.
 
 from __future__ import annotations
 
+import heapq
 import json
 from pathlib import Path
 from typing import Sequence
@@ -136,29 +137,37 @@ def build_allocation(
     total_params = sum(r["numel"] for r in rows)
     budget_bits = target_bpw * total_params
 
-    # Greedy marginal-utility upgrades from the cheapest spec.
+    # Greedy marginal-utility upgrades via a max-heap (priority queue): repeatedly
+    # pop the best distortion-per-bit upgrade, apply it, push that tensor's next
+    # step. O(T*S*log T) vs the O(T^2*S) rescan-every-round loop; provably the same
+    # allocation (heap-top-k / discrete water-filling). The k-means probe above
+    # dominates wall-time, so this is an asymptotic/clarity win, not a hot path.
     choice = [0] * len(rows)
     spent = sum(r["numel"] * specs[0][2] / group_size for r in rows)
-    while True:
-        best = None
-        for t, row in enumerate(rows):
-            cur = choice[t]
-            for nxt in range(cur + 1, len(specs)):
-                extra_bits = row["numel"] * (specs[nxt][2] - specs[cur][2]) / group_size
-                if spent + extra_bits > budget_bits:
-                    continue
-                gain = row["distortions"][cur] - row["distortions"][nxt]
-                if gain <= 0:
-                    continue
-                utility = gain / extra_bits
-                if best is None or utility > best[0]:
-                    best = (utility, t, nxt, extra_bits)
-                break  # only consider the next step up per tensor per round
-        if best is None:
-            break
-        _, t, nxt, extra_bits = best
+
+    def _next_step(t: int, cur: int):
+        """Heap entry for upgrading tensor t one spec up, or None if not worthwhile.
+        neg-utility so a min-heap pops the max; ties break to the lowest index t."""
+        nxt = cur + 1
+        if nxt >= len(specs):
+            return None
+        extra = rows[t]["numel"] * (specs[nxt][2] - specs[cur][2]) / group_size
+        gain = rows[t]["distortions"][cur] - rows[t]["distortions"][nxt]
+        if gain <= 0:
+            return None
+        return (-(gain / extra), t, nxt, extra)
+
+    heap = [s for t in range(len(rows)) if (s := _next_step(t, 0)) is not None]
+    heapq.heapify(heap)
+    while heap:
+        _neg_u, t, nxt, extra_bits = heapq.heappop(heap)
+        if spent + extra_bits > budget_bits:
+            continue  # never fits (spent only grows) -> this tensor is done upgrading
         choice[t] = nxt
         spent += extra_bits
+        nxt_step = _next_step(t, nxt)
+        if nxt_step is not None:
+            heapq.heappush(heap, nxt_step)
 
     tensors = {}
     for t, row in enumerate(rows):
