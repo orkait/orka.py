@@ -166,7 +166,7 @@ for i in range(n_layer):
             # bit-plane indices (lo uint8 + hi packed) = orka's native index_bits storage,
             # ~2.7x smaller than I32. qkv rows permuted before re-packing (hi is bit-packed,
             # can't byte-permute). Engine unpacks lo/hi -> I32 at load.
-            from orka._format import _pack_index_planes
+            from orka.core._format import _pack_index_planes
             cb = getattr(layer, f"codebook_{s}").cpu().numpy().astype(np.float16)
             width = max(1, int(round(np.log2(cb.shape[0]))))
             idx = layer._stage_indices_int(s).cpu().numpy().astype(np.int64).reshape(M, GPR)

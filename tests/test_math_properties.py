@@ -26,7 +26,7 @@ except ImportError:
 
 class BitPackingMathTest(unittest.TestCase):
     def test_pack_unpack_inverse_all_widths(self) -> None:
-        from orka._format import _pack_indices, _unpack_indices
+        from orka.core._format import _pack_indices, _unpack_indices
 
         rng = np.random.default_rng(0)
         for bits in (1, 2, 3, 5, 7, 11, 13, 17, 23):
@@ -168,7 +168,7 @@ class NormalizationRoundTripTest(unittest.TestCase):
 
 class MetricsMathTest(unittest.TestCase):
     def test_quality_metrics_match_direct_formulas(self) -> None:
-        from orka.metrics import quality_metrics_from_flat
+        from orka.eval.metrics import quality_metrics_from_flat
 
         rng = np.random.default_rng(7)
         src = rng.standard_normal(10_000).astype(np.float32)
@@ -281,7 +281,7 @@ class RVQAdditivityAndMirrorTest(unittest.TestCase):
         """Strongest single check: distill's autograd decode must reproduce
         the production numpy decoder bit-for-bit (within f32 accumulation)
         across the FULL transform chain."""
-        from orka.distill import _differentiable_decode, _load_decode_consts
+        from orka.qat.distill import _differentiable_decode, _load_decode_consts
         from orka.pipeline.decode import _decode_tensor
         from orka.pipeline.pack import pack_checkpoint
 
@@ -317,7 +317,7 @@ class RVQAdditivityAndMirrorTest(unittest.TestCase):
 
     def test_rvq_decode_is_sum_of_stage_lookups(self) -> None:
         from orka.pipeline.decode import _read_codebook
-        from orka._format import _read_indices
+        from orka.core._format import _read_indices
         from orka.pipeline.pack import pack_checkpoint
         from orka.pipeline.decode import _decode_tensor
 

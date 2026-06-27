@@ -14,8 +14,8 @@ except ImportError:
     HAS_TORCH = False
 
 from orka.pipeline.pack import pack_checkpoint
-from orka.report import report_artifact
-from orka.verify import verify_artifact
+from orka.eval.report import report_artifact
+from orka.eval.verify import verify_artifact
 
 
 def _write_source(root: Path) -> Path:
@@ -36,7 +36,7 @@ def _write_source(root: Path) -> Path:
 @unittest.skipUnless(HAS_TORCH, "torch required for correction")
 class CorrectTest(unittest.TestCase):
     def test_correction_reduces_error_and_stays_verifiable(self) -> None:
-        from orka.correct import correct_artifact
+        from orka.artifact.correct import correct_artifact
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -66,8 +66,8 @@ class CorrectTest(unittest.TestCase):
             self.assertGreater(report["artifact_bytes"], 0)
 
     def test_correction_composes_with_distill_and_transforms(self) -> None:
-        from orka.correct import correct_artifact
-        from orka.distill import distill_artifact
+        from orka.artifact.correct import correct_artifact
+        from orka.qat.distill import distill_artifact
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -92,7 +92,7 @@ class CorrectTest(unittest.TestCase):
             self.assertLess(verified["max_mse_delta"], 1e-6)
 
     def test_rerun_replaces_rather_than_stacks(self) -> None:
-        from orka.correct import correct_artifact
+        from orka.artifact.correct import correct_artifact
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

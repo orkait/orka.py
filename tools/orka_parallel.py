@@ -26,11 +26,11 @@ def main():
     # 1. Get candidates
     print("Inspecting checkpoint to extract layers...")
     try:
-        from orka._checkpoint import inspect_checkpoint
+        from orka.core._checkpoint import inspect_checkpoint
     except ImportError:
         # Fallback if run outside root
         sys.path.insert(0, str(Path(__file__).parent))
-        from orka._checkpoint import inspect_checkpoint
+        from orka.core._checkpoint import inspect_checkpoint
 
     report = inspect_checkpoint(Path(args.source))
     candidates = [t["name"] for t in report["tensors"] if t["candidate"]]
@@ -72,7 +72,7 @@ def main():
     print("All workers finished successfully. Merging artifacts...")
 
     # 4. Merge artifacts via the canonical merge (compat checks + conflict detection)
-    from orka.merge import merge_orka_artifacts
+    from orka.artifact.merge import merge_orka_artifacts
 
     out_dir = Path(args.out)
     if len(tmp_outs) == 1:

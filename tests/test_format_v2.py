@@ -7,14 +7,14 @@ from pathlib import Path
 
 import numpy as np
 
-from orka._format import (
+from orka.core._format import (
     _pack_indices,
     _read_indices,
     _unpack_indices,
     _write_indices,
 )
 from orka.pipeline.pack import pack_checkpoint
-from orka.verify import verify_artifact
+from orka.eval.verify import verify_artifact
 
 
 class IndexEncodingTest(unittest.TestCase):

@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Sequence
 
-from orka._format import (
+from orka.core._format import (
     ORKA_VERSION,
     _cast_codebook_storage,
     _write_codebook,
@@ -27,7 +27,7 @@ from orka._runtime import (
     _resolve_torch_device,
     _check_ram_cap,
 )
-from orka._tensor import (
+from orka.core._tensor import (
     _concat_vector_parts,
     _decode_to_vectors_format,
     _is_numpy_array,
@@ -38,14 +38,14 @@ from orka._tensor import (
     _torch_f32,
     _vectors_subtract,
 )
-from orka._util import (
+from orka.core._util import (
     _derive_seed,
     _index_bits_for_size,
     _report_progress,
     _safe_tensor_name,
     _source_signature,
 )
-from orka._checkpoint import _load_tensors
+from orka.core._checkpoint import _load_tensors
 from orka.codebook import (
     _codebook_cache_key,
     _codebook_cache_load,
@@ -590,7 +590,7 @@ def pack_checkpoint(
                     p_pos.extend(range(start, start + hidden_dim))
 
             if p_pos:
-                from orka._format import _fp16_storage_roundtrip
+                from orka.core._format import _fp16_storage_roundtrip
                 if _is_torch_tensor(c["vectors"]):
                     import torch
                     import numpy as np
@@ -622,7 +622,7 @@ def pack_checkpoint(
         )
         # Round escape values to their fp16 storage grid so the metrics the
         # pipeline reports match what decode reads back from the sidecars.
-        from orka._format import _fp16_storage_roundtrip
+        from orka.core._format import _fp16_storage_roundtrip
         values = _fp16_storage_roundtrip(values)
 
         if pillar_positions is not None:

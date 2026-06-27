@@ -12,7 +12,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.append(str(Path(__file__).parent.parent))
 
-from orka.reconstruct import reconstruct_artifact
+from orka.artifact.reconstruct import reconstruct_artifact
 
 
 def main() -> None:

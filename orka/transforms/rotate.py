@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from orka._tensor import _numpy_float32_array, _torch_f32
+from orka.core._tensor import _numpy_float32_array, _torch_f32
 
 
 def _fwht_torch(x):

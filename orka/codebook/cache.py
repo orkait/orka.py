@@ -6,7 +6,7 @@ import hashlib
 from pathlib import Path
 from typing import Sequence
 
-from orka._tensor import _is_numpy_array, _is_torch_tensor
+from orka.core._tensor import _is_numpy_array, _is_torch_tensor
 
 
 def _codebook_cache_key(parts: Sequence[object]) -> str:

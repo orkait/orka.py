@@ -17,8 +17,8 @@ import re
 import shutil
 from pathlib import Path
 
-from orka._checkpoint import inspect_checkpoint
-from orka._util import _report_progress
+from orka.core._checkpoint import inspect_checkpoint
+from orka.core._util import _report_progress
 
 _LAYER_RE = re.compile(r"\.(\d+)\.")
 _FINAL_BLOCK = 1 << 30
@@ -116,7 +116,7 @@ def pack_checkpoint_sequential(
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from orka.eval.prompts import _read_prompt_file
-    from orka.merge import merge_orka_artifacts
+    from orka.artifact.merge import merge_orka_artifacts
     from orka.pipeline.decode import _decode_tensor
     from orka.pipeline.pack import pack_checkpoint
 

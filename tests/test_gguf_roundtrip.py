@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from safetensors.numpy import save_file  # noqa: E402
 
-from orka._format import _read_indices  # noqa: E402
+from orka.core._format import _read_indices  # noqa: E402
 from orka.pipeline.decode import _decode_tensor  # noqa: E402
 from orka.pipeline.pack import pack_checkpoint  # noqa: E402
 

@@ -37,7 +37,7 @@ def export_inference(
     Returns:
         HF model with VQLinear layers, ready for inference.
     """
-    from orka._checkpoint import _load_tensors
+    from orka.core._checkpoint import _load_tensors
     from orka.inference.vq_linear import build_vq_linear
 
     artifact_dir = Path(artifact_dir)

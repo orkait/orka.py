@@ -14,7 +14,7 @@ except ImportError:
     HAS_TORCH = False
 
 from orka.pipeline.pack import pack_checkpoint
-from orka.verify import verify_artifact
+from orka.eval.verify import verify_artifact
 
 
 @unittest.skipUnless(HAS_TORCH, "torch required")
@@ -24,7 +24,7 @@ class CompensationMathTest(unittest.TestCase):
         zero-coupled across groups, so compensated assignment must equal
         plain greedy assignment."""
         from orka.codebook import learn_codebook_auto, quantize_vectors_auto
-        from orka.compensation import compensated_assign
+        from orka.quant.compensation import compensated_assign
 
         rng = np.random.default_rng(0)
         W = torch.from_numpy(rng.standard_normal((16, 32)).astype(np.float32))
@@ -39,7 +39,7 @@ class CompensationMathTest(unittest.TestCase):
 
     def test_compensation_reduces_output_error_on_correlated_inputs(self) -> None:
         from orka.codebook import learn_codebook_auto, quantize_vectors_auto
-        from orka.compensation import compensated_assign
+        from orka.quant.compensation import compensated_assign
 
         rng = np.random.default_rng(1)
         # strongly correlated input columns -> compensation has signal

@@ -14,7 +14,7 @@ except ImportError:
     HAS_TORCH = False
 
 from orka.pipeline.pack import pack_checkpoint
-from orka.verify import verify_artifact
+from orka.eval.verify import verify_artifact
 
 
 def _write_source(root: Path) -> Path:
@@ -42,7 +42,7 @@ def _write_source(root: Path) -> Path:
 @unittest.skipUnless(HAS_TORCH, "torch required for distillation")
 class DistillTest(unittest.TestCase):
     def test_fwht_autograd_matches_numpy(self) -> None:
-        from orka.distill import _fwht_autograd
+        from orka.qat.distill import _fwht_autograd
         from orka.transforms.rotate import _fwht_numpy
 
         rng = np.random.default_rng(5)
@@ -56,7 +56,7 @@ class DistillTest(unittest.TestCase):
         optimization must strictly reduce error. (Single-stage plain-MSE is
         already optimal given indices - Lloyd centroids ARE cluster means -
         so RVQ is the meaningful case.)"""
-        from orka.distill import distill_artifact
+        from orka.qat.distill import distill_artifact
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -87,7 +87,7 @@ class DistillTest(unittest.TestCase):
             self.assertLess(verified["max_mse_delta"], 1e-6)
 
     def test_distill_never_worse_single_stage(self) -> None:
-        from orka.distill import distill_artifact
+        from orka.qat.distill import distill_artifact
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -106,7 +106,7 @@ class DistillTest(unittest.TestCase):
     def test_distill_full_transform_chain(self) -> None:
         """block-max + orthogonal rotation + outliers: differentiable mirror must
         match the production decoder exactly (verify max_mse_delta ~ 0)."""
-        from orka.distill import distill_artifact
+        from orka.qat.distill import distill_artifact
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -134,7 +134,7 @@ class DistillTest(unittest.TestCase):
             self.assertLess(verified["max_mse_delta"], 1e-6)
 
     def test_distill_with_activation_weighting(self) -> None:
-        from orka.distill import distill_artifact
+        from orka.qat.distill import distill_artifact
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

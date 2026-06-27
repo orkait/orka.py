@@ -6,12 +6,12 @@ weight's quantization error to layer OUTPUT error, diagonal approximation).
 A large weight on a dead input column wastes escape budget; a modest weight
 on a hot column deserves it.
 
-On-disk sidecar I/O lives in ``orka._format`` (single source of truth for format).
+On-disk sidecar I/O lives in ``orka.core._format`` (single source of truth for format).
 """
 
 from __future__ import annotations
 
-from orka._tensor import _is_numpy_array, _is_torch_tensor
+from orka.core._tensor import _is_numpy_array, _is_torch_tensor
 
 
 def _outlier_scores(flat_abs, col_importance, cols: int | None):
