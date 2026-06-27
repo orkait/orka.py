@@ -22,7 +22,7 @@ from orka.pipeline.decode import _decode_tensor
 class ExportVllmTest(unittest.TestCase):
     def _build_artifact(self, root: Path, rank: int | None):
         from tests.test_sequential import _build_tiny_llama
-        from orka.correct import correct_artifact
+        from orka.artifact.correct import correct_artifact
 
         model_dir = _build_tiny_llama(root)
         source = next(model_dir.glob("*.safetensors"))
@@ -37,7 +37,7 @@ class ExportVllmTest(unittest.TestCase):
         return model_dir, artifact
 
     def test_export_with_adapter_math_is_exact(self) -> None:
-        from orka.export import export_vllm
+        from orka.artifact.export import export_vllm
         from safetensors.torch import load_file
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -69,7 +69,7 @@ class ExportVllmTest(unittest.TestCase):
             self.assertGreater(checked, 0)
 
     def test_exported_model_loads_and_runs(self) -> None:
-        from orka.export import export_vllm
+        from orka.artifact.export import export_vllm
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -92,7 +92,7 @@ class ExportVllmTest(unittest.TestCase):
             self.assertTrue(bool(torch.isfinite(logits).all()))
 
     def test_merge_correction_mode(self) -> None:
-        from orka.export import export_vllm
+        from orka.artifact.export import export_vllm
         from safetensors.torch import load_file
 
         with tempfile.TemporaryDirectory() as tmp:

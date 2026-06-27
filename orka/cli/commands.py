@@ -30,12 +30,12 @@ from orka.quant.semantic import (
     cmd_sem_analyze,
     cmd_sem_map,
 )
-from orka.reconstruct import reconstruct_artifact
+from orka.artifact.reconstruct import reconstruct_artifact
 from orka.report import report_artifact
 from orka.sweep import sweep_checkpoint
 from orka.verify import verify_artifact
 from orka._checkpoint import inspect_checkpoint
-from orka.merge import merge_orka_artifacts
+from orka.artifact.merge import merge_orka_artifacts
 
 
 def cmd_calc(args: argparse.Namespace) -> int:
@@ -272,7 +272,7 @@ def cmd_sem_calc(args: argparse.Namespace) -> int:
 
 
 def cmd_correct(args: argparse.Namespace) -> int:
-    from orka.correct import correct_artifact
+    from orka.artifact.correct import correct_artifact
 
     result = correct_artifact(
         Path(args.artifact),

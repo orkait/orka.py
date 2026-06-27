@@ -24,7 +24,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from orka.reconstruct import _complete_decoded_tensor_map
+from orka.artifact.reconstruct import _complete_decoded_tensor_map
 
 
 def _orka_state_dict(orka_dir, dtype=None) -> dict:

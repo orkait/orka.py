@@ -72,7 +72,7 @@ def main():
     print("All workers finished successfully. Merging artifacts...")
 
     # 4. Merge artifacts via the canonical merge (compat checks + conflict detection)
-    from orka.merge import merge_orka_artifacts
+    from orka.artifact.merge import merge_orka_artifacts
 
     out_dir = Path(args.out)
     if len(tmp_outs) == 1:

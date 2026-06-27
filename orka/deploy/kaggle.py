@@ -23,7 +23,7 @@ from orka.quant import (
     is_rvq_mixed_spec,
     rvq_mixed_family_stages,
 )
-from orka.merge import merge_orka_artifacts
+from orka.artifact.merge import merge_orka_artifacts
 from orka.report import report_artifact
 
 
