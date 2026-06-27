@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from orka._checkpoint import _load_tensors
+from orka.core._checkpoint import _load_tensors
 from orka.eval.hf import _copy_hf_sidecars, _resolve_eval_model_dir
 from orka.pipeline.decode import _decode_tensor, _read_lowrank
 

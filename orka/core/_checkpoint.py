@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from orka._tensor import _tensor_numel, _tensor_shape
+from orka.core._tensor import _tensor_numel, _tensor_shape
 
 
 def _load_tensors(path: Path) -> Iterable[tuple[str, object]]:

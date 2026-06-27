@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from orka._format import (
+from orka.core._format import (
     _pack_indices,
     _read_indices,
     _unpack_indices,

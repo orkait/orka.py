@@ -17,15 +17,15 @@ import json
 from pathlib import Path
 from typing import Sequence
 
-from orka._checkpoint import _load_tensors
-from orka._tensor import (
+from orka.core._checkpoint import _load_tensors
+from orka.core._tensor import (
     _decode_to_vectors_format,
     _numpy_float32_array,
     _sample_vector_rows,
     _tensor_shape,
     _vectors_subtract,
 )
-from orka._util import _derive_seed, _index_bits_for_size, _report_progress
+from orka.core._util import _derive_seed, _index_bits_for_size, _report_progress
 from orka.codebook import learn_codebook_auto, quantize_vectors_auto
 from orka.quant import parse_quant_spec
 

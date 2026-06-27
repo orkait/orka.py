@@ -8,8 +8,8 @@ import tempfile
 from pathlib import Path
 from typing import Callable, Sequence
 
-from orka._format import ORKA_VERSION
-from orka._util import _best_run, _require_non_empty, _safe_exp, _safe_tensor_name
+from orka.core._format import ORKA_VERSION
+from orka.core._util import _best_run, _require_non_empty, _safe_exp, _safe_tensor_name
 from orka.eval.hf import (
     _combine_eval_losses,
     _hf_prompt_losses,

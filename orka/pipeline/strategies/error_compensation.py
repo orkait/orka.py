@@ -46,9 +46,9 @@ def maybe_compensate_candidate(
     """Apply error-compensated re-assignment to candidate ``c`` in place. Returns True
     when applied (caller then skips EM-AQ for this tensor), False when preconditions are
     not met."""
-    from orka._format import _write_indices
-    from orka._tensor import _is_torch_tensor
-    from orka._util import _report_progress
+    from orka.core._format import _write_indices
+    from orka.core._tensor import _is_torch_tensor
+    from orka.core._util import _report_progress
 
     if backend != "torch":
         return False

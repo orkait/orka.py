@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-from orka._tensor import _is_numpy_array, _is_torch_tensor
+from orka.core._tensor import _is_numpy_array, _is_torch_tensor
 from orka.transforms.normalize import (
     _apply_block_max_scales,
     _apply_block_max_scales_numpy,

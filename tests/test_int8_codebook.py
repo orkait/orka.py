@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from orka._format import (
+from orka.core._format import (
     _cast_codebook_storage,
     _quantize_codebook_int8,
     _read_codebook,

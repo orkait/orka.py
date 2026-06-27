@@ -11,13 +11,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from orka._format import (
+from orka.core._format import (
     _write_float_vector,
     _write_outliers,
     _write_pillars,
     _write_salient,
 )
-from orka._util import _index_bits_for_size, _report_progress, _safe_tensor_name
+from orka.core._util import _index_bits_for_size, _report_progress, _safe_tensor_name
 from orka.eval.metrics import _stage_quality_metrics
 from orka.transforms.normalize import stores_block_scales
 

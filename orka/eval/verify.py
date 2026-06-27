@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from orka._checkpoint import _load_tensors
-from orka._tensor import _numpy_float32_array
+from orka.core._checkpoint import _load_tensors
+from orka.core._tensor import _numpy_float32_array
 from orka.eval.metrics import _quality_from_totals, quality_metrics_from_flat
 from orka.pipeline.decode import _decode_tensor
 

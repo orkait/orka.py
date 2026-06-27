@@ -16,7 +16,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from orka.inference.vq_linear import build_vq_linear
 from orka.pipeline.decode import _decode_tensor
-from orka._format import _pack_index_planes
+from orka.core._format import _pack_index_planes
 from gguf import GGUFWriter, TokenType, GGMLQuantizationType
 from gguf.quants import quantize as _gq
 

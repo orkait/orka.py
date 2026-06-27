@@ -6,7 +6,7 @@ import json
 import math
 from pathlib import Path
 
-from orka._util import _dir_size, _product
+from orka.core._util import _dir_size, _product
 from orka.eval.metrics import _quality_from_totals
 
 
@@ -71,7 +71,7 @@ def report_artifact(out_dir: Path) -> dict:
     if passthrough_path.exists():
         total_passthrough_bytes = passthrough_path.stat().st_size
         try:
-            from orka._checkpoint import _load_tensors
+            from orka.core._checkpoint import _load_tensors
 
             for _name, tensor in _load_tensors(passthrough_path):
                 shape = [int(x) for x in getattr(tensor, "shape", [])]

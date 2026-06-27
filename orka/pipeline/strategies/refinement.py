@@ -15,10 +15,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from orka._format import _cast_codebook_storage, _write_codebook, _write_indices
+from orka.core._format import _cast_codebook_storage, _write_codebook, _write_indices
 from orka._runtime import _BG_WRITER, _check_ram_cap
-from orka._tensor import _decode_to_vectors_format, _is_torch_tensor, _vectors_subtract
-from orka._util import _report_progress, _safe_tensor_name
+from orka.core._tensor import _decode_to_vectors_format, _is_torch_tensor, _vectors_subtract
+from orka.core._util import _report_progress, _safe_tensor_name
 from orka.codebook import learn_codebook_auto, quantize_vectors_auto
 from orka.eval.metrics import _stage_quality_metrics
 from orka.pipeline.pack_config import LS_SCALE_DENOM_FLOOR, LS_SCALE_MIN_MAGNITUDE
@@ -212,7 +212,7 @@ def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_di
     import numpy as np
     import torch
 
-    from orka._format import _fp16_storage_roundtrip, _read_codebook, _read_indices
+    from orka.core._format import _fp16_storage_roundtrip, _read_codebook, _read_indices
 
     def _num(x, npd, tdt):
         # Flat-CPU conversion; forces dtype so object-arrays of py ints/floats

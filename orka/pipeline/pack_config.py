@@ -9,7 +9,7 @@ rotation-seed generation) stay in pack_checkpoint where that state is owned.
 
 from __future__ import annotations
 
-from orka._features import AWQ_DISABLED_MESSAGE, awq_feature_enabled
+from orka.core._features import AWQ_DISABLED_MESSAGE, awq_feature_enabled
 
 
 # --- Tunable thresholds ---------------------------------------------------------

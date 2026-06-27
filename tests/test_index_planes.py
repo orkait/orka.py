@@ -13,7 +13,7 @@ import unittest
 
 import numpy as np
 
-from orka._format import _pack_index_planes, _unpack_index_planes
+from orka.core._format import _pack_index_planes, _unpack_index_planes
 
 
 class IndexPlaneRoundTripTest(unittest.TestCase):

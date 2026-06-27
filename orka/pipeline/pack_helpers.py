@@ -7,7 +7,7 @@ Shared by pack.py (pack_checkpoint) and the strategies in orka.pipeline.strategi
 
 from __future__ import annotations
 
-from orka._tensor import _is_torch_tensor, _numpy_float32_array, _torch_f32
+from orka.core._tensor import _is_torch_tensor, _numpy_float32_array, _torch_f32
 
 
 def _weights_digest(sample_weights) -> str:

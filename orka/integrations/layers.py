@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from orka._checkpoint import _load_tensors
+from orka.core._checkpoint import _load_tensors
 from orka.pipeline.decode import _decode_tensor_torch
 
 

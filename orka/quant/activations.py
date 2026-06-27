@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
-from orka._features import ensure_awq_feature_enabled
+from orka.core._features import ensure_awq_feature_enabled
 from orka.eval.prompts import _read_prompt_file
 
 

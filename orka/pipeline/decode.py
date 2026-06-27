@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 from typing import Sequence
 
-from orka._format import (
+from orka.core._format import (
     _float_value_dtype,
     _read_codebook,
     _read_float_vector,

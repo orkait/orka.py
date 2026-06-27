@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Sequence
 
-from orka._tensor import _is_torch_tensor
+from orka.core._tensor import _is_torch_tensor
 
 
 # v2: fp16 codebooks/scales (with f32 overflow fallback) + optional zlib

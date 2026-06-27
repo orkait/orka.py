@@ -26,7 +26,7 @@ except ImportError:
 
 class BitPackingMathTest(unittest.TestCase):
     def test_pack_unpack_inverse_all_widths(self) -> None:
-        from orka._format import _pack_indices, _unpack_indices
+        from orka.core._format import _pack_indices, _unpack_indices
 
         rng = np.random.default_rng(0)
         for bits in (1, 2, 3, 5, 7, 11, 13, 17, 23):
@@ -317,7 +317,7 @@ class RVQAdditivityAndMirrorTest(unittest.TestCase):
 
     def test_rvq_decode_is_sum_of_stage_lookups(self) -> None:
         from orka.pipeline.decode import _read_codebook
-        from orka._format import _read_indices
+        from orka.core._format import _read_indices
         from orka.pipeline.pack import pack_checkpoint
         from orka.pipeline.decode import _decode_tensor
 

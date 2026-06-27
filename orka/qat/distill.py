@@ -16,8 +16,8 @@ import json
 import math
 from pathlib import Path
 
-from orka._checkpoint import _load_tensors
-from orka._format import (
+from orka.core._checkpoint import _load_tensors
+from orka.core._format import (
     _cast_codebook_storage,
     _float_value_dtype,
     _read_codebook,
@@ -28,7 +28,7 @@ from orka._format import (
     _read_salient,
     _write_codebook,
 )
-from orka._tensor import _numpy_float32_array
+from orka.core._tensor import _numpy_float32_array
 from orka.eval.metrics import quality_metrics_from_flat
 from orka.pipeline.decode import _decode_tensor
 from orka.transforms.normalize import stores_block_scales

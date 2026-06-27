@@ -12,9 +12,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from orka._checkpoint import _load_tensors
-from orka._tensor import _numpy_float32_array
-from orka._util import _safe_tensor_name
+from orka.core._checkpoint import _load_tensors
+from orka.core._tensor import _numpy_float32_array
+from orka.core._util import _safe_tensor_name
 from orka.eval.metrics import quality_metrics_from_flat
 from orka.pipeline.decode import _decode_tensor
 

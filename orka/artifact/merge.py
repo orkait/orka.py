@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from orka._checkpoint import _load_tensors
-from orka._format import _write_passthrough_tensors
+from orka.core._checkpoint import _load_tensors
+from orka.core._format import _write_passthrough_tensors
 
 
 def _files_equal(a: Path, b: Path, chunk_size: int = 1 << 20) -> bool:

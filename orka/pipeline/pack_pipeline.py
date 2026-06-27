@@ -12,16 +12,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from orka._format import _cast_codebook_storage, _write_codebook, _write_indices
+from orka.core._format import _cast_codebook_storage, _write_codebook, _write_indices
 from orka._runtime import _BG_WRITER, _check_ram_cap
-from orka._tensor import (
+from orka.core._tensor import (
     _concat_vector_parts,
     _decode_to_vectors_format,
     _is_torch_tensor,
     _sample_vector_rows,
     _vectors_subtract,
 )
-from orka._util import (
+from orka.core._util import (
     _derive_seed,
     _index_bits_for_size,
     _report_progress,

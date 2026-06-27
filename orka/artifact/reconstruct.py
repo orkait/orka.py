@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from orka._checkpoint import _load_tensors
-from orka._format import ORKA_VERSION
-from orka._tensor import _flatten_float_values, _tensor_shape
-from orka._util import _product, _reshape_flat
+from orka.core._checkpoint import _load_tensors
+from orka.core._format import ORKA_VERSION
+from orka.core._tensor import _flatten_float_values, _tensor_shape
+from orka.core._util import _product, _reshape_flat
 from orka.pipeline.decode import _decode_tensor, _decode_tensor_torch
 
 

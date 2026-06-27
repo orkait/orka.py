@@ -21,10 +21,10 @@ Layout:
     cli/           - parser + commands + main()
 """
 
-from orka._format import ORKA_VERSION
+from orka.core._format import ORKA_VERSION
 from orka._runtime import BackgroundWriter, CappedOutOfMemoryError
-from orka._util import _parse_params
-from orka._checkpoint import inspect_checkpoint
+from orka.core._util import _parse_params
+from orka.core._checkpoint import inspect_checkpoint
 from orka.cli import build_parser, main
 from orka.codebook import learn_codebook_auto, quantize_vectors_auto
 from orka.eval import _summarize_eval_rows, eval_artifact, eval_sweep

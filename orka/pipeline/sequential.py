@@ -17,8 +17,8 @@ import re
 import shutil
 from pathlib import Path
 
-from orka._checkpoint import inspect_checkpoint
-from orka._util import _report_progress
+from orka.core._checkpoint import inspect_checkpoint
+from orka.core._util import _report_progress
 
 _LAYER_RE = re.compile(r"\.(\d+)\.")
 _FINAL_BLOCK = 1 << 30
