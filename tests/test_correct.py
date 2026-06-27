@@ -67,7 +67,7 @@ class CorrectTest(unittest.TestCase):
 
     def test_correction_composes_with_distill_and_transforms(self) -> None:
         from orka.artifact.correct import correct_artifact
-        from orka.distill import distill_artifact
+        from orka.qat.distill import distill_artifact
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

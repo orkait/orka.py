@@ -281,7 +281,7 @@ class RVQAdditivityAndMirrorTest(unittest.TestCase):
         """Strongest single check: distill's autograd decode must reproduce
         the production numpy decoder bit-for-bit (within f32 accumulation)
         across the FULL transform chain."""
-        from orka.distill import _differentiable_decode, _load_decode_consts
+        from orka.qat.distill import _differentiable_decode, _load_decode_consts
         from orka.pipeline.decode import _decode_tensor
         from orka.pipeline.pack import pack_checkpoint
 
