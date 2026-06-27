@@ -115,8 +115,9 @@ def _build_csr_correction(layer, artifact_dir, tensor_meta, n_stages, group_size
         fp = flat_pos[mask]
         # outlier final value = stored value * block scale (it was overwritten pre-scale)
         outl_final = values[mask] * _scale_at(fp)
-        for p, v in zip(fp.tolist(), outl_final.tolist()):
-            final_vals[p] = v
+        # C-level dict build (same insertion order + last-write-wins as a python loop,
+        # but no per-element bytecode - matters when corrections number 100k+).
+        final_vals.update(zip(fp.tolist(), outl_final.tolist()))
 
     salient = tensor_meta.get("salient")
     if salient and salient.get("count", 0) > 0:
@@ -134,9 +135,9 @@ def _build_csr_correction(layer, artifact_dir, tensor_meta, n_stages, group_size
         flat_pos = b_ids * block_size + s_idx
         mask = flat_pos < total
         fp = flat_pos[mask]
-        # salient final value = stored value verbatim (overwritten post-scale)
-        for p, v in zip(fp.tolist(), s_val[mask].tolist()):
-            final_vals[p] = v  # salient overwrites any outlier at same pos
+        # salient final value = stored value verbatim (overwritten post-scale);
+        # update() overwrites any outlier at the same position (salient wins).
+        final_vals.update(zip(fp.tolist(), s_val[mask].tolist()))
 
     if final_vals:
         pos_arr = np.fromiter(final_vals.keys(), dtype=np.int64, count=len(final_vals))
