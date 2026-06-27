@@ -70,7 +70,7 @@ def bnb_size():
 run("bnb-nf4", lambda: AutoModelForCausalLM.from_pretrained(BASE, quantization_config=bnb, device_map=DEV), dsize(BASE)//4, 0)
 
 # orka RVQ
-import orka.hf_quantizer  # registers
+import orka.integrations.hf_quantizer  # registers
 run("orka-rvq", lambda: AutoModelForCausalLM.from_pretrained(ORKA, dtype=torch.float16).to(DEV), dsize(ORKA_ART), 0)
 
 json.dump(results, open("/tmp/claude-1000/-mnt-storage-codespace-code-orkait-orka-compiler/6e173d66-a10f-4ee7-88d8-e0cc77e0223f/scratchpad/bench_results.json","w"), indent=2)

@@ -64,7 +64,7 @@ def _pack(root: Path, group_size: int, block: int) -> Path:
 
 class OrkaQuantizerRegistrationTest(unittest.TestCase):
     def test_registers_idempotently(self):
-        from orka.hf_quantizer import register_orka_quantizer
+        from orka.integrations.hf_quantizer import register_orka_quantizer
         from transformers.quantizers.auto import (
             AUTO_QUANTIZER_MAPPING,
             AUTO_QUANTIZATION_CONFIG_MAPPING,
@@ -78,7 +78,7 @@ class OrkaQuantizerRegistrationTest(unittest.TestCase):
     def test_lm_head_and_embeddings_treated_dense(self):
         # tied-embedding models (Qwen/Llama): lm_head must stay dense, else the
         # tied-weight finalization calls get_parameter on a VQLinear property and fails.
-        from orka.hf_quantizer import _is_embedding
+        from orka.integrations.hf_quantizer import _is_embedding
 
         self.assertTrue(_is_embedding("lm_head.weight"))
         self.assertTrue(_is_embedding("model.embed_tokens.weight"))
@@ -86,7 +86,7 @@ class OrkaQuantizerRegistrationTest(unittest.TestCase):
         self.assertFalse(_is_embedding("model.layers.0.self_attn.q_proj.weight"))
 
     def test_config_round_trips(self):
-        import orka.hf_quantizer  # noqa: F401 (ensures registration)
+        import orka.integrations.hf_quantizer  # noqa: F401 (ensures registration)
         from transformers.quantizers.auto import AUTO_QUANTIZATION_CONFIG_MAPPING
 
         OrkaConfig = AUTO_QUANTIZATION_CONFIG_MAPPING["orka"]
@@ -98,7 +98,7 @@ class OrkaQuantizerRegistrationTest(unittest.TestCase):
 
 class OrkaSerializerTest(unittest.TestCase):
     def test_rejects_non_kernel_group_size(self):
-        from orka.hf_quantizer import export_orka_hf_repo
+        from orka.integrations.hf_quantizer import export_orka_hf_repo
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -108,7 +108,7 @@ class OrkaSerializerTest(unittest.TestCase):
             self.assertIn("group_size", str(cm.exception))
 
     def test_valid_artifact_emits_quant_config_and_packed_keys(self):
-        from orka.hf_quantizer import export_orka_hf_repo
+        from orka.integrations.hf_quantizer import export_orka_hf_repo
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

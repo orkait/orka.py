@@ -45,7 +45,7 @@ from orka.report import report_artifact
 from orka.sweep import sweep_checkpoint
 from orka.verify import verify_artifact
 try:
-    from orka.layers import OrkaLinear, replace_linear_with_orka
+    from orka.integrations.layers import OrkaLinear, replace_linear_with_orka
 except Exception:
     OrkaLinear = None
 
