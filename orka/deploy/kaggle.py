@@ -15,7 +15,7 @@ from pathlib import Path
 
 from orka._runtime import _apply_gpu_memory_cap, _apply_system_ram_cap, _stop_ram_monitor
 from orka._util import _human_bytes
-from orka.activations import _load_awq_activations
+from orka.quant.activations import _load_awq_activations
 from orka.eval import eval_artifact
 from orka.pipeline.pack import pack_checkpoint
 from orka.quant import (

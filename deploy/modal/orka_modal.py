@@ -357,7 +357,7 @@ def qat(
 
     alloc_path = run / "alloc.json"
     if not alloc_path.exists():
-        from orka.allocate import build_allocation
+        from orka.quant.allocate import build_allocation
         alloc = build_allocation(
             src, target_bpw,
             candidate_specs=("vq-12", "rvq-12-8", "rvq-12-12", "rvq-12-12-8", "rvq-12-12-12"),
@@ -369,7 +369,7 @@ def qat(
         alloc = _json.loads(alloc_path.read_text())
         print(f"  alloc reused from volume: {alloc['achieved_bpw']:.3f} bpw", flush=True)
 
-    from orka.allocate import allocation_tensor_stages
+    from orka.quant.allocate import allocation_tensor_stages
     from orka.pipeline.pack import pack_checkpoint
     from orka.artifact.export import export_vllm
     ptq_art = run / "ptq.orka"

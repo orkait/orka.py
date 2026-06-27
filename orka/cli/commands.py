@@ -16,7 +16,7 @@ from orka._runtime import (
     _wrap_capped_oom,
 )
 from orka._util import _human_bytes, _parse_params
-from orka.activations import _load_awq_activations
+from orka.quant.activations import _load_awq_activations
 from orka.deploy.kaggle import cmd_kaggle_pack
 from orka.eval import eval_artifact, eval_sweep, pulse_check_artifact
 from orka.pipeline.pack import pack_checkpoint
@@ -159,7 +159,7 @@ def cmd_pack(args: argparse.Namespace) -> int:
 def _load_allocation_map(args: argparse.Namespace):
     if not getattr(args, "allocation_map", None):
         return None
-    from orka.allocate import allocation_tensor_stages
+    from orka.quant.allocate import allocation_tensor_stages
 
     with open(args.allocation_map, "r") as f:
         allocation = json.load(f)
@@ -312,7 +312,7 @@ def cmd_distill(args: argparse.Namespace) -> int:
         except (UnicodeDecodeError, json.JSONDecodeError):
             activations = torch.load(str(path), map_location="cpu")
     elif args.model_dir and args.prompts:
-        from orka.activations import _collect_activations_hf
+        from orka.quant.activations import _collect_activations_hf
         from orka.eval.prompts import _read_prompt_file
 
         prompts = _read_prompt_file(

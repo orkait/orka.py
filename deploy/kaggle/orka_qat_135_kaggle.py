@@ -92,7 +92,7 @@ def main() -> int:
 
     # --- 2bpw measured allocation ---
     print(f"--- allocate {TARGET_BPW} bpw ---", flush=True)
-    from orka.allocate import build_allocation
+    from orka.quant.allocate import build_allocation
     alloc = build_allocation(
         src, TARGET_BPW, candidate_specs=("vq-8", "vq-12", "rvq-12-4", "rvq-8-8", "rvq-12-8"),
         group_size=8, sample_vectors=8192, iterations=4, backend="torch", device="cuda",
@@ -104,7 +104,7 @@ def main() -> int:
     # --- 2bpw PTQ baseline (the broken one, for the A/B floor) ---
     print("--- pack 2bpw PTQ baseline ---", flush=True)
     from orka.pipeline.pack import pack_checkpoint
-    from orka.allocate import allocation_tensor_stages
+    from orka.quant.allocate import allocation_tensor_stages
     ptq_art = WORK / "ptq.orka"
     pack_checkpoint(
         source=src, out_dir=ptq_art, group_size=8, codebook_size=4096,

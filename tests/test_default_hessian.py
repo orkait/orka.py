@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import unittest
 
-from orka.activations import _bundled_calibration_path, _load_awq_activations
+from orka.quant.activations import _bundled_calibration_path, _load_awq_activations
 
 
 def _args(**kw):

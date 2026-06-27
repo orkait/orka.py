@@ -79,7 +79,7 @@ def maybe_compensate_candidate(
     import numpy as np
     import torch
 
-    from orka.compensation import compensated_assign
+    from orka.quant.compensation import compensated_assign
 
     X = torch.as_tensor(awq_activations[c["name"]], dtype=torch.float32)
     if X.dim() != 2 or int(X.shape[1]) != cols:

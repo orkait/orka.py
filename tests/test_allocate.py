@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from orka.allocate import allocation_tensor_stages, build_allocation
+from orka.quant.allocate import allocation_tensor_stages, build_allocation
 from orka.pipeline.pack import pack_checkpoint
 from orka.eval.verify import verify_artifact
 

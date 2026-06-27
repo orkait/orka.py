@@ -133,7 +133,7 @@ def main() -> int:
 
     # --- 4bpw measured allocation ---
     print(f"--- allocate {TARGET_BPW} bpw ---", flush=True)
-    from orka.allocate import build_allocation, allocation_tensor_stages
+    from orka.quant.allocate import build_allocation, allocation_tensor_stages
     alloc = build_allocation(
         src, TARGET_BPW, candidate_specs=CANDIDATES,
         group_size=8, sample_vectors=8192, iterations=4, backend="torch", device="cuda",
