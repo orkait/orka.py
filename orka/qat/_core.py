@@ -45,11 +45,14 @@ def _chunked_assign(vectors: torch.Tensor, cb: torch.Tensor) -> torch.Tensor:
     GEMM path the GPU is fastest at."""
     out = torch.empty(vectors.shape[0], dtype=torch.long, device=vectors.device)
     cb_sq = (cb * cb).sum(dim=1)                       # [k]
+    cbt = cb.t().contiguous()                          # [d, k], once
     k = cb.shape[0]
     chunk_rows = max(1024, _ASSIGN_BUDGET // max(1, k))
     for i in range(0, vectors.shape[0], chunk_rows):
         chunk = vectors[i : i + chunk_rows]
-        d = cb_sq.unsqueeze(0) - 2.0 * (chunk @ cb.t())  # [chunk, k], argmin-equiv to cdist
+        # d = ||c||^2 - 2 v.c, fused into the GEMM epilogue (beta*cb_sq + alpha*chunk@cbt);
+        # one cuBLAS call, no separate scale/add pass, no [chunk,k] intermediate beyond d.
+        d = torch.addmm(cb_sq.unsqueeze(0), chunk, cbt, beta=1.0, alpha=-2.0)
         out[i : i + chunk_rows] = d.argmin(dim=1)
     return out
 
@@ -73,9 +76,8 @@ def _kmeans_fit(vectors: torch.Tensor, k: int, iters: int = 12) -> torch.Tensor:
     for _ in range(iters):
         assign = _chunked_assign(vectors, cb)
         new = torch.zeros_like(cb)
-        cnt = torch.zeros(cb.shape[0], device=vectors.device)
-        new.index_add_(0, assign, vectors)
-        cnt.index_add_(0, assign, torch.ones(vectors.shape[0], device=vectors.device))
+        new.index_add_(0, assign, vectors)                       # sum vectors per centroid
+        cnt = torch.bincount(assign, minlength=cb.shape[0]).to(new.dtype)  # count, no N-sized ones temp
         mask = cnt > 0
         cb[mask] = new[mask] / cnt[mask].unsqueeze(1)
     return cb
@@ -175,8 +177,12 @@ class QATVQLinear(nn.Module):
 
         Decode mirrors Orka: normalize the weight by per-block scale, residual-VQ
         the normalized vectors, then re-scale. Scales and codebooks both train."""
-        sc_full = scales.repeat_interleave(self.block_size, dim=1)        # [out, in]
-        vn = (shadow / sc_full).reshape(-1, self.group_size)             # normalized vectors
+        # Per-block scale via broadcast over a [out, n_blocks, block] view - avoids
+        # repeat_interleave materializing a full [out, in] scale temp each forward.
+        n_blocks = self.in_features // self.block_size
+        sc3 = scales[:, :, None]                                          # [out, n_blocks, 1]
+        vn = (shadow.reshape(self.out_features, n_blocks, self.block_size) / sc3
+              ).reshape(-1, self.group_size)                             # normalized vectors
         refresh = self._want_refresh()
         if refresh:
             self._cached_idx = [None] * len(codebooks)
@@ -194,7 +200,8 @@ class QATVQLinear(nn.Module):
             cb_loss = cb_loss + F.mse_loss(sel, residual.detach())
             decoded = decoded + sel
             residual = vn - decoded
-        dec = decoded.reshape(self.out_features, self.in_features) * sc_full   # de-normalize
+        dec = (decoded.reshape(self.out_features, n_blocks, self.block_size) * sc3
+               ).reshape(self.out_features, self.in_features)            # de-normalize
         # straight-through: forward uses dec (quantized weight), grad to shadow is identity
         w_q = shadow + (dec - shadow).detach()
         return w_q, cb_loss
@@ -220,15 +227,18 @@ class QATVQLinear(nn.Module):
     def materialized_weight(self) -> torch.Tensor:
         """The actual quantized weight (scaled decode) for export / eval. Mirrors
         _quantize_impl exactly so the saved weight == what the forward optimized."""
-        sc_full = self.scales.repeat_interleave(self.block_size, dim=1)
-        vn = (self.shadow / sc_full).reshape(-1, self.group_size)
+        n_blocks = self.in_features // self.block_size
+        sc3 = self.scales[:, :, None]
+        vn = (self.shadow.reshape(self.out_features, n_blocks, self.block_size) / sc3
+              ).reshape(-1, self.group_size)
         residual = vn
         decoded = torch.zeros_like(vn)
         for cb in self.codebooks:
             assign = _chunked_assign(residual, cb)
             decoded = decoded + cb[assign]
             residual = vn - decoded
-        return decoded.reshape(self.out_features, self.in_features) * sc_full
+        return (decoded.reshape(self.out_features, n_blocks, self.block_size) * sc3
+                ).reshape(self.out_features, self.in_features)
 
 
 def build_qat_student(model: nn.Module, allocation: dict, group_size: int = 8,

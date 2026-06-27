@@ -139,7 +139,7 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_nor
         r_norm_sq = torch.sum(rows.to(torch.float32) * rows.to(torch.float32), dim=1, keepdim=True).to(dtype)
 
     indices_parts = []
-    total = 0.0
+    total_t = torch.zeros((), dtype=torch.float32, device=resolved)
     width = int(rows.shape[1])
     k = int(centroids.shape[0])
 
@@ -168,24 +168,18 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_nor
             )
 
             chosen = torch.argmin(dists, dim=1)
-            indices_parts.append(chosen.detach().cpu())
+            indices_parts.append(chosen)                       # keep on GPU - no per-chunk .cpu()
 
-            # Accumulate error in float32 for precision
-            total += float(
-                dists[torch.arange(chosen.shape[0], device=rows.device), chosen]
-                .to(torch.float32)
-                .sum()
-                .detach()
-                .cpu()
-                .item()
-            )
+            # Accumulate selected-distance error on-device in float32; one host
+            # transfer at the end instead of a .item() sync every chunk.
+            total_t += dists.gather(1, chosen.unsqueeze(1)).to(torch.float32).sum()
 
     indices = (
-        torch.cat(indices_parts).to(dtype=torch.int64)
+        torch.cat(indices_parts).to(dtype=torch.int64).cpu()   # single device->host transfer
         if indices_parts
         else torch.empty(0, dtype=torch.int64)
     )
-    return indices, total / (int(rows.shape[0]) * width)
+    return indices, float(total_t.item()) / (int(rows.shape[0]) * width)
 
 
 def _learn_codebook_torch(
