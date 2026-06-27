@@ -20,7 +20,7 @@ from orka._runtime import _BG_WRITER, _check_ram_cap
 from orka._tensor import _decode_to_vectors_format, _is_torch_tensor, _vectors_subtract
 from orka._util import _report_progress, _safe_tensor_name
 from orka.codebook import learn_codebook_auto, quantize_vectors_auto
-from orka.metrics import _stage_quality_metrics
+from orka.eval.metrics import _stage_quality_metrics
 from orka.pipeline.pack_config import LS_SCALE_DENOM_FLOOR, LS_SCALE_MIN_MAGNITUDE
 from orka.pipeline.pack_helpers import _sample_vectors_and_weights
 from orka.transforms.normalize import stores_block_scales

@@ -14,7 +14,7 @@ from orka._format import (
     _write_indices,
 )
 from orka.pipeline.pack import pack_checkpoint
-from orka.verify import verify_artifact
+from orka.eval.verify import verify_artifact
 
 
 class IndexEncodingTest(unittest.TestCase):

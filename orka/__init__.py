@@ -28,7 +28,7 @@ from orka._checkpoint import inspect_checkpoint
 from orka.cli import build_parser, main
 from orka.codebook import learn_codebook_auto, quantize_vectors_auto
 from orka.eval import _summarize_eval_rows, eval_artifact, eval_sweep
-from orka.metrics import quality_metrics_from_flat
+from orka.eval.metrics import quality_metrics_from_flat
 from orka.pipeline.pack import pack_checkpoint
 from orka.artifact.merge import merge_orka_artifacts
 from orka.quant import (
@@ -41,9 +41,9 @@ from orka.quant import (
     rvq_mixed_family_stages,
 )
 from orka.artifact.reconstruct import reconstruct_artifact
-from orka.report import report_artifact
-from orka.sweep import sweep_checkpoint
-from orka.verify import verify_artifact
+from orka.eval.report import report_artifact
+from orka.eval.sweep import sweep_checkpoint
+from orka.eval.verify import verify_artifact
 try:
     from orka.integrations.layers import OrkaLinear, replace_linear_with_orka
 except Exception:

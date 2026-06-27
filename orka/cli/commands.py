@@ -31,9 +31,9 @@ from orka.quant.semantic import (
     cmd_sem_map,
 )
 from orka.artifact.reconstruct import reconstruct_artifact
-from orka.report import report_artifact
-from orka.sweep import sweep_checkpoint
-from orka.verify import verify_artifact
+from orka.eval.report import report_artifact
+from orka.eval.sweep import sweep_checkpoint
+from orka.eval.verify import verify_artifact
 from orka._checkpoint import inspect_checkpoint
 from orka.artifact.merge import merge_orka_artifacts
 

@@ -15,7 +15,7 @@ from pathlib import Path
 from orka._checkpoint import _load_tensors
 from orka._tensor import _numpy_float32_array
 from orka._util import _safe_tensor_name
-from orka.metrics import quality_metrics_from_flat
+from orka.eval.metrics import quality_metrics_from_flat
 from orka.pipeline.decode import _decode_tensor
 
 

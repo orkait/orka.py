@@ -168,7 +168,7 @@ class NormalizationRoundTripTest(unittest.TestCase):
 
 class MetricsMathTest(unittest.TestCase):
     def test_quality_metrics_match_direct_formulas(self) -> None:
-        from orka.metrics import quality_metrics_from_flat
+        from orka.eval.metrics import quality_metrics_from_flat
 
         rng = np.random.default_rng(7)
         src = rng.standard_normal(10_000).astype(np.float32)

@@ -29,7 +29,7 @@ from orka._format import (
     _write_codebook,
 )
 from orka._tensor import _numpy_float32_array
-from orka.metrics import quality_metrics_from_flat
+from orka.eval.metrics import quality_metrics_from_flat
 from orka.pipeline.decode import _decode_tensor
 from orka.transforms.normalize import stores_block_scales
 from orka.transforms.rotate import _generate_orthogonal_numpy, _hadamard_block_size

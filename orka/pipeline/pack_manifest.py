@@ -18,7 +18,7 @@ from orka._format import (
     _write_salient,
 )
 from orka._util import _index_bits_for_size, _report_progress, _safe_tensor_name
-from orka.metrics import _stage_quality_metrics
+from orka.eval.metrics import _stage_quality_metrics
 from orka.transforms.normalize import stores_block_scales
 
 

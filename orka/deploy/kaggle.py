@@ -24,7 +24,7 @@ from orka.quant import (
     rvq_mixed_family_stages,
 )
 from orka.artifact.merge import merge_orka_artifacts
-from orka.report import report_artifact
+from orka.eval.report import report_artifact
 
 
 def _load_hf_token() -> str | None:
