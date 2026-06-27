@@ -82,7 +82,16 @@ class VQLinear(nn.Module):
                 self.register_buffer(f"indices_lo_{s}", torch.zeros(n_groups, dtype=torch.uint8))
                 self.register_buffer(f"indices_hi_{s}", torch.zeros(hi_bytes, dtype=torch.uint8))
             else:
-                idx_dtype = torch.uint8 if self.cb_sizes[s] <= 256 else torch.int16
+                # int16 is SIGNED (max 32767): codebooks > 32768 (e.g. vq-15/16, or a
+                # codebook capped to a large vector_count) overflow to negative indices
+                # -> cb[neg] wraps to the wrong entry. Promote to int32 above the int16
+                # range; uint8 for <=256, int16 for the common <=32768 case.
+                if self.cb_sizes[s] <= 256:
+                    idx_dtype = torch.uint8
+                elif self.cb_sizes[s] <= 32768:
+                    idx_dtype = torch.int16
+                else:
+                    idx_dtype = torch.int32
                 self.register_buffer(f"indices_{s}", torch.zeros(n_groups, dtype=idx_dtype))
             self.register_buffer(f"codebook_{s}", torch.zeros(self.cb_sizes[s], group_size, dtype=torch.float16))
 
