@@ -153,7 +153,7 @@ def main() -> int:
         iterations=8, em_aq_passes=1,
         tensor_stages_map=allocation_tensor_stages(alloc),
     )
-    from orka.export import export_vllm
+    from orka.artifact.export import export_vllm
     ptq_hf = WORK / "ptq-hf"
     export_vllm(ptq_art, ptq_hf, model_dir=Path(model_dir), dtype="bfloat16")
 

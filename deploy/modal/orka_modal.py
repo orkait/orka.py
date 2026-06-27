@@ -371,7 +371,7 @@ def qat(
 
     from orka.allocate import allocation_tensor_stages
     from orka.pipeline.pack import pack_checkpoint
-    from orka.export import export_vllm
+    from orka.artifact.export import export_vllm
     ptq_art = run / "ptq.orka"
     ptq_hf = run / "ptq-hf"
     if not ptq_art.exists():
