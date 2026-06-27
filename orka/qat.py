@@ -28,26 +28,70 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-_ASSIGN_CHUNK = 16384
+# Cap the transient [chunk, k] distance matrix at ~this many float32 elements
+# (~1 GB at 2.5e8). The row-chunk shrinks as the codebook k grows, so a dynamic /
+# larger codebook never blows VRAM.
+_ASSIGN_BUDGET = 256 * 1024 * 1024
 
 
 def _chunked_assign(vectors: torch.Tensor, cb: torch.Tensor) -> torch.Tensor:
-    """Nearest-codebook index, memory-bounded. cdist over all vectors x k would
-    blow VRAM (millions of vectors x thousands of centroids); chunk the rows."""
+    """Nearest-codebook index, memory-bounded. The full vectors x k distance
+    matrix would blow VRAM, so chunk the rows - chunk sized so chunk*k stays under
+    _ASSIGN_BUDGET regardless of codebook size.
+
+    Distance is computed as ||c||^2 - 2 v.c (the ||v||^2 term is constant across
+    centroids, so it drops out of the argmin). That is a single cuBLAS GEMM per
+    chunk - same result as torch.cdist, no sqrt, and it keeps everything on the
+    GEMM path the GPU is fastest at."""
     out = torch.empty(vectors.shape[0], dtype=torch.long, device=vectors.device)
-    for i in range(0, vectors.shape[0], _ASSIGN_CHUNK):
-        chunk = vectors[i : i + _ASSIGN_CHUNK]
-        out[i : i + _ASSIGN_CHUNK] = torch.cdist(chunk, cb).argmin(dim=1)
+    cb_sq = (cb * cb).sum(dim=1)                       # [k]
+    k = cb.shape[0]
+    chunk_rows = max(1024, _ASSIGN_BUDGET // max(1, k))
+    for i in range(0, vectors.shape[0], chunk_rows):
+        chunk = vectors[i : i + chunk_rows]
+        d = cb_sq.unsqueeze(0) - 2.0 * (chunk @ cb.t())  # [chunk, k], argmin-equiv to cdist
+        out[i : i + chunk_rows] = d.argmin(dim=1)
     return out
 
 
 def _kmeans_init(vectors: torch.Tensor, k: int) -> torch.Tensor:
-    """Codebook seed = random sample of k vectors. Codebooks are learnable and
-    refined by training, so a heavier k-means init is not worth its cost."""
+    """Codebook seed = random sample of k vectors (kept for the Lloyd seed)."""
     n = vectors.shape[0]
     k = min(k, n)
     perm = torch.randperm(n, device=vectors.device)[:k]
     return vectors[perm].clone()
+
+
+def _kmeans_fit(vectors: torch.Tensor, k: int, iters: int = 12) -> torch.Tensor:
+    """Lloyd k-means codebook. A real fit (not a random sample) is what gives QAT
+    a PTQ-quality warm start; from random seeds the 4096-centroid assignment is
+    ~40% off and 150 steps cannot recover it. ORKA_KMEANS_ITERS overrides the
+    iteration count (fewer = faster warm-start for quick validation)."""
+    import os
+    iters = int(os.environ.get("ORKA_KMEANS_ITERS", iters))
+    cb = _kmeans_init(vectors, k)
+    for _ in range(iters):
+        assign = _chunked_assign(vectors, cb)
+        new = torch.zeros_like(cb)
+        cnt = torch.zeros(cb.shape[0], device=vectors.device)
+        new.index_add_(0, assign, vectors)
+        cnt.index_add_(0, assign, torch.ones(vectors.shape[0], device=vectors.device))
+        mask = cnt > 0
+        cb[mask] = new[mask] / cnt[mask].unsqueeze(1)
+    return cb
+
+
+def _pick_block_size(in_features: int, group_size: int, cap: int = 256) -> int:
+    """Largest divisor of in_features that is <= cap and a multiple of group_size.
+    Per-block scales normalize magnitude so the codebook only encodes shape; a
+    block near 256 keeps the scale overhead tiny (16/block bpw)."""
+    best = group_size
+    b = group_size
+    while b <= cap:
+        if in_features % b == 0 and b % group_size == 0:
+            best = b
+        b += group_size
+    return best
 
 
 class QATVQLinear(nn.Module):
@@ -57,12 +101,25 @@ class QATVQLinear(nn.Module):
     allocation map (e.g. [4096, 16] = rvq-12-4 = 2 bpw at group 8)."""
 
     def __init__(self, weight: torch.Tensor, bias, group_size: int, stages: list[int],
-                 commitment: float = 0.25, checkpoint: bool = False):
+                 commitment: float = 0.25, checkpoint: bool = False,
+                 reassign_every: int = 1):
         super().__init__()
         self.out_features, self.in_features = weight.shape
         self.group_size = group_size
         self.stages = stages
         self.commitment = commitment
+        # Cached nearest-codebook assignment. The argmin (cdist) is the entire QAT
+        # forward cost (~4s/step across all linears); but the shadow weight only
+        # moves on opt.step (in-place add -> .data._version bumps), and the
+        # assignment churns ~0.3%/step. So re-search only every `reassign_every`
+        # OPTIMIZER steps and reuse the cached idx in between (codebooks are still
+        # indexed with the current cb, so cb gradient is unaffected - only the hard
+        # argmin is stale). reassign_every=1 still skips the redundant re-search
+        # within a grad-accum window (shadow unchanged there): exact, free speedup.
+        self.reassign_every = reassign_every
+        self._cached_idx: list[torch.Tensor] | None = None
+        self._last_version = -1
+        self._optsteps_since = 0
         # Gradient-checkpoint quantize() on the forward: the straight-through
         # decode keeps weight-sized fp32 intermediates (sel/decoded) alive for
         # backward, ~8GB across all layers. Checkpointing frees them on forward
@@ -72,38 +129,78 @@ class QATVQLinear(nn.Module):
 
         self.shadow = nn.Parameter(weight.detach().clone().float())
 
-        vecs = self.shadow.detach().reshape(-1, group_size)
-        residual = vecs.clone()
+        # Per-block scales normalize magnitude so the codebook only encodes SHAPE.
+        # Without this the single codebook must span the full weight dynamic range
+        # -> ~40% recon error even with a perfect fit (this was the QAT-broken bug).
+        self.block_size = _pick_block_size(self.in_features, group_size)
+        n_blocks = self.in_features // self.block_size
+        W = self.shadow.detach()
+        sc = W.reshape(self.out_features, n_blocks, self.block_size).abs().amax(-1).clamp_min(1e-8)
+        self.scales = nn.Parameter(sc)                                  # [out, n_blocks], trainable
+
+        # Codebooks fit (Lloyd k-means) on the NORMALIZED residual vectors -> a
+        # PTQ-quality warm start. Single large codebook is more bit-efficient than
+        # multi-stage small ones at equal bpw, so `stages` is usually one big k.
+        sc_full = sc.repeat_interleave(self.block_size, dim=1)          # [out, in]
+        Wn = (W / sc_full).reshape(-1, group_size)
+        residual = Wn.clone()
         cbs = []
         for k in stages:
-            cb = _kmeans_init(residual, int(k))
+            cb = _kmeans_fit(residual, int(k))
             assign = _chunked_assign(residual, cb)
             residual = residual - cb[assign]
             cbs.append(nn.Parameter(cb.clone()))
         self.codebooks = nn.ParameterList(cbs)
         self._last_cb_loss = torch.zeros((), device=weight.device)
 
-    def _quantize_impl(self, shadow: torch.Tensor, *codebooks: torch.Tensor):
-        """Returns (w_q, cb_loss). Pure function of (shadow, codebooks) so it can
-        be gradient-checkpointed - cb_loss is a real graph output, not a side
-        effect, so the codebook gradient survives the recompute."""
-        vecs = shadow.reshape(-1, self.group_size)
-        residual = vecs
-        decoded = torch.zeros_like(vecs)
-        cb_loss = torch.zeros((), device=vecs.device)
-        for cb in codebooks:
-            with torch.no_grad():
-                assign = _chunked_assign(residual.detach(), cb.detach())
-            sel = cb[assign]                       # differentiable in cb
+    def _want_refresh(self) -> bool:
+        """Re-run the hard argmin only every `reassign_every` optimizer steps. An
+        opt.step mutates shadow in place -> .data._version bumps; a grad-accum
+        window repeats the same version across forwards, so count an opt-step once
+        per genuine version CHANGE (not per forward). Between refreshes the cached
+        idx is reused (codebooks are still indexed live, so cb gradient is exact -
+        only the hard argmin is stale, and assignment churns ~0.3%/opt-step)."""
+        if self._cached_idx is None:
+            return True
+        v = self.shadow._version
+        if v != self._last_version:        # genuinely new opt-step, not a repeat forward
+            self._last_version = v
+            self._optsteps_since += 1
+        return self._optsteps_since >= self.reassign_every
+
+    def _quantize_impl(self, shadow: torch.Tensor, scales: torch.Tensor, *codebooks: torch.Tensor):
+        """Returns (w_q, cb_loss). Pure function of (shadow, scales, codebooks) so
+        it can be gradient-checkpointed - cb_loss is a real graph output, not a
+        side effect, so the codebook gradient survives the recompute.
+
+        Decode mirrors Orka: normalize the weight by per-block scale, residual-VQ
+        the normalized vectors, then re-scale. Scales and codebooks both train."""
+        sc_full = scales.repeat_interleave(self.block_size, dim=1)        # [out, in]
+        vn = (shadow / sc_full).reshape(-1, self.group_size)             # normalized vectors
+        refresh = self._want_refresh()
+        if refresh:
+            self._cached_idx = [None] * len(codebooks)
+            self._last_version = self.shadow._version
+            self._optsteps_since = 0
+        residual = vn
+        decoded = torch.zeros_like(vn)
+        cb_loss = torch.zeros((), device=vn.device)
+        for s, cb in enumerate(codebooks):
+            if refresh:
+                with torch.no_grad():
+                    self._cached_idx[s] = _chunked_assign(residual.detach(), cb.detach())
+            assign = self._cached_idx[s]
+            sel = cb[assign]                       # differentiable in cb (idx may be cached)
             cb_loss = cb_loss + F.mse_loss(sel, residual.detach())
             decoded = decoded + sel
-            residual = vecs - decoded
-        # straight-through: forward uses decoded, gradient to shadow is identity
-        w_q = vecs + (decoded - vecs).detach()
-        return w_q.reshape(self.out_features, self.in_features), cb_loss
+            residual = vn - decoded
+        dec = decoded.reshape(self.out_features, self.in_features) * sc_full   # de-normalize
+        # straight-through: forward uses dec (quantized weight), grad to shadow is identity
+        w_q = shadow + (dec - shadow).detach()
+        return w_q, cb_loss
 
     def quantize(self) -> torch.Tensor:
-        w_q, cb_loss = self._quantize_impl(self.shadow, *self.codebooks)
+        w_q, cb_loss = self._quantize_impl(self.shadow, self.scales, *self.codebooks)
         self._last_cb_loss = cb_loss
         return w_q
 
@@ -111,7 +208,8 @@ class QATVQLinear(nn.Module):
         if self.checkpoint and self.training:
             import torch.utils.checkpoint as cp
             w_q, cb_loss = cp.checkpoint(
-                self._quantize_impl, self.shadow, *self.codebooks, use_reentrant=False
+                self._quantize_impl, self.shadow, self.scales, *self.codebooks,
+                use_reentrant=False,
             )
             self._last_cb_loss = cb_loss
         else:
@@ -120,19 +218,22 @@ class QATVQLinear(nn.Module):
 
     @torch.no_grad()
     def materialized_weight(self) -> torch.Tensor:
-        """The actual quantized weight (decoded) for export / eval."""
-        vecs = self.shadow.reshape(-1, self.group_size)
-        residual = vecs
-        decoded = torch.zeros_like(vecs)
+        """The actual quantized weight (scaled decode) for export / eval. Mirrors
+        _quantize_impl exactly so the saved weight == what the forward optimized."""
+        sc_full = self.scales.repeat_interleave(self.block_size, dim=1)
+        vn = (self.shadow / sc_full).reshape(-1, self.group_size)
+        residual = vn
+        decoded = torch.zeros_like(vn)
         for cb in self.codebooks:
             assign = _chunked_assign(residual, cb)
             decoded = decoded + cb[assign]
-            residual = vecs - decoded
-        return decoded.reshape(self.out_features, self.in_features)
+            residual = vn - decoded
+        return decoded.reshape(self.out_features, self.in_features) * sc_full
 
 
 def build_qat_student(model: nn.Module, allocation: dict, group_size: int = 8,
-                      commitment: float = 0.25, checkpoint: bool = False) -> dict:
+                      commitment: float = 0.25, checkpoint: bool = False,
+                      reassign_every: int = 1) -> dict:
     """Replace each allocated linear in ``model`` with a QATVQLinear using its
     per-tensor stage list. Embeddings / norms / lm_head stay fp16 (sensitive,
     same as Orka's passthrough). Returns {module_name: QATVQLinear}."""
@@ -152,7 +253,8 @@ def build_qat_student(model: nn.Module, allocation: dict, group_size: int = 8,
         if not stages:
             continue
         qat = QATVQLinear(module.weight.data, module.bias.data if module.bias is not None else None,
-                          group_size, stages, commitment, checkpoint=checkpoint).to(module.weight.device)
+                          group_size, stages, commitment, checkpoint=checkpoint,
+                          reassign_every=reassign_every).to(module.weight.device)
         parent = model.get_submodule(full_name.rsplit(".", 1)[0])
         setattr(parent, full_name.rsplit(".", 1)[-1], qat)
         wrapped[full_name] = qat

@@ -40,6 +40,11 @@ def main() -> int:
     ap.add_argument("--temp", type=float, default=2.0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--group-size", type=int, default=8)
+    ap.add_argument("--reassign-every", type=int, default=1,
+                    help="re-run the hard VQ argmin every N optimizer steps (cache idx "
+                         "between). 1 = exact (only skips redundant re-search within a "
+                         "grad-accum window); >1 trades ~0.3%%/step assignment staleness "
+                         "for ~Nx fewer argmin passes - the QAT forward is argmin-bound.")
     ap.add_argument("--max-seqs", type=int, default=256)
     ap.add_argument("--optim8bit", action="store_true",
                     help="use bitsandbytes AdamW8bit (m+v in int8) to fit small GPUs")
@@ -90,13 +95,15 @@ def main() -> int:
         except Exception:
             pass
     wrapped = build_qat_student(student, allocation, group_size=args.group_size,
-                                commitment=args.commit, checkpoint=args.checkpoint_quantize)
+                                commitment=args.commit, checkpoint=args.checkpoint_quantize,
+                                reassign_every=args.reassign_every)
     print(f"  wrapped {len(wrapped)} linears", flush=True)
 
     # Train only the quantized layers' shadow weights + codebooks.
     train_params = []
     for qat in wrapped.values():
         train_params.append(qat.shadow)
+        train_params.append(qat.scales)
         for cb in qat.codebooks:
             train_params.append(cb)
         if qat.bias is not None:
