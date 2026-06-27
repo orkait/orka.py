@@ -146,6 +146,27 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_nor
     return idx.to(torch.int64).cpu(), float(mse.item())
 
 
+def _det_segment_sum(keys, values, k):
+    """Deterministic sum of `values` ([N] or [N, d]) grouped by integer `keys` in
+    [0, k). Sorts by key then segment-reduces with a cumsum, so the float order is
+    fixed - unlike atomic index_add/index_put on CUDA, which is the only source of
+    byte non-determinism in the pack."""
+    import torch
+
+    tail = tuple(values.shape[1:])
+    out = torch.zeros((k,) + tail, device=values.device, dtype=values.dtype)
+    if keys.numel() == 0:
+        return out
+    order = torch.argsort(keys, stable=True)
+    csum = values.index_select(0, order).cumsum(0)
+    uniq, cnt = torch.unique_consecutive(keys.index_select(0, order), return_counts=True)
+    ends = torch.cumsum(cnt, 0) - 1
+    seg = csum.index_select(0, ends).clone()
+    seg[1:] -= csum.index_select(0, ends[:-1])
+    out[uniq] = seg
+    return out
+
+
 def _learn_codebook_torch(
     vectors,
     codebook_size: int,
@@ -194,9 +215,6 @@ def _learn_codebook_torch(
         else:
             codebook = _kmeans_pp_init_torch(rows, k, seed=seed)
 
-        sums = torch.zeros_like(codebook)
-        counts = torch.zeros(k, dtype=torch.float32, device=rows.device)
-
         from tqdm import tqdm
         pbar = tqdm(range(effective_iters), desc="      K-Means Iterations", leave=False)
         report_interval = max(1, effective_iters // 5)
@@ -218,16 +236,14 @@ def _learn_codebook_torch(
 
             chosen = indices.to(device=rows.device, dtype=torch.long)
 
-            # Reuse buffers
-            sums.zero_()
-            counts.zero_()
-
-            if sw_t is None:
-                sums.index_add_(0, chosen, rows)
-                counts.index_put_((chosen,), torch.ones(len(chosen), device=rows.device), accumulate=True)
-            else:
-                sums.index_add_(0, chosen, rows * sw_t[:, None])
-                counts.index_put_((chosen,), sw_t, accumulate=True)
+            # Deterministic centroid sums/counts: atomic index_add/index_put use a
+            # non-deterministic float-accumulation order on CUDA (the sole source of
+            # byte-non-determinism in the pack). A sort+cumsum segment-reduce sums in
+            # a fixed order -> reproducible codebooks.
+            vals = rows if sw_t is None else rows * sw_t[:, None]
+            sums = _det_segment_sum(chosen, vals, codebook.shape[0])
+            wts = torch.ones(len(chosen), device=rows.device, dtype=rows.dtype) if sw_t is None else sw_t
+            counts = _det_segment_sum(chosen, wts, codebook.shape[0])
 
             nonzero = counts > 0
             codebook[nonzero] = sums[nonzero] / counts[nonzero, None]
