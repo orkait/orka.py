@@ -64,14 +64,16 @@ def compensated_assign(
     stage_indices = [
         torch.empty(rows, gpr, dtype=torch.int64, device=device) for _ in codebooks
     ]
+    # Hoist the codebook device transfer out of the per-group loop: codebooks are
+    # frozen, so this ran gpr*n_stages redundant .to(device) copies before.
+    codebooks_dev = [cb.to(device) for cb in codebooks]
 
     for g in range(gpr):
         a, b = g * group_size, (g + 1) * group_size
         target = Wc[:, a:b].contiguous()
         dec = torch.zeros_like(target)
         residual = target
-        for s, cb in enumerate(codebooks):
-            cb_dev = cb.to(device)
+        for s, cb_dev in enumerate(codebooks_dev):
             idx, _ = quantize_vectors_auto(residual, cb_dev, "torch", str(device))
             idx = idx.to(device)
             stage_indices[s][:, g] = idx
@@ -79,8 +81,7 @@ def compensated_assign(
             residual = target - dec
         decoded[:, a:b] = dec
         if b < cols:
-            err = target - dec
             M = torch.linalg.solve(Hinv[a:b, a:b], Hinv[a:b, b:])
-            Wc[:, b:] -= err @ M
+            Wc[:, b:] -= residual @ M    # residual == target - dec (the committed error)
 
     return [si.reshape(-1) for si in stage_indices], decoded
