@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Sequence
 
-from orka.reconstruct import reconstruct_artifact
+from orka.artifact.reconstruct import reconstruct_artifact
 
 
 def _resolve_eval_model_dir(source: Path, model_dir: Path | None) -> Path:

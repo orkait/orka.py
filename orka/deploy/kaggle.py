@@ -14,8 +14,8 @@ import time
 from pathlib import Path
 
 from orka._runtime import _apply_gpu_memory_cap, _apply_system_ram_cap, _stop_ram_monitor
-from orka._util import _human_bytes
-from orka.activations import _load_awq_activations
+from orka.core._util import _human_bytes
+from orka.quant.activations import _load_awq_activations
 from orka.eval import eval_artifact
 from orka.pipeline.pack import pack_checkpoint
 from orka.quant import (
@@ -23,8 +23,8 @@ from orka.quant import (
     is_rvq_mixed_spec,
     rvq_mixed_family_stages,
 )
-from orka.merge import merge_orka_artifacts
-from orka.report import report_artifact
+from orka.artifact.merge import merge_orka_artifacts
+from orka.eval.report import report_artifact
 
 
 def _load_hf_token() -> str | None:

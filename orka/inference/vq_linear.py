@@ -310,7 +310,7 @@ def _register_layer_buffers(layer, artifact_dir, stages, group_size, block_size,
     """Load codebooks/indices (per stage) and block scales into the layer's
     registered buffers. Returns the loaded scales array (or None)."""
     import numpy as np
-    from orka._format import _read_codebook, _read_indices, _read_float_vector
+    from orka.core._format import _read_codebook, _read_indices, _read_float_vector
     from orka.transforms.normalize import stores_block_scales
 
     # --- Load codebooks + indices ---
@@ -331,7 +331,7 @@ def _register_layer_buffers(layer, artifact_dir, stages, group_size, block_size,
         )
         width = layer._plane_width[s] if s < len(layer._plane_width) else 0
         if width:
-            from orka._format import _pack_index_planes
+            from orka.core._format import _pack_index_planes
             lo, hi = _pack_index_planes(idxs, width)
             getattr(layer, f"indices_lo_{s}").copy_(torch.from_numpy(lo))
             getattr(layer, f"indices_hi_{s}").copy_(torch.from_numpy(hi))
@@ -370,7 +370,7 @@ def _build_csr_correction(layer, artifact_dir, tensor_meta, n_stages, group_size
     into a position->final-value map with salient priority (NOT summed).
     """
     import numpy as np
-    from orka._format import _read_salient, _read_outliers
+    from orka.core._format import _read_salient, _read_outliers
 
     def _vq_decoded_at(flat_pos_np):
         """W_vq = vq_decode * block_scale at given flat positions."""
@@ -487,7 +487,7 @@ def build_vq_linear(
 ) -> VQLinear:
     """Construct and populate a VQLinear from one tensor's .orka metadata."""
     import numpy as np
-    from orka._format import (
+    from orka.core._format import (
         _read_codebook, _read_indices, _read_salient, _read_outliers,
         _read_float_vector, _float_value_dtype,
     )

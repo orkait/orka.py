@@ -16,7 +16,7 @@ except ImportError:
 
 from orka.pipeline.pack import pack_checkpoint
 from orka.pipeline.sequential import _block_key, _group_tensors_by_block
-from orka.verify import verify_artifact
+from orka.eval.verify import verify_artifact
 
 
 class BlockGroupingTest(unittest.TestCase):

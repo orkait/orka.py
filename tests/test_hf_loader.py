@@ -1,4 +1,4 @@
-"""orka.hf loader: the decoded state dict must match the canonical decoder.
+"""orka.integrations.hf loader: the decoded state dict must match the canonical decoder.
 
 load_orka_model builds an HF model and loads _orka_state_dict into it. The HF arch path
 needs transformers + a real config, so the unit gate here locks the load-bearing core:
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from orka.hf import _orka_state_dict
+from orka.integrations.hf import _orka_state_dict
 from orka.pipeline.decode import _decode_tensor
 from orka.pipeline.pack import pack_checkpoint
 

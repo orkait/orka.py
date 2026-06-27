@@ -133,7 +133,7 @@ def main() -> int:
 
     # --- 4bpw measured allocation ---
     print(f"--- allocate {TARGET_BPW} bpw ---", flush=True)
-    from orka.allocate import build_allocation, allocation_tensor_stages
+    from orka.quant.allocate import build_allocation, allocation_tensor_stages
     alloc = build_allocation(
         src, TARGET_BPW, candidate_specs=CANDIDATES,
         group_size=8, sample_vectors=8192, iterations=4, backend="torch", device="cuda",
@@ -153,7 +153,7 @@ def main() -> int:
         iterations=8, em_aq_passes=1,
         tensor_stages_map=allocation_tensor_stages(alloc),
     )
-    from orka.export import export_vllm
+    from orka.artifact.export import export_vllm
     ptq_hf = WORK / "ptq-hf"
     export_vllm(ptq_art, ptq_hf, model_dir=Path(model_dir), dtype="bfloat16")
 

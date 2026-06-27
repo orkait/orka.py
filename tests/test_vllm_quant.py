@@ -12,11 +12,11 @@ import unittest
 
 class VllmQuantScaffoldTest(unittest.TestCase):
     def test_module_import_safe_without_vllm(self):
-        import orka.vllm_quant  # must not import vllm at module load
-        self.assertTrue(hasattr(orka.vllm_quant, "register_orka_vllm"))
+        import orka.integrations.vllm_quant  # must not import vllm at module load
+        self.assertTrue(hasattr(orka.integrations.vllm_quant, "register_orka_vllm"))
 
     def test_build_vq_linear_from_meta(self):
-        from orka.vllm_quant import _build_vq_linear_from_meta
+        from orka.integrations.vllm_quant import _build_vq_linear_from_meta
 
         meta = {
             "out_features": 64, "in_features": 64, "n_stages": 2,
@@ -28,7 +28,7 @@ class VllmQuantScaffoldTest(unittest.TestCase):
         self.assertTrue(hasattr(vq, "indices_0"))  # cb 256 -> uint8 buffer
 
     def test_planed_meta_builds_planes(self):
-        from orka.vllm_quant import _build_vq_linear_from_meta
+        from orka.integrations.vllm_quant import _build_vq_linear_from_meta
 
         meta = {
             "out_features": 64, "in_features": 64, "n_stages": 2,
@@ -38,7 +38,7 @@ class VllmQuantScaffoldTest(unittest.TestCase):
         self.assertTrue(hasattr(vq, "indices_lo_0"))  # 1024 -> 10-bit -> planes
 
     def test_register_without_vllm_raises_cleanly(self):
-        from orka.vllm_quant import register_orka_vllm
+        from orka.integrations.vllm_quant import register_orka_vllm
 
         try:
             import vllm  # noqa: F401

@@ -7,15 +7,15 @@ from pathlib import Path
 
 import numpy as np
 
-from orka._format import (
+from orka.core._format import (
     _cast_codebook_storage,
     _quantize_codebook_int8,
     _read_codebook,
     _write_codebook,
 )
 from orka.pipeline.pack import pack_checkpoint
-from orka.report import report_artifact
-from orka.verify import verify_artifact
+from orka.eval.report import report_artifact
+from orka.eval.verify import verify_artifact
 
 
 class Int8CodebookFormatTest(unittest.TestCase):

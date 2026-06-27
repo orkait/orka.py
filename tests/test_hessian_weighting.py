@@ -10,7 +10,7 @@ import numpy as np
 
 from orka.codebook import learn_codebook_auto
 from orka.pipeline.pack import pack_checkpoint
-from orka.verify import verify_artifact
+from orka.eval.verify import verify_artifact
 
 
 class WeightedKMeansTest(unittest.TestCase):

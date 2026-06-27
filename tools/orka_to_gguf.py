@@ -5,7 +5,7 @@ Custom GGUF writer for Orka compressed models.
 Packs the raw compressed representation (codebooks, indices, scales, salient
 outliers) directly into a single GGUF file *without* decompressing to FP16/FP32.
 
-All on-disk sidecars are read through the canonical orka._format readers, so
+All on-disk sidecars are read through the canonical orka.core._format readers, so
 the writer handles every v2 format detail correctly: bit-packed (non-byte-
 aligned) and zlib-encoded index streams, fp16/int8 codebooks, and fp16 scales.
 Reading them with a plain np.fromfile (the previous approach) silently produced
@@ -52,8 +52,8 @@ import gguf
 from gguf import GGUFWriter, GGMLQuantizationType
 from gguf.quants import quantize as ggml_quantize
 
-from orka._checkpoint import _load_tensors
-from orka._format import (
+from orka.core._checkpoint import _load_tensors
+from orka.core._format import (
     _read_codebook,
     _read_float_vector,
     _read_indices,

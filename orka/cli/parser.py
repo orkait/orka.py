@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import argparse
 
-from orka.allocate import DEFAULT_CANDIDATE_SPECS, cmd_allocate
-from orka.export import cmd_export_vllm
+from orka.quant.allocate import DEFAULT_CANDIDATE_SPECS, cmd_allocate
+from orka.artifact.export import cmd_export_vllm
 from orka.cli.commands import (
     cmd_autoquant,
     cmd_calc,

@@ -8,7 +8,7 @@ import math
 from dataclasses import dataclass
 from typing import Sequence
 
-from orka._util import _index_bits_for_size
+from orka.core._util import _index_bits_for_size
 
 
 @dataclass(frozen=True)
