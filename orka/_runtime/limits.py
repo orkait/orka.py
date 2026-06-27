@@ -18,10 +18,10 @@ except ImportError:
     psutil = None
     _HAS_PSUTIL = False
 
-try:
-    import torch
-except Exception:  # ImportError, or OSError from a broken/partial native install
-    torch = None
+# torch is imported lazily in _apply_cpu_cap (its only use here). Importing it at
+# module scope pulled ~1s of torch startup into every `import orka` - including
+# `orka --help`, arg-validation errors, and pure-numpy-backend runs that never
+# touch torch. Deferring it keeps those paths fast.
 
 
 # Hard ceiling: never let RAM_CAP exceed this regardless of user input.
@@ -251,6 +251,10 @@ def _apply_cpu_cap(max_threads: int | None) -> None:
 
     import sys
 
+    try:
+        import torch
+    except Exception:  # ImportError, or OSError from a broken/partial native install
+        torch = None
     if torch is not None:
         torch.set_num_threads(max_threads)
         try:
