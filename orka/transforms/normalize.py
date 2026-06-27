@@ -188,7 +188,10 @@ def _normalize_tensor_slrq_block_torch(tensor, block_size: int, device, salient_
             blocks[row_indices, salient_indices].clone()
         )
         blocks[row_indices, salient_indices] = 0.0
-        max_for_anchor = blocks.abs().amax(dim=1)
+        # anchor-max over the salient-removed block: mirror the zeroing into the
+        # already-computed abs_blocks instead of a second full-tensor .abs() pass.
+        abs_blocks[row_indices, salient_indices] = 0.0
+        max_for_anchor = abs_blocks.amax(dim=1)
     else:
         max_for_anchor = blocks.abs().amax(dim=1)
 
@@ -236,7 +239,8 @@ def _normalize_tensor_slrq_block_numpy(tensor, block_size: int, salient_enabled:
             blocks[row_indices, salient_indices].copy()
         )
         blocks[row_indices, salient_indices] = 0.0
-        max_for_anchor = np.abs(blocks).max(axis=1)
+        abs_blocks[row_indices, salient_indices] = 0.0     # reuse instead of a 2nd full abs
+        max_for_anchor = abs_blocks.max(axis=1)
     else:
         max_for_anchor = np.abs(blocks).max(axis=1)
 
