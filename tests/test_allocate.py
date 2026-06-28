@@ -109,3 +109,35 @@ class AllocationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SizeAwareAllocateTest(unittest.TestCase):
+    def test_codebook_bytes_math(self):
+        from orka.quant.allocate import _spec_codebook_bytes
+        from orka.quant import parse_quant_spec
+        # vq-12 = K=4096 entries x group 8 x 2 bytes (fp16).
+        self.assertEqual(_spec_codebook_bytes(parse_quant_spec("vq-12"), 8, 2), 4096 * 8 * 2)
+        # planar (scalar) stages carry no codebook.
+        self.assertEqual(_spec_codebook_bytes(parse_quant_spec("rvq-s8-s8"), 8, 2), 0)
+
+    def test_small_tensor_escapes_to_planar_under_size_aware(self):
+        import json, tempfile
+        import numpy as np
+        from pathlib import Path
+        from orka.quant.allocate import build_allocation
+        rng = np.random.default_rng(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "m.json"
+            # one tiny tensor where the VQ codebook tax dwarfs index savings
+            small = (rng.standard_normal((64, 64)) * 0.1).tolist()
+            src.write_text(json.dumps({"tensors": {"model.layers.0.small.weight": small}}))
+            base = build_allocation(src, 1.0, candidate_specs=("vq-4", "vq-8", "vq-12"),
+                                    sample_vectors=1024, iterations=2, backend="numpy",
+                                    device="cpu", size_aware=False)
+            aware = build_allocation(src, 1.0, candidate_specs=("vq-4", "vq-8", "vq-12"),
+                                     sample_vectors=1024, iterations=2, backend="numpy",
+                                     device="cpu", size_aware=True)
+            base_spec = base["tensors"]["model.layers.0.small.weight"]["spec"]
+            aware_spec = aware["tensors"]["model.layers.0.small.weight"]["spec"]
+            self.assertTrue(base_spec.startswith("vq"))          # naive picks VQ
+            self.assertTrue(aware_spec.startswith("rvq-s"))      # size-aware escapes to planar

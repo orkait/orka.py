@@ -51,6 +51,26 @@ def _spec_bits_per_vector(stages: Sequence) -> int:
     return total
 
 
+def _spec_codebook_bytes(stages: Sequence, group_size: int, dtype_bytes: int = 2) -> int:
+    """On-disk codebook bytes for a spec: ``sum_stage K * group_size * dtype_bytes``.
+
+    Scalar ('s') stages carry no learned codebook (uniform dequant), so they cost 0 -
+    this is what gives planar specs their headroom on small tensors, where a VQ
+    stage's fixed K*group_size codebook dwarfs the index savings.
+    """
+    total = 0
+    for k in stages:
+        if isinstance(k, str) and k.startswith("s"):
+            continue
+        total += int(k) * group_size * dtype_bytes
+    return total
+
+
+# Planar (scalar) candidates appended to the menu under --size-aware so the allocator
+# can escape the per-tensor codebook tax where VQ does not earn it.
+PLANAR_CANDIDATE_SPECS = ("rvq-s8", "rvq-s8-s8", "rvq-s8-s8-s8")
+
+
 def _probe_spec_distortion(
     vectors, stages: Sequence, iterations: int, backend: str, device: str, seed: int
 ) -> float:
@@ -94,8 +114,16 @@ def build_allocation(
     progress_file: Path | None = None,
     search_transforms: bool = False,
     transform_block: int = 128,
+    size_aware: bool = False,
+    codebook_dtype_bytes: int = 2,
 ) -> dict:
     import numpy as np
+
+    # Size-aware allocation charges each VQ spec its fixed per-tensor codebook tax and
+    # offers planar (scalar) specs that pay none - so the allocator picks planar on
+    # small tensors and VQ on large ones by true on-disk size, not index bits alone.
+    if size_aware:
+        candidate_specs = tuple(dict.fromkeys((*candidate_specs, *PLANAR_CANDIDATE_SPECS)))
 
     specs = []
     for spec in candidate_specs:
@@ -104,6 +132,7 @@ def build_allocation(
     specs.sort(key=lambda item: item[2])
     if len({bits for _, _, bits in specs}) < 2:
         raise ValueError("need at least two candidate specs with distinct rates")
+    spec_cb_bytes = [_spec_codebook_bytes(st, group_size, codebook_dtype_bytes) for _, st, _ in specs]
 
     rows = []
     seen = 0
@@ -195,7 +224,11 @@ def build_allocation(
     # BOTH (Lagrangian then a greedy fill of the leftover budget) and KEEP THE LOWER
     # total distortion - provably never worse than greedy, ~6% lower on average.
     def _bits(t, s):
-        return rows[t]["numel"] * specs[s][2] / group_size
+        # Index bits, plus (size-aware) the spec's fixed codebook tax for this tensor.
+        b = rows[t]["numel"] * specs[s][2] / group_size
+        if size_aware:
+            b += spec_cb_bytes[s] * 8
+        return b
 
     def _greedy_fill(choice, spent):
         """Heap water-filling from a partial allocation: O(T*S*log T)."""
@@ -302,6 +335,7 @@ def cmd_allocate(args) -> int:
         max_tensors=args.max_tensors,
         progress_file=Path(args.progress_file) if args.progress_file else None,
         search_transforms=getattr(args, "search_transforms", False),
+        size_aware=getattr(args, "size_aware", False),
     )
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
