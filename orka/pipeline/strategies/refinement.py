@@ -160,8 +160,6 @@ def _run_em_aq_refinement(
                     )
 
                     del old_dec_raw, old_dec, target, target_train, training, cb, indices, new_dec_raw, new_dec
-                    import gc
-                    gc.collect()
 
         c["decoded_sum"] = _offload_to_cpu(current_full_sum)
         del current_full_sum
