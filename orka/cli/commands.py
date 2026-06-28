@@ -120,6 +120,7 @@ def cmd_pack(args: argparse.Namespace) -> int:
             codebook_sizes=sizes if family_map is None else None,
             family_stages_map=family_map,
             tensor_stages_map=tensor_map,
+            tensor_transforms_map=_load_allocation_transforms(args),
             outlier_frac=args.outlier_frac,
             rotation=args.rotation,
             rotation_seed=args.rotation_seed,
@@ -164,6 +165,18 @@ def _load_allocation_map(args: argparse.Namespace):
     with open(args.allocation_map, "r") as f:
         allocation = json.load(f)
     return allocation_tensor_stages(allocation)
+
+
+def _load_allocation_transforms(args: argparse.Namespace):
+    """Per-tensor {normalization?, rotation?} overrides from the allocation map, or
+    None when the file is absent or carries no transform overrides."""
+    if not getattr(args, "allocation_map", None):
+        return None
+    from orka.quant.allocate import allocation_tensor_transforms
+
+    with open(args.allocation_map, "r") as f:
+        allocation = json.load(f)
+    return allocation_tensor_transforms(allocation) or None
 
 
 def _run_sequential_pack(args: argparse.Namespace, source_file: Path) -> int:

@@ -224,6 +224,19 @@ def allocation_tensor_stages(allocation: dict) -> dict[str, list]:
     }
 
 
+def allocation_tensor_transforms(allocation: dict) -> dict[str, dict]:
+    """Allocation JSON -> {tensor name: {normalization?, rotation?}} for pack_checkpoint.
+
+    Empty when no tensor carries a per-tensor transform override, so callers pass the
+    result straight through (pack treats a falsy map as "use the global transforms")."""
+    out = {}
+    for name, entry in allocation.get("tensors", {}).items():
+        over = {k: entry[k] for k in ("normalization", "rotation") if k in entry}
+        if over:
+            out[name] = over
+    return out
+
+
 def cmd_allocate(args) -> int:
     allocation = build_allocation(
         Path(args.source),
