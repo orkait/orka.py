@@ -72,9 +72,17 @@ PLANAR_CANDIDATE_SPECS = ("rvq-s8", "rvq-s8-s8", "rvq-s8-s8-s8")
 
 
 def _probe_spec_distortion(
-    vectors, stages: Sequence, iterations: int, backend: str, device: str, seed: int
+    vectors, stages: Sequence, iterations: int, backend: str, device: str, seed: int,
+    sample_weights=None,
 ) -> float:
-    """Greedy RVQ on the sample; returns mean squared error per value."""
+    """Greedy RVQ on the sample; returns mean squared error per value.
+
+    When ``sample_weights`` (per-vector importance h, length N) is given, the probe
+    optimizes the OUTPUT-error proxy instead of raw weight MSE: weighted k-means pulls
+    centroids toward high-importance vectors, and the returned distortion is the
+    importance-weighted mean squared error. This is what makes the allocation reflect
+    each tensor's effect on the model output, not just its weight reconstruction.
+    """
     residual = vectors
     decoded_sum = None
     n = len(vectors)
@@ -82,12 +90,14 @@ def _probe_spec_distortion(
         if isinstance(k_spec, str) and k_spec.startswith("s"):
             k = 1 << int(k_spec[1:])
             v_res = residual.reshape(-1, 1)
+            sw = None  # scalar stage reshapes to [N*d, 1]; per-vector weights don't map
         else:
             k = int(k_spec)
             v_res = residual
+            sw = sample_weights
         cb, _, _ = learn_codebook_auto(
             v_res, min(k, len(v_res)), iterations, backend, device,
-            seed=seed + stage_i,
+            seed=seed + stage_i, sample_weights=sw,
         )
         indices, _ = quantize_vectors_auto(v_res, cb, backend, device)
         dec = _decode_to_vectors_format(v_res, cb, indices, backend, device)
@@ -97,7 +107,11 @@ def _probe_spec_distortion(
     import numpy as np
 
     diff = np.asarray(residual, dtype=np.float32) if not hasattr(residual, "detach") else residual.detach().cpu().numpy()
-    return float(np.mean(diff.astype(np.float32) ** 2))
+    sq = diff.astype(np.float32) ** 2  # [N, d]
+    if sample_weights is None:
+        return float(np.mean(sq))
+    w = np.asarray(sample_weights, dtype=np.float32).reshape(-1)
+    return float((w * sq.sum(axis=1)).sum() / (w.sum() * sq.shape[1] + 1e-12))
 
 
 def build_allocation(
@@ -116,8 +130,23 @@ def build_allocation(
     transform_block: int = 128,
     size_aware: bool = False,
     codebook_dtype_bytes: int = 2,
+    awq_activations: dict | None = None,
 ) -> dict:
     import numpy as np
+
+    def _per_vector_importance(h, numel: int):
+        # h_j = E[x_j^2] per input column -> per-group-vector importance (mean over the
+        # group_size columns the vector covers, row-major). Length matches the padded
+        # vector count, so it samples in lockstep with the probe vectors.
+        hh = np.asarray(h, dtype=np.float32).reshape(-1)
+        if hh.size == 0:
+            return None
+        reps = -(-numel // hh.size)
+        hf = np.tile(hh, reps)[:numel]
+        pad = (-numel) % group_size
+        if pad:
+            hf = np.pad(hf, (0, pad))
+        return hf.reshape(-1, group_size).mean(axis=1)
 
     # Size-aware allocation charges each VQ spec its fixed per-tensor codebook tax and
     # offers planar (scalar) specs that pay none - so the allocator picks planar on
@@ -188,13 +217,33 @@ def build_allocation(
         if pad:
             probe_flat = np.pad(probe_flat, (0, pad))
         vectors = probe_flat.reshape(-1, group_size)
-        sample = _sample_vector_rows(vectors, sample_vectors)
+
+        # Importance weighting: optimize output error (Hessian-weighted) not raw weight
+        # MSE. Per-vector weights come from the calibration activations of this tensor;
+        # exact when columns are preserved (none/block-max), approximate under rotation
+        # (column mixing) - the activations are kept pre-transform for v1.
+        sw_full = None
+        if awq_activations is not None and name in awq_activations:
+            act = awq_activations[name]
+            xa = act.detach().cpu().numpy() if hasattr(act, "detach") else np.asarray(act)
+            if xa.ndim == 2 and xa.shape[1] == int(shape[-1]):
+                sw_full = _per_vector_importance((xa.astype(np.float32) ** 2).mean(axis=0), numel)
+
+        n_vec = vectors.shape[0]
+        if sw_full is not None and n_vec > sample_vectors:
+            idx = np.random.default_rng(seed).choice(n_vec, sample_vectors, replace=False)
+            sample, sw_sample = vectors[idx], sw_full[idx]
+        elif sw_full is not None:
+            sample, sw_sample = vectors, sw_full
+        else:
+            sample, sw_sample = _sample_vector_rows(vectors, sample_vectors), None
 
         # Stage 2: spec RD probe on the (transformed) vectors.
         distortions = []
         for spec, stages, bits in specs:
             mse = _probe_spec_distortion(
-                sample, stages, iterations, backend, device, seed
+                sample, stages, iterations, backend, device, seed,
+                sample_weights=sw_sample,
             )
             # Sample MSE -> estimated total SSE in original units, for cross-tensor
             # comparison.
@@ -202,6 +251,7 @@ def build_allocation(
         _report_progress(
             progress_file,
             f"allocate: probed {name}"
+            + (" [hessian]" if sw_sample is not None else "")
             + (f" [{transform['normalization']}/{transform['rotation']}]" if transform else "")
             + " " + ", ".join(f"{s}={d:.4g}" for (s, _, _), d in zip(specs, distortions)),
         )
@@ -323,6 +373,15 @@ def allocation_tensor_transforms(allocation: dict) -> dict[str, dict]:
 
 
 def cmd_allocate(args) -> int:
+    awq_activations = None
+    if getattr(args, "hessian", False):
+        from orka.quant.activations import _load_awq_activations
+
+        args.no_hessian = False
+        awq_activations = _load_awq_activations(args)
+        if awq_activations is None:
+            print("WARNING: --hessian requested but activations unavailable; "
+                  "falling back to unweighted allocation.")
     allocation = build_allocation(
         Path(args.source),
         args.target_bpw,
@@ -336,6 +395,7 @@ def cmd_allocate(args) -> int:
         progress_file=Path(args.progress_file) if args.progress_file else None,
         search_transforms=getattr(args, "search_transforms", False),
         size_aware=getattr(args, "size_aware", False),
+        awq_activations=awq_activations,
     )
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
