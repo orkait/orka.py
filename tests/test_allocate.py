@@ -131,10 +131,14 @@ class SizeAwareAllocateTest(unittest.TestCase):
             # one tiny tensor where the VQ codebook tax dwarfs index savings
             small = (rng.standard_normal((64, 64)) * 0.1).tolist()
             src.write_text(json.dumps({"tensors": {"model.layers.0.small.weight": small}}))
-            base = build_allocation(src, 1.0, candidate_specs=("vq-4", "vq-8", "vq-12"),
+            # Scalar 's8' stages pack at group_size=1 (8 bpw/stage), so planar only fits
+            # a generous budget; at 8 bpw the per-tensor codebook tax is what tips a tiny
+            # tensor from VQ to planar. (At 1.0 bpw planar is inadmissible - the old test
+            # only passed because of the 8x planar-bpw under-count, now fixed.)
+            base = build_allocation(src, 8.0, candidate_specs=("vq-4", "vq-8", "vq-12"),
                                     sample_vectors=1024, iterations=2, backend="numpy",
                                     device="cpu", size_aware=False)
-            aware = build_allocation(src, 1.0, candidate_specs=("vq-4", "vq-8", "vq-12"),
+            aware = build_allocation(src, 8.0, candidate_specs=("vq-4", "vq-8", "vq-12"),
                                      sample_vectors=1024, iterations=2, backend="numpy",
                                      device="cpu", size_aware=True)
             base_spec = base["tensors"]["model.layers.0.small.weight"]["spec"]
