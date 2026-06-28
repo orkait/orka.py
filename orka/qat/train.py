@@ -168,8 +168,13 @@ def main() -> int:
         # optimizer step. Recovers a larger effective batch (accum * batch) on a
         # small GPU where only batch=1 fits in VRAM.
         opt.zero_grad(set_to_none=True)
-        kl_log = 0.0
-        cb_log = 0.0
+        # Accumulate the logged losses as GPU tensors and sync (.item()) ONLY on a
+        # log step. A per-step .item() forces a GPU->CPU sync every micro-batch (19 of
+        # every 20 wasted, since they are never printed), serializing the device and
+        # blocking the CPU from queuing the next step's kernels.
+        log_step = step % 20 == 0 or step == args.steps - 1
+        kl_acc = torch.zeros((), device=dev)
+        cb_acc = torch.zeros((), device=dev)
         for micro in range(accum):
             idx = torch.randint(0, corpus.shape[0], (args.batch,), generator=rng).to(dev)
             batch = corpus[idx]
@@ -189,15 +194,16 @@ def main() -> int:
             cb_loss = collect_codebook_loss(wrapped)
             loss = (kl + args.cb_weight * cb_loss) / accum
             loss.backward()
-            kl_log += kl.item() / accum
-            cb_log += cb_loss.item() / accum
+            if log_step:
+                kl_acc = kl_acc + kl.detach()
+                cb_acc = cb_acc + cb_loss.detach()
 
         torch.nn.utils.clip_grad_norm_(train_params, 1.0)
         opt.step()
         sched.step()
 
-        if step % 20 == 0 or step == args.steps - 1:
-            print(f"step {step:4d}  kl={kl_log:.4f}  cb={cb_log:.4f}  lr={sched.get_last_lr()[0]:.2e}", flush=True)
+        if log_step:
+            print(f"step {step:4d}  kl={kl_acc.item() / accum:.4f}  cb={cb_acc.item() / accum:.4f}  lr={sched.get_last_lr()[0]:.2e}", flush=True)
         # checkpoint AFTER the step so resume restarts at the next unfinished step
         if ckpt_path and ((step + 1) % args.ckpt_every == 0 or step == args.steps - 1):
             _save_ckpt(step + 1)
