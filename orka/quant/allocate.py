@@ -105,10 +105,19 @@ def _probe_spec_distortion(
         dec = dec.reshape(residual.shape) if dec.shape != residual.shape else dec
         decoded_sum = dec if decoded_sum is None else decoded_sum + dec
         residual = _vectors_subtract(vectors, decoded_sum)
+    if hasattr(residual, "detach"):  # torch tensor: square + reduce on-device, only the scalar crosses to host
+        import torch
+
+        sq = residual.detach().to(torch.float32) ** 2  # [N, d]
+        if sample_weights is None:
+            return float(sq.mean().item())
+        w = torch.as_tensor(sample_weights, dtype=torch.float32, device=sq.device).reshape(-1)
+        return float(((w * sq.sum(dim=1)).sum() / (w.sum() * sq.shape[1] + 1e-12)).item())
+
     import numpy as np
 
-    diff = np.asarray(residual, dtype=np.float32) if not hasattr(residual, "detach") else residual.detach().cpu().numpy()
-    sq = diff.astype(np.float32) ** 2  # [N, d]
+    diff = np.asarray(residual, dtype=np.float32)
+    sq = diff ** 2  # [N, d]
     if sample_weights is None:
         return float(np.mean(sq))
     w = np.asarray(sample_weights, dtype=np.float32).reshape(-1)
@@ -209,7 +218,10 @@ def build_allocation(
             best = None  # (orig_mse, norm, rot, transformed_2d, denorm_factor)
             for t_norm, t_rot in DEFAULT_TRANSFORM_GRID:
                 try:
-                    wt, factor = apply_transform(w2d, t_norm, t_rot, norm_block=transform_block)
+                    wt, factor = apply_transform(
+                        w2d, t_norm, t_rot, norm_block=transform_block,
+                        device=device if backend == "torch" else None,
+                    )
                 except ValueError:
                     continue  # transform infeasible for this width (e.g. Hadamard)
                 ft = np.asarray(wt, dtype=np.float32).reshape(-1)

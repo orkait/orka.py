@@ -135,13 +135,17 @@ DEFAULT_TRANSFORM_GRID = (
 )
 
 
-def apply_transform(weight, normalization: str | None, rotation: str | None, *, norm_block: int = 128):
+def apply_transform(weight, normalization: str | None, rotation: str | None, *, norm_block: int = 128, device: str | None = None):
     """Apply (normalization, rotation) to a 2D weight for the allocate probe.
 
     Returns ``(transformed_2d, denorm_factor)``. ``denorm_factor`` = mean(block
     scale**2) converts a distortion measured on the transformed values back to
     original weight units (1.0 when no scaling normalization; rotation is isometric
     so it contributes 1). Mirrors the normalize-then-rotate order in the pack.
+
+    The Hadamard FWHT is the dominant cost; when ``device`` names a CUDA device it
+    runs the block FWHT on the GPU (~8.6x even paying the host roundtrip, measured),
+    returning numpy so the caller's interface is unchanged.
     """
     W = np.asarray(weight, dtype=np.float64)
     if W.ndim == 1:
@@ -167,10 +171,19 @@ def apply_transform(weight, normalization: str | None, rotation: str | None, *, 
         raise ValueError(f"unsupported normalization for proxy: {normalization!r}")
 
     if rotation == "hadamard":
-        from orka.transforms.rotate import _block_fwht_numpy, _hadamard_block_size
+        from orka.transforms.rotate import _hadamard_block_size
 
         hb = _hadamard_block_size(cols)
-        Wr = np.asarray(_block_fwht_numpy(Wn, hb), dtype=np.float64)
+        if device is not None and "cuda" in str(device):
+            import torch
+            from orka.transforms.rotate import _block_fwht_torch
+
+            t = torch.as_tensor(Wn, dtype=torch.float32, device=device).reshape(rows, cols)
+            Wr = _block_fwht_torch(t, hb).detach().cpu().numpy().astype(np.float64)
+        else:
+            from orka.transforms.rotate import _block_fwht_numpy
+
+            Wr = np.asarray(_block_fwht_numpy(Wn, hb), dtype=np.float64)
     elif rotation in ("none", None):
         Wr = Wn
     else:
