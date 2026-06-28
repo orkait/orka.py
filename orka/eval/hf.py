@@ -7,7 +7,11 @@ import shutil
 from pathlib import Path
 from typing import Sequence
 
-from orka.artifact.reconstruct import reconstruct_artifact
+# NOTE: reconstruct_artifact is imported lazily inside the function below.
+# orka.artifact.reconstruct -> pipeline.decode -> ... -> eval.metrics -> eval ->
+# eval.hf forms an import cycle; a module-level import here deadlocks any cold
+# `from orka.X import ...` that enters through this edge. Deferring it breaks the
+# cycle (eval.hf does not need reconstruct at import time).
 
 
 def _resolve_eval_model_dir(source: Path, model_dir: Path | None) -> Path:
@@ -63,6 +67,8 @@ def _prepare_reconstructed_hf_dir(
     if not manifest_path.exists():
         raise FileNotFoundError(f"missing Orka manifest: {manifest_path}")
     manifest = json.loads(manifest_path.read_text())
+    from orka.artifact.reconstruct import reconstruct_artifact
+
     reconstructed = reconstruct_artifact(
         artifact_dir,
         target_dir / "model.safetensors",
