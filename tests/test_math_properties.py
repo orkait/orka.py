@@ -361,5 +361,56 @@ class RVQAdditivityAndMirrorTest(unittest.TestCase):
             )
 
 
+def _faiss_cuda_available() -> bool:
+    if not HAS_TORCH or not torch.cuda.is_available():
+        return False
+    try:
+        import faiss
+        return faiss.get_num_gpus() > 0
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(_faiss_cuda_available(), "faiss-gpu + CUDA required")
+class FaissKmeansTest(unittest.TestCase):
+    """The opt-in faiss GPU k-means path matches the torch path's quality and is
+    byte-deterministic per seed."""
+
+    def test_faiss_matches_torch_quality_and_is_deterministic(self) -> None:
+        from orka.codebook._kmeans_torch import (
+            _learn_codebook_faiss,
+            _learn_codebook_torch,
+        )
+
+        torch.manual_seed(0)
+        rows = torch.randn(20000, 8, device="cuda")
+        k, iters = 1024, 12
+
+        _, _, mse_torch = _learn_codebook_torch(rows, k, iters, "cuda", seed=0)
+        cb1, _, mse_faiss = _learn_codebook_faiss(rows, k, iters, "cuda", 0)
+        cb2, _, _ = _learn_codebook_faiss(rows, k, iters, "cuda", 0)
+
+        self.assertEqual(tuple(cb1.shape), (k, 8))
+        self.assertTrue(torch.isfinite(cb1).all())
+        # same-seed faiss is byte-deterministic
+        self.assertTrue(torch.equal(cb1, cb2))
+        # quality within 5% of the torch Lloyd (different algorithm, equal optimum)
+        self.assertLess(abs(mse_faiss - mse_torch) / mse_torch, 0.05)
+
+    def test_opt_in_gate_off_by_default(self) -> None:
+        import os
+        from orka.codebook._kmeans_torch import _faiss_kmeans_enabled
+
+        prev = os.environ.pop("ORKA_KMEANS_FAISS", None)
+        try:
+            self.assertFalse(_faiss_kmeans_enabled())
+            os.environ["ORKA_KMEANS_FAISS"] = "1"
+            self.assertTrue(_faiss_kmeans_enabled())
+        finally:
+            os.environ.pop("ORKA_KMEANS_FAISS", None)
+            if prev is not None:
+                os.environ["ORKA_KMEANS_FAISS"] = prev
+
+
 if __name__ == "__main__":
     unittest.main()
