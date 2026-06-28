@@ -163,6 +163,19 @@ def build_allocation(
         raise ValueError("need at least two candidate specs with distinct rates")
     spec_cb_bytes = [_spec_codebook_bytes(st, group_size, codebook_dtype_bytes) for _, st, _ in specs]
 
+    # The probe must use >> max-K vectors or k-means trivially fits (K >= N -> one
+    # centroid per vector -> 0 distortion), which blinds the allocator to the high-bit
+    # specs and makes it under-spend the budget. Scale the sample to OVERSAMPLE x the
+    # largest candidate codebook (capped), letting it fall back to the whole tensor.
+    _OVERSAMPLE, _PROBE_CAP = 4, 1 << 18
+    max_k = max((int(k) for _, st, _ in specs for k in st
+                 if not (isinstance(k, str) and k.startswith("s"))), default=0)
+    # None = use every vector (already the most accurate); otherwise lift the sample to
+    # >> max-K so the probe doesn't saturate.
+    probe_sample = None if sample_vectors is None else min(
+        max(sample_vectors, _OVERSAMPLE * max_k), _PROBE_CAP
+    )
+
     rows = []
     seen = 0
     for name, tensor in _load_tensors(source):
@@ -230,13 +243,13 @@ def build_allocation(
                 sw_full = _per_vector_importance((xa.astype(np.float32) ** 2).mean(axis=0), numel)
 
         n_vec = vectors.shape[0]
-        if sw_full is not None and n_vec > sample_vectors:
-            idx = np.random.default_rng(seed).choice(n_vec, sample_vectors, replace=False)
+        if sw_full is not None and probe_sample is not None and n_vec > probe_sample:
+            idx = np.random.default_rng(seed).choice(n_vec, probe_sample, replace=False)
             sample, sw_sample = vectors[idx], sw_full[idx]
         elif sw_full is not None:
             sample, sw_sample = vectors, sw_full
         else:
-            sample, sw_sample = _sample_vector_rows(vectors, sample_vectors), None
+            sample, sw_sample = _sample_vector_rows(vectors, probe_sample), None
 
         # Stage 2: spec RD probe on the (transformed) vectors.
         distortions = []
