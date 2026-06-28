@@ -112,3 +112,20 @@ def reconstruct_state_dict(art_path: str, device: str = "cuda") -> dict:
         W = (recon_rot @ R.t()).reshape(-1)[:numel].reshape(shape)
         sd[name] = W.half()
     return sd
+
+
+def reconstruct_to_hf(art_path: str, src_model_dir: str, out_dir: str, device: str = "cuda") -> str:
+    """Reconstruct a .lat artifact into a loadable HF model directory (bf16)."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    sd = reconstruct_state_dict(art_path, device)
+    model = AutoModelForCausalLM.from_pretrained(src_model_dir, local_files_only=True, dtype=torch.float16).to(device)
+    model.load_state_dict({k: v.half() for k, v in sd.items()}, strict=False)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    model.to(torch.bfloat16).save_pretrained(str(out))
+    try:
+        AutoTokenizer.from_pretrained(src_model_dir, local_files_only=True).save_pretrained(str(out))
+    except Exception:
+        pass
+    return str(out)
