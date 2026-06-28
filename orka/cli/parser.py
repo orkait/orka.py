@@ -132,9 +132,16 @@ def _add_allocate_parser(sub):
     allocate.add_argument(
         "--search-transforms",
         action="store_true",
-        help="also search per-tensor normalization/rotation (a scalar-quant proxy "
-        "ranks the transform, then the spec probe runs on it). Writes per-tensor "
+        help="also search per-tensor normalization/rotation (a cheap VQ probe ranks "
+        "the transform, then the spec probe runs on it). Writes per-tensor "
         "normalization/rotation into the allocation map for pack to apply.",
+    )
+    allocate.add_argument(
+        "--size-aware",
+        action="store_true",
+        help="charge each VQ spec its fixed per-tensor codebook tax and add planar "
+        "(scalar) candidates, so the allocator picks planar on small tensors and VQ "
+        "on large ones by true on-disk size, not index bits alone.",
     )
     allocate.set_defaults(func=cmd_allocate)
 
