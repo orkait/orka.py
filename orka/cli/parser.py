@@ -106,6 +106,25 @@ def _add_report_parser(sub):
     report.add_argument("artifact")
     report.set_defaults(func=cmd_report)
 
+    from orka.cli._lattice_commands import cmd_lattice_compress, cmd_lattice_reconstruct
+    latc = sub.add_parser("lattice-compress",
+                          help="codebook-free E8-lattice PTQ (no training, ~QAT quality)")
+    latc.add_argument("model", help="HF model dir (safetensors)")
+    latc.add_argument("--out", required=True, help="output .lat artifact dir")
+    latc.add_argument("--scales", nargs="+", default=["0.04"],
+                      help="per-stage lattice scales, e.g. --scales 0.05 0.02")
+    latc.add_argument("--seed", type=int, default=1)
+    latc.add_argument("--device", default="auto")
+    latc.add_argument("--max-gpu-mem-gb", type=float, default=None)
+    latc.set_defaults(func=cmd_lattice_compress)
+
+    latr = sub.add_parser("lattice-reconstruct", help="reconstruct a .lat artifact to an HF model dir")
+    latr.add_argument("artifact", help=".lat artifact dir")
+    latr.add_argument("--model", required=True, help="source HF model dir (for config/arch)")
+    latr.add_argument("--out", required=True, help="output HF model dir")
+    latr.add_argument("--device", default="auto")
+    latr.set_defaults(func=cmd_lattice_reconstruct)
+
 
 def _add_allocate_parser(sub):
     allocate = sub.add_parser(
