@@ -9,7 +9,12 @@ import unittest
 
 import numpy as np
 
-from orka.quant.transform_search import scalar_quant_proxy, transform_overhead_bits
+from orka.quant.transform_search import (
+    scalar_quant_proxy,
+    scalar_quant_reconstruct,
+    transform_overhead_bits,
+    transform_proxy_distortion,
+)
 
 
 class ScalarQuantProxyTest(unittest.TestCase):
@@ -110,6 +115,70 @@ class TransformOverheadBitsTest(unittest.TestCase):
             transform_overhead_bits("none", "none", numel=10, block_size=0)
         with self.assertRaises(ValueError):
             transform_overhead_bits("slrq-block", "none", numel=10, salient_frac=1.5)
+
+
+class TransformProxyDistortionTest(unittest.TestCase):
+    def _multiscale(self):
+        rng = np.random.default_rng(0)
+        return np.vstack([
+            rng.standard_normal(256) * 0.01,
+            rng.standard_normal(256) * 1.0,
+            rng.standard_normal(256) * 0.05,
+            rng.standard_normal(256) * 2.0,
+        ])
+
+    def test_none_matches_global_scalar_quant(self) -> None:
+        # normalization=none, rotation=none -> just one-scale scalar-quant MSE.
+        rng = np.random.default_rng(5)
+        W = rng.standard_normal((4, 64))
+        got = transform_proxy_distortion(W, "none", "none", bits=4)
+        ref = scalar_quant_proxy(W.reshape(-1), bits=4, block_size=W.size)
+        self.assertAlmostEqual(got, ref, places=12)
+
+    def test_block_max_helps_multiscale(self) -> None:
+        W = self._multiscale()
+        none = transform_proxy_distortion(W, "none", "none", bits=4, norm_block=128)
+        bmax = transform_proxy_distortion(W, "block-max", "none", bits=4, norm_block=128)
+        self.assertLess(bmax, none)
+
+    def test_hadamard_helps_outliers(self) -> None:
+        rng = np.random.default_rng(6)
+        W = rng.standard_normal((4, 256)) * 0.1
+        W[0, 0] = 30.0  # a fat outlier one global scale must cover
+        none = transform_proxy_distortion(W, "none", "none", bits=4)
+        hada = transform_proxy_distortion(W, "none", "hadamard", bits=4)
+        self.assertLess(hada, none)
+
+    def test_slrq_uses_block_max_proxy(self) -> None:
+        W = self._multiscale()
+        a = transform_proxy_distortion(W, "slrq-block", "none", bits=4, norm_block=128)
+        b = transform_proxy_distortion(W, "block-max", "none", bits=4, norm_block=128)
+        self.assertAlmostEqual(a, b, places=12)
+
+    def test_1d_input_and_determinism(self) -> None:
+        rng = np.random.default_rng(7)
+        v = rng.standard_normal(512)
+        d1 = transform_proxy_distortion(v, "block-max", "none", bits=4, norm_block=128)
+        d2 = transform_proxy_distortion(v.reshape(1, -1), "block-max", "none", bits=4, norm_block=128)
+        self.assertAlmostEqual(d1, d2, places=12)
+
+    def test_unsupported_config_raises(self) -> None:
+        W = np.zeros((4, 64))
+        with self.assertRaises(ValueError):
+            transform_proxy_distortion(W, "none", "orthogonal")
+        with self.assertRaises(ValueError):
+            transform_proxy_distortion(W, "made-up", "none")
+
+    def test_hadamard_infeasible_width_raises(self) -> None:
+        # cols=6 has no pow2 divisor >= 4 -> _hadamard_block_size raises -> propagates.
+        W = np.zeros((4, 6))
+        with self.assertRaises(ValueError):
+            transform_proxy_distortion(W, "none", "hadamard")
+
+    def test_reconstruct_same_length(self) -> None:
+        v = np.arange(300, dtype=float)
+        r = scalar_quant_reconstruct(v, bits=4, block_size=128)
+        self.assertEqual(r.shape, v.shape)
 
 
 if __name__ == "__main__":
