@@ -12,6 +12,7 @@ from orka._runtime import (
     _apply_cpu_cap,
     _apply_gpu_memory_cap,
     _apply_system_ram_cap,
+    _resolve_auto_backend,
     _stop_ram_monitor,
     _wrap_capped_oom,
 )
@@ -79,6 +80,9 @@ def cmd_pack(args: argparse.Namespace) -> int:
             print(f"Error resolving source: {exc}")
             return 1
 
+    args.backend = _resolve_auto_backend(args.backend)
+    if args.backend == "torch":
+        print(f"  Backend: torch (device={args.device})", flush=True)
     _apply_gpu_memory_cap(args.backend, args.device, args.max_gpu_mem_gb)
     _apply_system_ram_cap(args.max_system_ram_gb, getattr(args, "workload_budget_gb", None))
     _apply_cpu_cap(args.max_cpu_threads)

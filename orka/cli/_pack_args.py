@@ -29,8 +29,8 @@ def _add_pack_args(p):
     )
     p.add_argument(
         "--device",
-        default="cpu",
-        help="torch backend device, for example cpu, cuda, cuda:0, or auto",
+        default="auto",
+        help="torch backend device: auto (cuda if available, else cpu), cpu, cuda, or cuda:0",
     )
     p.add_argument(
         "--normalization",
