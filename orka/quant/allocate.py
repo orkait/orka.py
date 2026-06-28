@@ -42,11 +42,20 @@ _TRANSFORM_PROBE_VECTORS = 1024
 _TRANSFORM_PROBE_ITERS = 2
 
 
-def _spec_bits_per_vector(stages: Sequence) -> int:
+def _spec_bits_per_vector(stages: Sequence, group_size: int) -> int:
+    """Index bits a spec stores per group_size-weight vector.
+
+    A VQ stage emits ONE index per vector (group_size weights share it), so it costs
+    ``index_bits`` per vector. A scalar ('s') stage quantizes each weight independently
+    (group_size == 1 at pack time), so it emits ``group_size`` indices per vector and
+    costs ``bits * group_size``. Counting scalar stages as a single per-vector index
+    (the old bug) under-counted planar specs by ``group_size`` (8x), making --size-aware
+    pick non-compressing planar configs and report a fictional bpw.
+    """
     total = 0
     for k in stages:
         if isinstance(k, str) and k.startswith("s"):
-            total += int(k[1:])
+            total += int(k[1:]) * group_size
         else:
             total += _index_bits_for_size(int(k))
     return total
@@ -167,7 +176,7 @@ def build_allocation(
     specs = []
     for spec in candidate_specs:
         stages = parse_quant_spec(spec)
-        specs.append((spec, stages, _spec_bits_per_vector(stages)))
+        specs.append((spec, stages, _spec_bits_per_vector(stages, group_size)))
     specs.sort(key=lambda item: item[2])
     if len({bits for _, _, bits in specs}) < 2:
         raise ValueError("need at least two candidate specs with distinct rates")
