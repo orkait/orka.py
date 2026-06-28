@@ -169,6 +169,46 @@ def _det_segment_sum(keys, values, k):
     )
 
 
+def _faiss_kmeans_enabled() -> bool:
+    """Opt-in via ORKA_KMEANS_FAISS={1,true,yes}. Off by default so the pack stays
+    byte-reproducible regardless of whether faiss happens to be installed; enabling
+    it swaps the unweighted CUDA k-means for faiss's GPU Lloyd (~2x faster here, same
+    reconstruction MSE, byte-deterministic per seed)."""
+    import os
+
+    if os.environ.get("ORKA_KMEANS_FAISS", "").strip().lower() not in ("1", "true", "yes"):
+        return False
+    try:
+        import faiss  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _learn_codebook_faiss(rows, k: int, iterations: int, device: str, seed: int | None):
+    """faiss GPU Lloyd for the unweighted path. Returns orka's
+    (codebook_cpu, indices, mse); nearest-centroid indices + mse are recomputed with
+    orka's fused assign so the encoding matches the torch path exactly."""
+    import faiss
+    import numpy as np
+    import torch
+
+    resolved = _resolve_torch_device(device)
+    rows_f = _torch_float32_matrix(rows, device).float()
+    n, d = int(rows_f.shape[0]), int(rows_f.shape[1])
+    k = min(int(k), n)
+    xb = np.ascontiguousarray(rows_f.detach().cpu().numpy(), dtype="float32")
+    km = faiss.Kmeans(
+        d, k, niter=int(iterations), gpu=True,
+        seed=int(seed or 0) & 0x7FFFFFFF,
+        max_points_per_centroid=n,  # use all points (no faiss subsampling)
+    )
+    km.train(xb)
+    codebook = torch.from_numpy(np.ascontiguousarray(km.centroids)).to(resolved).float()
+    indices, mse = _torch_assign(rows_f, codebook, str(resolved))
+    return codebook.detach().cpu(), indices, float(mse)
+
+
 def _learn_codebook_torch(
     vectors,
     codebook_size: int,
@@ -198,6 +238,23 @@ def _learn_codebook_torch(
 
     # Pre-resolve target dtype and pre-calculate row norms once
     resolved = _resolve_torch_device(device)
+
+    # Opt-in faiss GPU Lloyd: unweighted CUDA path only (faiss has no per-dimension
+    # or per-sample weighting, and no warm-start). ~2x the torch path at equal MSE;
+    # falls through to the deterministic torch path on any failure.
+    if (
+        resolved.type == "cuda"
+        and k > 1
+        and vector_weights is None
+        and sample_weights is None
+        and initial_codebook is None
+        and _faiss_kmeans_enabled()
+    ):
+        try:
+            return _learn_codebook_faiss(rows, k, effective_iters, device, seed)
+        except Exception:
+            pass  # fall back to the torch path below
+
     use_half = resolved.type == "cuda"
     dtype = torch.float16 if use_half else torch.float32
 

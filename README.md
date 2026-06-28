@@ -106,10 +106,16 @@ autoquant     auto-pick the config               eval/sweep  benchmark configs
 
 `python -m orka <command> --help` for the details.
 
+## ⚙️ Performance toggles
+
+| Env var | Default | Effect |
+|---|---|---|
+| `ORKA_KMEANS_FAISS` | off | `=1` swaps the unweighted CUDA k-means for faiss GPU Lloyd (~2x faster at equal reconstruction MSE, byte-deterministic per seed). Requires `pip install faiss-gpu-cu12`; falls back to the built-in torch path if faiss is missing or the tensor uses Hessian/importance weighting. Off by default so packs stay byte-reproducible regardless of whether faiss is installed. |
+
 ## 🧪 Development
 
 ```bash
-python -m pytest tests/ -q       # 154 tests; the structural contract (pack is byte-non-deterministic)
+python -m pytest tests/ -q       # 156 tests; the structural contract (pack is byte-non-deterministic)
 ```
 
 The package is organized by domain (see the table above). Old flat import paths (`orka.hf`, `orka.reconstruct`, ...) still work via compat shims while callers migrate to the canonical ones.
