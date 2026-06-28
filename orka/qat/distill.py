@@ -242,11 +242,13 @@ def _column_importance(activations, name: str, cols: int, device):
 
     if not activations or name not in activations:
         return None
-    acts = torch.as_tensor(activations[name], dtype=torch.float32)
+    # Move to the compute device FIRST so the E[x^2] reduction runs on the GPU
+    # instead of CPU (the activations arrive as CPU tensors from calibration).
+    acts = torch.as_tensor(activations[name], dtype=torch.float32, device=device)
     if acts.dim() != 2 or int(acts.shape[1]) != cols:
         return None
     h = acts.pow(2).mean(dim=0).clamp(min=1e-8)
-    return (h / h.mean()).to(device)
+    return h / h.mean()
 
 
 def _output_loss_matrix(activations, name: str, cols: int, device, max_samples: int = 512):
@@ -257,14 +259,15 @@ def _output_loss_matrix(activations, name: str, cols: int, device, max_samples: 
 
     if not activations or name not in activations:
         return None
-    acts = torch.as_tensor(activations[name], dtype=torch.float32)
+    # Device-first: the RMS-norm + transpose build the Hessian factor on the GPU.
+    acts = torch.as_tensor(activations[name], dtype=torch.float32, device=device)
     if acts.dim() != 2 or int(acts.shape[1]) != cols:
         return None
     if int(acts.shape[0]) > max_samples:
         step = max(1, int(acts.shape[0]) // max_samples)
         acts = acts[::step][:max_samples]
     rms = acts.pow(2).mean().sqrt().clamp(min=1e-8)
-    return (acts / rms).T.contiguous().to(device)
+    return (acts / rms).T.contiguous()
 
 
 def _distill_tensor(
@@ -297,7 +300,7 @@ def _distill_tensor(
     x_val = None
     h = None
     if activations and tm["name"] in activations and full_matrix:
-        acts = torch.as_tensor(activations[tm["name"]], dtype=torch.float32)
+        acts = torch.as_tensor(activations[tm["name"]], dtype=torch.float32, device=device)
         if acts.dim() == 2 and int(acts.shape[1]) == consts["cols"] and int(acts.shape[0]) >= 64:
             n = int(acts.shape[0])
             val = acts[3::4][: max(16, n // 4)]
@@ -305,7 +308,7 @@ def _distill_tensor(
             if output_space:
                 xt_fit = _output_loss_matrix(fit, tm["name"], consts["cols"], device)
             h = _column_importance(fit, tm["name"], consts["cols"], device)
-            x_val = val.to(device)
+            x_val = val
         else:
             h = _column_importance(activations, tm["name"], consts["cols"], device)
 
