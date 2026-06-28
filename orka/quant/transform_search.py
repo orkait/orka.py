@@ -17,6 +17,33 @@ from __future__ import annotations
 import numpy as np
 
 
+def scalar_quant_reconstruct(values, *, bits: int = 4, block_size: int = 128):
+    """Per-block symmetric-uniform ``bits``-bit scalar quantize-then-dequantize.
+
+    Returns the reconstruction as a float64 array the same length as ``values``.
+    Each block's scale is ``max_abs / (2**(bits-1) - 1)``; values round to the nearest
+    level and clip to the symmetric range.
+    """
+    v = np.asarray(values, dtype=np.float64).reshape(-1)
+    n = int(v.shape[0])
+    if n == 0:
+        return v
+    if bits < 1:
+        raise ValueError("bits must be >= 1")
+    if block_size < 1:
+        raise ValueError("block_size must be >= 1")
+
+    lim = max((1 << (bits - 1)) - 1, 1)  # symmetric levels; bits=1 -> 1 (sign)
+    pad = (-n) % block_size
+    if pad:
+        v = np.concatenate([v, np.zeros(pad, dtype=np.float64)])
+    blocks = v.reshape(-1, block_size)
+    amax = np.max(np.abs(blocks), axis=1, keepdims=True)
+    scale = np.where(amax > 0.0, amax / lim, 1.0)
+    recon = np.clip(np.round(blocks / scale), -lim, lim) * scale
+    return recon.reshape(-1)[:n]
+
+
 def scalar_quant_proxy(
     values,
     *,
@@ -41,29 +68,23 @@ def scalar_quant_proxy(
     n = int(v.shape[0])
     if n == 0:
         return 0.0
-    if bits < 1:
-        raise ValueError("bits must be >= 1")
-    if block_size < 1:
-        raise ValueError("block_size must be >= 1")
 
-    lim = max((1 << (bits - 1)) - 1, 1)  # symmetric levels; bits=1 -> 1 (sign)
+    recon = scalar_quant_reconstruct(v, bits=bits, block_size=block_size)
+    err = v - recon  # [n], original (transform) space
+
+    if original_scales is None:
+        return float(np.mean(err ** 2))
+
+    # Reweight each block's error by its original scale**2 (normalized -> original).
+    s = np.asarray(original_scales, dtype=np.float64).reshape(-1)
+    n_blocks = (n + block_size - 1) // block_size
+    if s.shape[0] != n_blocks:
+        raise ValueError("original_scales length must match the block count")
     pad = (-n) % block_size
     if pad:
-        v = np.concatenate([v, np.zeros(pad, dtype=np.float64)])
-    blocks = v.reshape(-1, block_size)
-
-    amax = np.max(np.abs(blocks), axis=1, keepdims=True)
-    scale = np.where(amax > 0.0, amax / lim, 1.0)
-    q = np.clip(np.round(blocks / scale), -lim, lim) * scale
-    err2 = (blocks - q) ** 2  # [n_blocks, block_size]
-
-    if original_scales is not None:
-        s = np.asarray(original_scales, dtype=np.float64).reshape(-1)
-        if s.shape[0] != blocks.shape[0]:
-            raise ValueError("original_scales length must match the block count")
-        err2 = err2 * (s[:, None] ** 2)
-
-    return float(np.mean(err2.reshape(-1)[:n]))  # mean over real (unpadded) elements
+        err = np.concatenate([err, np.zeros(pad, dtype=np.float64)])
+    err2 = (err.reshape(n_blocks, block_size) * s[:, None]) ** 2
+    return float(np.mean(err2.reshape(-1)[:n]))
 
 
 def transform_overhead_bits(
@@ -100,3 +121,89 @@ def transform_overhead_bits(
     # "none", "awq", None: no per-block sidecar.
     # rotation ("hadamard"/"orthogonal"/"none"/None): 0 disk overhead (seed only).
     return int(bits)
+
+
+_SCALING_NORMS = ("block-max", "channel-block-max", "awq-block-max", "slrq-block")
+
+
+def transform_proxy_distortion(
+    weight,
+    normalization: str | None,
+    rotation: str | None,
+    *,
+    bits: int = 4,
+    norm_block: int = 128,
+) -> float:
+    """Original-space scalar-quant MSE of a (normalization, rotation) config on a 2D
+    weight - the ranking signal for the per-tensor transform search.
+
+    Faithful order, matching the pack: block-max normalize (flattened ``norm_block``
+    blocks) -> Hadamard rotate (along columns) -> b-bit scalar quant -> inverse-rotate
+    the error (Hadamard is its own orthonormal inverse) -> denormalize -> MSE.
+
+    The internal scalar quant uses ONE per-tensor scale (not per-block), so a finer
+    block-max normalization and an outlier-spreading rotation actually lower the score
+    - a per-block scalar quant would already bake in block-max and hide its benefit.
+
+    v1 grid: ``normalization`` in {``none``, ``block-max``, ``slrq-block`` (treated as
+    block-max for the proxy)}, ``rotation`` in {``none``, ``hadamard``}. Raises
+    ValueError if Hadamard has no usable block for this width (caller drops the config).
+    """
+    W = np.asarray(weight, dtype=np.float64)
+    if W.ndim == 1:
+        W = W.reshape(1, -1)
+    elif W.ndim > 2:
+        W = W.reshape(W.shape[0], -1)
+    rows, cols = W.shape
+    flat = W.reshape(-1)
+    n = int(flat.size)
+    if n == 0:
+        return 0.0
+
+    # 1. block-max normalization over flattened norm_block blocks.
+    scales = None
+    if normalization in _SCALING_NORMS:
+        pad = (-n) % norm_block
+        fp = np.concatenate([flat, np.zeros(pad)]) if pad else flat
+        blk = fp.reshape(-1, norm_block)
+        amax = np.max(np.abs(blk), axis=1)
+        scales = np.where(amax > 0.0, amax, 1.0)  # per-block divisor
+        vn = (blk / scales[:, None]).reshape(-1)[:n]
+    elif normalization not in ("none", "awq", None):
+        raise ValueError(f"unsupported normalization for proxy: {normalization!r}")
+    else:
+        vn = flat
+    Wn = vn.reshape(rows, cols)
+
+    # 2. Hadamard rotation along columns (isometric).
+    hb = None
+    if rotation == "hadamard":
+        from orka.transforms.rotate import _block_fwht_numpy, _hadamard_block_size
+
+        hb = _hadamard_block_size(cols)  # raises if no usable pow2 block
+        Wr = np.asarray(_block_fwht_numpy(Wn, hb), dtype=np.float64)
+    elif rotation in ("none", None):
+        Wr = Wn
+    else:
+        raise ValueError(f"unsupported rotation for proxy: {rotation!r}")
+
+    # 3. b-bit scalar quant with ONE per-tensor scale (block_size = n).
+    recon = scalar_quant_reconstruct(Wr.reshape(-1), bits=bits, block_size=n)
+    err_r = (Wr.reshape(-1) - recon).reshape(rows, cols)
+
+    # 4. inverse rotation -> normalized space (Hadamard self-inverse).
+    if rotation == "hadamard":
+        from orka.transforms.rotate import _block_fwht_numpy
+
+        err_n = np.asarray(_block_fwht_numpy(err_r, hb), dtype=np.float64).reshape(-1)
+    else:
+        err_n = err_r.reshape(-1)
+
+    # 5. denormalize the error -> original weight space.
+    if scales is not None:
+        pad = (-n) % norm_block
+        en = np.concatenate([err_n, np.zeros(pad)]) if pad else err_n
+        en = (en.reshape(-1, norm_block) * scales[:, None]).reshape(-1)[:n]
+    else:
+        en = err_n
+    return float(np.mean(en ** 2))
