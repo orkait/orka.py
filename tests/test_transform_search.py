@@ -10,6 +10,9 @@ import unittest
 import numpy as np
 
 from orka.quant.transform_search import (
+    DEFAULT_TRANSFORM_GRID,
+    apply_transform,
+    rank_transforms,
     scalar_quant_proxy,
     scalar_quant_reconstruct,
     transform_overhead_bits,
@@ -179,6 +182,46 @@ class TransformProxyDistortionTest(unittest.TestCase):
         v = np.arange(300, dtype=float)
         r = scalar_quant_reconstruct(v, bits=4, block_size=128)
         self.assertEqual(r.shape, v.shape)
+
+
+class ApplyTransformTest(unittest.TestCase):
+    def test_none_is_identity_factor_one(self) -> None:
+        rng = np.random.default_rng(8)
+        W = rng.standard_normal((4, 64))
+        Wt, factor = apply_transform(W, "none", "none")
+        np.testing.assert_allclose(Wt, W)
+        self.assertEqual(factor, 1.0)
+
+    def test_block_max_bounds_and_factor(self) -> None:
+        rng = np.random.default_rng(9)
+        W = rng.standard_normal((4, 64)) * 5.0
+        Wt, factor = apply_transform(W, "block-max", "none", norm_block=64)
+        self.assertLessEqual(float(np.max(np.abs(Wt))), 1.0 + 1e-9)  # normalized
+        self.assertGreater(factor, 1.0)  # mean(scale^2) for ~N(0,25) data
+
+    def test_rotation_is_isometric(self) -> None:
+        rng = np.random.default_rng(10)
+        W = rng.standard_normal((4, 256))
+        Wt, _ = apply_transform(W, "none", "hadamard")
+        # Hadamard is orthonormal -> energy preserved (to float32 FWHT precision).
+        np.testing.assert_allclose(np.sum(W ** 2), np.sum(Wt ** 2), rtol=1e-4)
+
+    def test_rank_orders_and_skips_infeasible(self) -> None:
+        rng = np.random.default_rng(11)
+        W = np.vstack([rng.standard_normal(256) * 0.01, rng.standard_normal(256) * 2.0])
+        ranked = rank_transforms(W, norm_block=128)
+        self.assertEqual(len(ranked), len(DEFAULT_TRANSFORM_GRID))
+        mses = [m for _, m in ranked]
+        self.assertEqual(mses, sorted(mses))  # ascending
+        # none/none should not be the single best on a multi-scale tensor
+        self.assertNotEqual(ranked[0][0], ("none", "none"))
+
+    def test_rank_skips_hadamard_on_bad_width(self) -> None:
+        W = np.zeros((4, 6))  # cols=6 -> no pow2 block, hadamard configs dropped
+        ranked = rank_transforms(W)
+        configs = [cfg for cfg, _ in ranked]
+        self.assertIn(("none", "none"), configs)
+        self.assertNotIn(("none", "hadamard"), configs)
 
 
 if __name__ == "__main__":

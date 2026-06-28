@@ -84,6 +84,8 @@ def build_allocation(
     device: str = "cpu",
     max_tensors: int | None = None,
     progress_file: Path | None = None,
+    search_transforms: bool = False,
+    transform_block: int = 128,
 ) -> dict:
     import numpy as np
 
@@ -110,26 +112,52 @@ def build_allocation(
         seen += 1
         flat = _numpy_float32_array(tensor).reshape(-1)
         numel = int(flat.shape[0])
-        pad = (-numel) % group_size
-        if pad:
-            flat = np.pad(flat, (0, pad))
-        vectors = flat.reshape(-1, group_size)
-        sample = _sample_vector_rows(vectors, sample_vectors)
         seed = _derive_seed(["allocate", name, group_size])
 
+        # Stage 1: per-tensor transform pick (cheap scalar-quant proxy). The chosen
+        # transform is applied before the spec probe; its denorm_factor restores
+        # original weight units so distortions stay comparable across tensors that
+        # picked different transforms. Default (search off) = raw probe, factor 1.
+        transform = None
+        denorm_factor = 1.0
+        probe_flat = flat
+        if search_transforms:
+            from orka.quant.transform_search import apply_transform, rank_transforms
+
+            w2d = flat.reshape(shape[0], -1) if len(shape) >= 2 else flat.reshape(1, -1)
+            ranked = rank_transforms(w2d, bits=4, norm_block=transform_block)
+            if ranked:
+                (t_norm, t_rot), _ = ranked[0]
+                wt, denorm_factor = apply_transform(
+                    w2d, t_norm, t_rot, norm_block=transform_block
+                )
+                probe_flat = np.asarray(wt, dtype=np.float32).reshape(-1)
+                transform = {"normalization": t_norm, "rotation": t_rot}
+
+        pad = (-probe_flat.size) % group_size
+        if pad:
+            probe_flat = np.pad(probe_flat, (0, pad))
+        vectors = probe_flat.reshape(-1, group_size)
+        sample = _sample_vector_rows(vectors, sample_vectors)
+
+        # Stage 2: spec RD probe on the (transformed) vectors.
         distortions = []
         for spec, stages, bits in specs:
             mse = _probe_spec_distortion(
                 sample, stages, iterations, backend, device, seed
             )
-            # Scale sample MSE to estimated total SSE for cross-tensor comparison.
-            distortions.append(mse * numel)
+            # Sample MSE -> estimated total SSE in original units, for cross-tensor
+            # comparison.
+            distortions.append(mse * denorm_factor * numel)
         _report_progress(
             progress_file,
-            f"allocate: probed {name} "
-            + ", ".join(f"{s}={d:.4g}" for (s, _, _), d in zip(specs, distortions)),
+            f"allocate: probed {name}"
+            + (f" [{transform['normalization']}/{transform['rotation']}]" if transform else "")
+            + " " + ", ".join(f"{s}={d:.4g}" for (s, _, _), d in zip(specs, distortions)),
         )
-        rows.append({"name": name, "numel": numel, "distortions": distortions})
+        rows.append({
+            "name": name, "numel": numel, "distortions": distortions, "transform": transform,
+        })
 
     if not rows:
         raise RuntimeError("no quantizable tensors found for allocation")
@@ -197,12 +225,15 @@ def build_allocation(
     tensors = {}
     for t, row in enumerate(rows):
         spec, stages, bits = specs[choice[t]]
-        tensors[row["name"]] = {
+        entry = {
             "spec": spec,
             "stages": [s if isinstance(s, str) else int(s) for s in stages],
             "bits_per_weight": bits / group_size,
             "estimated_sse": row["distortions"][choice[t]],
         }
+        if row.get("transform"):
+            entry.update(row["transform"])  # per-tensor normalization / rotation
+        tensors[row["name"]] = entry
 
     return {
         "format": "orka-allocation",
@@ -249,6 +280,7 @@ def cmd_allocate(args) -> int:
         device=args.device,
         max_tensors=args.max_tensors,
         progress_file=Path(args.progress_file) if args.progress_file else None,
+        search_transforms=getattr(args, "search_transforms", False),
     )
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

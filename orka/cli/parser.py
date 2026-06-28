@@ -129,6 +129,13 @@ def _add_allocate_parser(sub):
     allocate.add_argument("--device", default="cpu")
     allocate.add_argument("--max-tensors", type=int, default=None)
     allocate.add_argument("--progress-file", default=None)
+    allocate.add_argument(
+        "--search-transforms",
+        action="store_true",
+        help="also search per-tensor normalization/rotation (a scalar-quant proxy "
+        "ranks the transform, then the spec probe runs on it). Writes per-tensor "
+        "normalization/rotation into the allocation map for pack to apply.",
+    )
     allocate.set_defaults(func=cmd_allocate)
 
 
