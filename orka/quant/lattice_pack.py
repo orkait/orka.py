@@ -71,10 +71,18 @@ def compress_model(model_dir: str, out_path: str, scales=(0.05, 0.02), seed: int
             tot_w += W.numel()
             if mod.bias is not None:
                 pass_t[name + ".bias"] = mod.bias.data.half().cpu()
-    # passthrough: embeddings, norms, biases, lm_head
+    # passthrough: embeddings, norms, biases. Dedup tied weights by storage pointer
+    # (e.g. tied lm_head <-> embed_tokens) - storing both doubles the embedding cost.
+    seen_ptr = {}
     for n, p in model.state_dict().items():
-        if n not in meta["tensors"] and n not in pass_t:
-            pass_t[n] = p.half().cpu()
+        if n in meta["tensors"] or n in pass_t:
+            continue
+        ptr = p.data_ptr()
+        if ptr in seen_ptr:
+            meta.setdefault("aliases", {})[n] = seen_ptr[ptr]  # n shares seen_ptr[ptr]'s data
+            continue
+        seen_ptr[ptr] = n
+        pass_t[n] = p.half().cpu()
     # write
     (out / "payload.bin").write_bytes(bytes(payload))
     from safetensors.torch import save_file
@@ -111,6 +119,9 @@ def reconstruct_state_dict(art_path: str, device: str = "cuda") -> dict:
             recon_rot = pts if recon_rot is None else recon_rot + pts
         W = (recon_rot @ R.t()).reshape(-1)[:numel].reshape(shape)
         sd[name] = W.half()
+    for alias, source in meta.get("aliases", {}).items():
+        if source in sd:
+            sd[alias] = sd[source]
     return sd
 
 
