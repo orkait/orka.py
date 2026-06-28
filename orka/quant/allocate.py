@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 from typing import Sequence
 
+from orka._runtime import _resolve_auto_backend
 from orka.core._checkpoint import _load_tensors
 from orka.core._tensor import (
     _decode_to_vectors_format,
@@ -386,6 +387,7 @@ def allocation_tensor_transforms(allocation: dict) -> dict[str, dict]:
 
 
 def cmd_allocate(args) -> int:
+    args.backend = _resolve_auto_backend(args.backend)
     awq_activations = None
     if getattr(args, "hessian", False):
         from orka.quant.activations import _load_awq_activations

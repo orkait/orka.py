@@ -32,6 +32,7 @@ from orka._runtime.device import (
     _cuda_sm_major,
     _is_cuda_oom,
     _maybe_fallback_cuda_to_cpu,
+    _resolve_auto_backend,
     _resolve_torch_device,
     _wrap_capped_oom,
 )
@@ -59,6 +60,7 @@ __all__ = [
     "_cuda_sm_major",
     "_is_cuda_oom",
     "_maybe_fallback_cuda_to_cpu",
+    "_resolve_auto_backend",
     "_resolve_torch_device",
     "_wrap_capped_oom",
     "BackgroundWriter",

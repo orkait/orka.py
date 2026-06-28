@@ -33,6 +33,30 @@ def _cuda_sm_major(device_index: int = 0) -> int | None:
         return None
 
 
+def _resolve_auto_backend(backend: str) -> str:
+    """Resolve the 'auto' backend to a concrete one.
+
+    'auto' previously fell through to numpy everywhere (every dispatch is
+    ``if backend == "torch": <gpu> else: <numpy>``), so a default pack ran on the
+    CPU even with a usable GPU present. Map 'auto' to torch when CUDA is available
+    and the device is sm_70+ (PyTorch's floor), else numpy. Explicit
+    'numpy'/'torch' pass through unchanged, so byte-deterministic reference runs
+    via ``--backend numpy`` are untouched.
+    """
+    if backend != "auto":
+        return backend
+    try:
+        import torch
+    except Exception:
+        return "numpy"
+    if not torch.cuda.is_available():
+        return "numpy"
+    sm = _cuda_sm_major()
+    if sm is not None and sm < 7:
+        return "numpy"
+    return "torch"
+
+
 def _maybe_fallback_cuda_to_cpu(device: str, backend: str) -> str:
     """Fall back to CPU if the CUDA device is sm_60 (P100 etc.) — PyTorch requires sm_70+."""
     if backend != "torch":
