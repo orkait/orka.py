@@ -125,6 +125,76 @@ def transform_overhead_bits(
 
 _SCALING_NORMS = ("block-max", "channel-block-max", "awq-block-max", "slrq-block")
 
+# Default v1 search grid: (normalization, rotation). orthogonal QR is excluded
+# (O(N^2)/tensor too costly to probe); slrq-block is proxied as block-max.
+DEFAULT_TRANSFORM_GRID = (
+    ("none", "none"),
+    ("block-max", "none"),
+    ("none", "hadamard"),
+    ("block-max", "hadamard"),
+)
+
+
+def apply_transform(weight, normalization: str | None, rotation: str | None, *, norm_block: int = 128):
+    """Apply (normalization, rotation) to a 2D weight for the allocate probe.
+
+    Returns ``(transformed_2d, denorm_factor)``. ``denorm_factor`` = mean(block
+    scale**2) converts a distortion measured on the transformed values back to
+    original weight units (1.0 when no scaling normalization; rotation is isometric
+    so it contributes 1). Mirrors the normalize-then-rotate order in the pack.
+    """
+    W = np.asarray(weight, dtype=np.float64)
+    if W.ndim == 1:
+        W = W.reshape(1, -1)
+    elif W.ndim > 2:
+        W = W.reshape(W.shape[0], -1)
+    rows, cols = W.shape
+    flat = W.reshape(-1)
+    n = int(flat.size)
+
+    factor = 1.0
+    if normalization in _SCALING_NORMS:
+        pad = (-n) % norm_block
+        fp = np.concatenate([flat, np.zeros(pad)]) if pad else flat
+        blk = fp.reshape(-1, norm_block)
+        amax = np.max(np.abs(blk), axis=1)
+        scales = np.where(amax > 0.0, amax, 1.0)
+        factor = float(np.mean(scales ** 2))
+        Wn = (blk / scales[:, None]).reshape(-1)[:n].reshape(rows, cols)
+    elif normalization in ("none", "awq", None):
+        Wn = W
+    else:
+        raise ValueError(f"unsupported normalization for proxy: {normalization!r}")
+
+    if rotation == "hadamard":
+        from orka.transforms.rotate import _block_fwht_numpy, _hadamard_block_size
+
+        hb = _hadamard_block_size(cols)
+        Wr = np.asarray(_block_fwht_numpy(Wn, hb), dtype=np.float64)
+    elif rotation in ("none", None):
+        Wr = Wn
+    else:
+        raise ValueError(f"unsupported rotation for proxy: {rotation!r}")
+    return Wr, factor
+
+
+def rank_transforms(weight, grid=DEFAULT_TRANSFORM_GRID, *, bits: int = 4, norm_block: int = 128):
+    """Rank transform configs by the scalar-quant proxy (lower MSE first).
+
+    Returns ``[((normalization, rotation), proxy_mse), ...]`` sorted ascending.
+    Configs that are infeasible for this tensor (e.g. Hadamard on a width with no
+    usable power-of-two block) are skipped.
+    """
+    scored = []
+    for norm, rot in grid:
+        try:
+            mse = transform_proxy_distortion(weight, norm, rot, bits=bits, norm_block=norm_block)
+        except ValueError:
+            continue
+        scored.append(((norm, rot), mse))
+    scored.sort(key=lambda x: x[1])
+    return scored
+
 
 def transform_proxy_distortion(
     weight,
