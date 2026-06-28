@@ -1,0 +1,114 @@
+"""End-to-end E8-lattice model compression: HF dir -> compact artifact -> reconstruct.
+
+A standalone codebook-free compressor built on ``orka.quant.lattice``. Each matrix-
+heavy Linear is incoherence-rotated and residual-E8 quantized; only the lattice
+keys (zlib-packed), the per-stage scales, and a 4-byte rotation seed are stored -
+no codebook. Embeddings / norms / 1-D params are kept fp16 (negligible on large
+models; the tied head dominates only on tiny ones). Reconstruction regenerates the
+rotation from the seed and snaps back - no search.
+
+Kept deliberately standalone (its own ``.lat`` artifact) rather than shoehorned
+into orka's VQ-codebook ``.orka`` format + decode kernels, so the deterministic VQ
+path is untouched. This is the "make the research usable" layer; format
+unification + a fast decode kernel are follow-ups.
+"""
+from __future__ import annotations
+
+import json
+import zlib
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from orka.quant.lattice import E8_DIM, e8_encode, incoherence_rotation
+
+
+def _is_quantizable(name: str, module) -> bool:
+    return isinstance(module, torch.nn.Linear) and ("self_attn" in name or "mlp" in name)
+
+
+def _pack_keys(keys_per_stage) -> bytes:
+    # keys are small signed ints ([-k..k]); int8 is plenty after shift, zlib the stream.
+    arrs = []
+    for keys in keys_per_stage:
+        a = keys.to(torch.int16).cpu().numpy()
+        arrs.append(a)
+    blob = np.concatenate([a.reshape(-1) for a in arrs]).astype(np.int16).tobytes()
+    # level 6: ~5x faster than 9 at ~same ratio on these small-integer key streams.
+    return zlib.compress(blob, 6)
+
+
+def compress_model(model_dir: str, out_path: str, scales=(0.05, 0.02), seed: int = 1, device: str = "cuda") -> dict:
+    """Compress every attn/mlp Linear of an HF model with residual-E8 lattice.
+
+    Returns a manifest dict; writes ``out_path`` (the .lat artifact: meta json +
+    packed payload). fp16 passthrough for everything else.
+    """
+    from transformers import AutoModelForCausalLM
+
+    model = AutoModelForCausalLM.from_pretrained(model_dir, local_files_only=True, dtype=torch.float32).to(device).eval()
+    out = Path(out_path)
+    out.mkdir(parents=True, exist_ok=True)
+
+    meta = {"scales": list(scales), "seed": seed, "group_size": E8_DIM, "tensors": {}, "passthrough": []}
+    payload = bytearray()
+    offset = 0
+    tot_bits = 0.0
+    tot_w = 0
+    pass_t = {}
+    for name, mod in model.named_modules():
+        if _is_quantizable(name, mod):
+            W = mod.weight.data.float()
+            _, keys, bpw = e8_encode(W, list(scales), seed=seed)
+            blob = _pack_keys(keys)
+            meta["tensors"][name + ".weight"] = {
+                "shape": list(W.shape), "len": len(blob), "offset": offset, "bpw": bpw,
+            }
+            payload += blob
+            offset += len(blob)
+            tot_bits += bpw * W.numel()
+            tot_w += W.numel()
+            if mod.bias is not None:
+                pass_t[name + ".bias"] = mod.bias.data.half().cpu()
+    # passthrough: embeddings, norms, biases, lm_head
+    for n, p in model.state_dict().items():
+        if n not in meta["tensors"] and n not in pass_t:
+            pass_t[n] = p.half().cpu()
+    # write
+    (out / "payload.bin").write_bytes(bytes(payload))
+    from safetensors.torch import save_file
+    save_file(pass_t, str(out / "passthrough.safetensors"))
+    meta["avg_bpw_quantized"] = tot_bits / max(tot_w, 1)
+    (out / "meta.json").write_text(json.dumps(meta))
+    # real sizes
+    meta["payload_bytes"] = len(payload)
+    meta["passthrough_bytes"] = (out / "passthrough.safetensors").stat().st_size
+    return meta
+
+
+def reconstruct_state_dict(art_path: str, device: str = "cuda") -> dict:
+    """Rebuild a full fp16 state dict from a .lat artifact."""
+    art = Path(art_path)
+    meta = json.loads((art / "meta.json").read_text())
+    scales = meta["scales"]
+    seed = meta["seed"]
+    payload = (art / "payload.bin").read_bytes()
+    from safetensors.torch import load_file
+    sd = {k: v.to(device) for k, v in load_file(str(art / "passthrough.safetensors")).items()}
+    R = incoherence_rotation(seed, device)
+    n_stages = len(scales)
+    for name, info in meta["tensors"].items():
+        shape = info["shape"]
+        numel = int(np.prod(shape))
+        nvec = (numel + E8_DIM - 1) // E8_DIM
+        blob = zlib.decompress(payload[info["offset"]: info["offset"] + info["len"]])
+        flat = np.frombuffer(blob, dtype=np.int16)
+        keys = torch.from_numpy(flat.reshape(n_stages, nvec, E8_DIM).copy()).to(device)
+        recon_rot = None
+        for s in range(n_stages):
+            pts = keys[s].float() / 2.0 * scales[s]
+            recon_rot = pts if recon_rot is None else recon_rot + pts
+        W = (recon_rot @ R.t()).reshape(-1)[:numel].reshape(shape)
+        sd[name] = W.half()
+    return sd
