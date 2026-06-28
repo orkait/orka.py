@@ -24,6 +24,7 @@ from orka.core._format import (
 from orka._runtime import (
     _BG_WRITER,
     _maybe_fallback_cuda_to_cpu,
+    _resolve_auto_backend,
     _resolve_torch_device,
     _check_ram_cap,
 )
@@ -385,6 +386,7 @@ def pack_checkpoint(
         tensor_partition_count=tensor_partition_count,
         tensor_partition_index=tensor_partition_index,
     )
+    backend = _resolve_auto_backend(backend)
     if backend == "torch":
         device = _maybe_fallback_cuda_to_cpu(device, backend)
         resolved_device = str(_resolve_torch_device(device))

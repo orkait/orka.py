@@ -126,7 +126,7 @@ def _add_allocate_parser(sub):
     allocate.add_argument("--sample-vectors", type=int, default=4096)
     allocate.add_argument("--iterations", type=int, default=4)
     allocate.add_argument("--backend", choices=["auto", "numpy", "torch"], default="auto")
-    allocate.add_argument("--device", default="cpu")
+    allocate.add_argument("--device", default="auto")
     allocate.add_argument("--max-tensors", type=int, default=None)
     allocate.add_argument("--progress-file", default=None)
     allocate.add_argument(
@@ -306,8 +306,8 @@ def _add_sweep_parser(sub):
     )
     sweep.add_argument(
         "--device",
-        default="cpu",
-        help="torch backend device, for example cpu, cuda, cuda:0, or auto",
+        default="auto",
+        help="torch backend device: auto (cuda if available, else cpu), cpu, cuda, or cuda:0",
     )
     sweep.add_argument("--sample-vectors", type=int, default=None)
     sweep.add_argument("--iterations", type=int, default=12)
