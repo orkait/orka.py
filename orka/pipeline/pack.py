@@ -149,6 +149,7 @@ def _prefetch_worker(
     max_tensors = ctx.max_tensors
     block_scale_size = ctx.block_scale_size
     tensor_stages_resolved = ctx.tensor_stages_resolved
+    tensor_transforms_resolved = ctx.tensor_transforms_resolved
 
     try:
         tensors_emitted = 0
@@ -198,12 +199,24 @@ def _prefetch_worker(
             else:
                 _prefetch_state["candidate_count"] += 1
 
+            # Per-tensor transform overrides (allocation map). Shared codebooks need one
+            # normalization/rotation across the tensors they cover, so overrides apply in
+            # per-tensor mode only. Missing tensor/field -> global ctx value, keeping the
+            # default path byte-identical.
+            _tf = (
+                tensor_transforms_resolved.get(name, {})
+                if tensor_transforms_resolved and codebook_mode == "per-tensor"
+                else {}
+            )
+            t_normalization = _tf.get("normalization", normalization)
+            t_rotation = _tf.get("rotation", rotation)
+
             row_scales = None
             source_flat = None
             awq_col_scales = None
             salient_weights = None
             salient_indices = None
-            if normalization in {
+            if t_normalization in {
                 "block-max",
                 "channel-block-max",
                 "awq",
@@ -214,7 +227,7 @@ def _prefetch_worker(
                     tensor, row_scales, source_flat, awq_col_scales,
                     salient_weights, salient_indices
                 ) = _apply_normalization(
-                    tensor, name, normalization, awq_activations, awq_alpha,
+                    tensor, name, t_normalization, awq_activations, awq_alpha,
                     block_scale_size, backend, resolved_device, awq_fallbacks,
                     slrq_salient=slrq_salient,
                 )
@@ -231,11 +244,11 @@ def _prefetch_worker(
 
             tensor_seed = None
             tensor_rotation = "none"
-            if rotation in {"orthogonal", "hadamard"}:
+            if t_rotation in {"orthogonal", "hadamard"}:
                 tensor, tensor_seed = _rotate_tensor_to_2d(
-                    tensor, name, rotation, rotation_seed, backend, resolved_device
+                    tensor, name, t_rotation, rotation_seed, backend, resolved_device
                 )
-                tensor_rotation = rotation
+                tensor_rotation = t_rotation
 
             # --- PER-TENSOR GROUP SIZING ---
             # All families use the base group_size; only embedding caps at 8.
@@ -309,9 +322,9 @@ def _prefetch_worker(
                 "packed_values": packed_values, "padded_values": padded_values,
                 "vectors": vectors, "row_scales": row_scales, "awq_col_scales": awq_col_scales,
                 "salient_weights": salient_weights, "salient_indices": salient_indices,
-                "normalization": normalization,
+                "normalization": t_normalization,
                 "block_scale_size": (
-                    block_scale_size if stores_block_scales(normalization) else None
+                    block_scale_size if stores_block_scales(t_normalization) else None
                 ),
                 "family": family, "rotation_seed": tensor_seed,
                 "rotation": tensor_rotation,
@@ -342,6 +355,7 @@ def pack_checkpoint(
     codebook_sizes: Sequence[int] | None = None,
     family_stages_map: dict[str, Sequence[int]] | None = None,
     tensor_stages_map: dict[str, Sequence] | None = None,
+    tensor_transforms_map: dict[str, dict] | None = None,
     outlier_frac: float = 0.0,
     rotation: str = "none",
     rotation_seed: int | None = None,
@@ -451,6 +465,19 @@ def pack_checkpoint(
             n_stages, max(len(s) for s in tensor_stages_resolved.values())
         )
 
+    tensor_transforms_resolved = None
+    if tensor_transforms_map:
+        if codebook_mode != "per-tensor":
+            raise ValueError(
+                "tensor_transforms_map (per-tensor normalization/rotation) requires "
+                "codebook_mode='per-tensor'"
+            )
+        allowed = {"normalization", "rotation"}
+        tensor_transforms_resolved = {
+            name: {k: v for k, v in (over or {}).items() if k in allowed}
+            for name, over in tensor_transforms_map.items()
+        }
+
     tensor_dir = out_dir / "tensors"
     tensor_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -534,6 +561,7 @@ def pack_checkpoint(
         stages_spec=stages_spec,
         family_stages_resolved=family_stages_resolved,
         tensor_stages_resolved=tensor_stages_resolved,
+        tensor_transforms_resolved=tensor_transforms_resolved,
         manifest=manifest,
     )
 

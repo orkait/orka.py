@@ -72,6 +72,10 @@ class PackCtx:
     family_stages_resolved: dict | None
     tensor_stages_resolved: dict | None
     manifest: dict
+    # Per-tensor transform overrides {name: {"normalization"?, "rotation"?}} from the
+    # allocation map. Honored only in per-tensor codebook mode; absent fields fall back
+    # to the global ctx value, so the default (None) is byte-identical to prior behaviour.
+    tensor_transforms_resolved: dict | None = None
     total_index_bytes: int = 0
 
 
