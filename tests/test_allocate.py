@@ -141,3 +141,44 @@ class SizeAwareAllocateTest(unittest.TestCase):
             aware_spec = aware["tensors"]["model.layers.0.small.weight"]["spec"]
             self.assertTrue(base_spec.startswith("vq"))          # naive picks VQ
             self.assertTrue(aware_spec.startswith("rvq-s"))      # size-aware escapes to planar
+
+
+class HessianWeightedAllocateTest(unittest.TestCase):
+    def test_weighted_probe_differs_from_unweighted(self):
+        # Mechanism: importance weights change the probe distortion (weighted k-means
+        # optimizes high-importance vectors). Uniform weights reduce to unweighted MSE;
+        # skewed weights do not. (End-to-end spec flips are shown on real tensors -
+        # tiny random tensors quantize losslessly, hiding the effect.)
+        import numpy as np
+        from orka.quant.allocate import _probe_spec_distortion
+        from orka.quant import parse_quant_spec
+        rng = np.random.default_rng(0)
+        V = rng.standard_normal((4096, 8)).astype(np.float32)
+        st = parse_quant_spec("vq-8")  # lossy at this size -> non-degenerate distortion
+        raw = _probe_spec_distortion(V, st, 4, "numpy", "cpu", 0)
+        uni = _probe_spec_distortion(V, st, 4, "numpy", "cpu", 0,
+                                     sample_weights=np.ones(4096, dtype=np.float32))
+        skew = np.ones(4096, dtype=np.float32)
+        skew[:2048] = 100.0
+        wtd = _probe_spec_distortion(V, st, 4, "numpy", "cpu", 0, sample_weights=skew)
+        self.assertAlmostEqual(raw, uni, places=4)      # uniform == unweighted
+        self.assertNotAlmostEqual(raw, wtd, places=4)   # skewed differs
+
+    def test_uniform_importance_matches_unweighted(self):
+        import json, tempfile
+        import numpy as np
+        from pathlib import Path
+        from orka.quant.allocate import build_allocation
+        rng = np.random.default_rng(1)
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "m.json"
+            W = rng.standard_normal((32, 64))
+            src.write_text(json.dumps({"tensors": {"model.layers.0.a.weight": W.tolist()}}))
+            # all-ones activation energy -> uniform importance -> same plan as unweighted
+            acts = {"model.layers.0.a.weight": np.ones((64, 64), dtype=np.float32)}
+            common = dict(candidate_specs=("vq-4", "vq-8", "vq-12"), sample_vectors=512,
+                          iterations=3, backend="numpy", device="cpu")
+            base = build_allocation(src, 1.0, **common)
+            weighted = build_allocation(src, 1.0, awq_activations=acts, **common)
+            self.assertEqual(base["tensors"]["model.layers.0.a.weight"]["spec"],
+                             weighted["tensors"]["model.layers.0.a.weight"]["spec"])

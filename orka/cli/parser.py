@@ -143,6 +143,20 @@ def _add_allocate_parser(sub):
         "(scalar) candidates, so the allocator picks planar on small tensors and VQ "
         "on large ones by true on-disk size, not index bits alone.",
     )
+    allocate.add_argument(
+        "--hessian",
+        action="store_true",
+        help="weight per-tensor distortion by calibration-activation importance "
+        "(h_j = E[x_j^2]) so the allocation optimizes output error, not raw weight MSE. "
+        "Collects from the bundled corpus unless --awq-calibration/--awq-activations-file "
+        "is given. Needs --backend torch and a model dir with config.json.",
+    )
+    allocate.add_argument("--awq-model-dir", default=None)
+    allocate.add_argument("--awq-calibration", default=None)
+    allocate.add_argument("--awq-activations-file", default=None)
+    allocate.add_argument("--calibration-max-prompts", type=int, default=32)
+    allocate.add_argument("--calibration-max-length", type=int, default=512)
+    allocate.add_argument("--calibration-max-samples", type=int, default=4096)
     allocate.set_defaults(func=cmd_allocate)
 
 
