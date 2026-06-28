@@ -13,7 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from orka._runtime import _apply_gpu_memory_cap, _apply_system_ram_cap, _stop_ram_monitor
+from orka._runtime import _apply_gpu_memory_cap, _apply_system_ram_cap, _resolve_auto_backend, _stop_ram_monitor
 from orka.core._util import _human_bytes
 from orka.quant.activations import _load_awq_activations
 from orka.eval import eval_artifact
@@ -315,6 +315,7 @@ def _write_artifact_tarball(out_dir: Path, on_kaggle: bool) -> Path:
 
 
 def cmd_kaggle_pack(args: argparse.Namespace) -> int:
+    args.backend = _resolve_auto_backend(args.backend)
     try:
         from huggingface_hub import HfApi
     except ImportError:
