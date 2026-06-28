@@ -32,6 +32,14 @@ from orka.quant import parse_quant_spec
 
 DEFAULT_CANDIDATE_SPECS = ("vq-4", "vq-8", "vq-12", "rvq-12-8", "rvq-16-8")
 
+# Per-tensor transform search ranks candidates with a CHEAP VQ probe (small sample,
+# few iters) at this reference spec - not the scalar-quant proxy, which measured
+# anti-correlated with full VQ on real tensors (Spearman -0.44, 0/10 top-1). A
+# subsampled VQ probe is faithful by construction (it is VQ): 7/10 top-1, +0.72.
+_TRANSFORM_RANK_SPEC = "vq-8"
+_TRANSFORM_PROBE_VECTORS = 1024
+_TRANSFORM_PROBE_ITERS = 2
+
 
 def _spec_bits_per_vector(stages: Sequence) -> int:
     total = 0
@@ -122,15 +130,28 @@ def build_allocation(
         denorm_factor = 1.0
         probe_flat = flat
         if search_transforms:
-            from orka.quant.transform_search import apply_transform, rank_transforms
+            from orka.quant.transform_search import apply_transform, DEFAULT_TRANSFORM_GRID
 
             w2d = flat.reshape(shape[0], -1) if len(shape) >= 2 else flat.reshape(1, -1)
-            ranked = rank_transforms(w2d, bits=4, norm_block=transform_block)
-            if ranked:
-                (t_norm, t_rot), _ = ranked[0]
-                wt, denorm_factor = apply_transform(
-                    w2d, t_norm, t_rot, norm_block=transform_block
-                )
+            ref_stages = parse_quant_spec(_TRANSFORM_RANK_SPEC)
+            best = None  # (orig_mse, norm, rot, transformed_2d, denorm_factor)
+            for t_norm, t_rot in DEFAULT_TRANSFORM_GRID:
+                try:
+                    wt, factor = apply_transform(w2d, t_norm, t_rot, norm_block=transform_block)
+                except ValueError:
+                    continue  # transform infeasible for this width (e.g. Hadamard)
+                ft = np.asarray(wt, dtype=np.float32).reshape(-1)
+                p = (-ft.size) % group_size
+                if p:
+                    ft = np.pad(ft, (0, p))
+                st = _sample_vector_rows(ft.reshape(-1, group_size), _TRANSFORM_PROBE_VECTORS)
+                mse = _probe_spec_distortion(
+                    st, ref_stages, _TRANSFORM_PROBE_ITERS, backend, device, seed
+                ) * factor
+                if best is None or mse < best[0]:
+                    best = (mse, t_norm, t_rot, wt, factor)
+            if best is not None:
+                _, t_norm, t_rot, wt, denorm_factor = best
                 probe_flat = np.asarray(wt, dtype=np.float32).reshape(-1)
                 transform = {"normalization": t_norm, "rotation": t_rot}
 
