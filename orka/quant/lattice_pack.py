@@ -29,14 +29,15 @@ def _is_quantizable(name: str, module) -> bool:
 
 
 def _pack_keys(keys_per_stage) -> bytes:
-    # keys are small signed ints ([-k..k]); int8 is plenty after shift, zlib the stream.
-    arrs = []
-    for keys in keys_per_stage:
-        a = keys.to(torch.int16).cpu().numpy()
-        arrs.append(a)
-    blob = np.concatenate([a.reshape(-1) for a in arrs]).astype(np.int16).tobytes()
-    # level 6: ~5x faster than 9 at ~same ratio on these small-integer key streams.
-    return zlib.compress(blob, 6)
+    # GPU rANS entropy-codes the lattice keys to ~entropy (vs zlib's overhead).
+    # Keys are small signed ints; shift to non-negative symbols, store the shift.
+    import struct
+    from orka.quant.ans import ans_compress
+
+    flat = torch.cat([k.reshape(-1) for k in keys_per_stage]).to(torch.int64)
+    shift = int(flat.min().item())
+    blob = ans_compress((flat - shift).cpu().numpy())
+    return struct.pack("<i", shift) + blob
 
 
 def compress_model(model_dir: str, out_path: str, scales=(0.05, 0.02), seed: int = 1, device: str = "cuda") -> dict:
@@ -118,9 +119,12 @@ def reconstruct_state_dict(art_path: str, device: str = "cuda") -> dict:
         shape = info["shape"]
         numel = int(np.prod(shape))
         nvec = (numel + E8_DIM - 1) // E8_DIM
-        blob = zlib.decompress(payload[info["offset"]: info["offset"] + info["len"]])
-        flat = np.frombuffer(blob, dtype=np.int16)
-        keys = torch.from_numpy(flat.reshape(n_stages, nvec, E8_DIM).copy()).to(device)
+        import struct
+        from orka.quant.ans import ans_decompress
+        raw = payload[info["offset"]: info["offset"] + info["len"]]
+        shift = struct.unpack("<i", raw[:4])[0]
+        sym = ans_decompress(raw[4:], device)
+        keys = (sym + shift).reshape(n_stages, nvec, E8_DIM)
         recon_rot = None
         for s in range(n_stages):
             pts = keys[s].float() / 2.0 * scales[s]
