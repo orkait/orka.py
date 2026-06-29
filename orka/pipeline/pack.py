@@ -297,7 +297,10 @@ def _prefetch_worker(
             col_importance = None
             if (awq_activations is not None and name in awq_activations and shape[-1] % resolved_group_size == 0):
                 import torch
-                H_diag = torch.as_tensor(awq_activations[name], dtype=torch.float32).pow(2).mean(dim=0)
+                # compute E[x^2] on the pack device (GPU under torch) instead of CPU
+                H_diag = torch.as_tensor(
+                    awq_activations[name], dtype=torch.float32, device=resolved_device
+                ).pow(2).mean(dim=0)
                 cols = int(shape[-1])
                 # Column importance is in ORIGINAL column space; rotation
                 # mixes columns, so salience-guided escape is rotation-off only.
