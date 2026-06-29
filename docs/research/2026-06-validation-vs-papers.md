@@ -35,7 +35,7 @@ compute.
 | output-objective distill | `qat/distill` | GPTQ/QuIP# fine-tune | ✅ correct loss; +5-9 dB | ✅ GPU-only since #130 |
 | codebook sharing (family/global) | `codebook_mode` | universal/shared codebooks | ✅ valid | ✅ |
 | index entropy coding | `core/_format` (zlib) | ECVQ (Chou-Lookabaugh-Gray 1989) | ✅ adequate; ANS ~16% better at K=4096 | ⚪ CPU (entropy coder is inherently CPU; storage layer) |
-| LS row-scale refine (`--mse-scale`) | `strategies/refinement` | least-squares scale | ✅ correct | ⚪ CPU by design (opt-in, tiny `[n_blocks]` vectors) |
+| LS row-scale refine (`--mse-scale`) | `strategies/refinement` | least-squares scale | ✅ correct | ✅ **moved to device** (was weight-sized CPU); numpy backend stays CPU |
 | E8 lattice nearest-point | `quant/lattice` | QuIP# 2402.04396, Conway-Sloane | ✅ correct | ✅ |
 | **lattice incoherence** | `quant/lattice` | QuIP# | ✅ **FIXED** (weak 8-D → full input-dim; +6% single-stage ppl) | ✅ |
 | **trellis (TCQ)** | `quant/trellis` + proto | QTIP 2406.11235 | ✅ **corrected** (competitive with E8) | ✅ Viterbi on device |
@@ -47,10 +47,13 @@ compute.
 - **Fixed here**: the pack's `E[x²]` Hessian-diagonal was computed on CPU
   (`as_tensor` without `device`); now on the pack device - same class as the distill
   CPU-sync bug fixed in #130.
-- **Legitimately CPU** (not worth moving): zlib entropy coding, the opt-in
-  `mse_scale` scale-refine (tiny vectors), the Lagrangian/greedy allocation solver
-  (scalar arithmetic over the small RD table, not weight tensors), and all `.cpu()`
-  calls that only serialize codebooks/indices to disk.
+- **Also moved to device**: the `mse_scale` LS scale-refine was weight-sized CPU
+  compute (`torch.zeros(numel)` via `_flat_cpu`); now runs on the pack device under
+  torch (numpy backend stays CPU/deterministic).
+- **Legitimately CPU** (genuinely cannot/should not move): zlib entropy coding
+  (no GPU entropy coder), the Lagrangian/greedy allocation solver (scalar arithmetic
+  over the small RD table, not weight tensors), and all `.cpu()` calls that only
+  serialize codebooks/indices to disk.
 - **One opt-in CPU path remains**: orthogonal-rotation Q is generated via numpy QR
   on CPU (once per tensor). The default rotation is Hadamard, which is GPU. Could be
   moved to `torch.linalg.qr` on device if orthogonal rotation ever becomes hot.

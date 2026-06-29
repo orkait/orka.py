@@ -180,7 +180,7 @@ def _run_em_aq_refinement(
         gc.collect()
 
 
-def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_dir) -> None:
+def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_dir, device: str = "cpu") -> None:
     """MSE-optimal block scales (post-assignment refinement).
 
     orka stores scale = block max, so the codebook fit per block is dominated by
@@ -219,8 +219,8 @@ def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_di
             return None
         try:
             if _is_torch_tensor(x):
-                return x.detach().cpu().reshape(-1).to(tdt)
-            return torch.as_tensor(np.asarray(x, dtype=npd)).reshape(-1).to(tdt)
+                return x.detach().to(device).reshape(-1).to(tdt)
+            return torch.as_tensor(np.asarray(x, dtype=npd), device=device).reshape(-1).to(tdt)
         except Exception:
             return None
 
@@ -236,7 +236,7 @@ def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_di
     # Final normalized VQ reconstruction r = sum_s codebook_s[indices_s]. The
     # in-memory indices are freed by EM-AQ, so read the final stored codebook +
     # indices back from disk (exactly what decode reconstructs).
-    r = torch.zeros(total, dtype=torch.float32)
+    r = torch.zeros(total, dtype=torch.float32, device=device)
     try:
         for sm in meta:
             g = int(sm.get("group_size", 8))
@@ -250,20 +250,20 @@ def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_di
                 packed=bool(sm.get("packed", False)),
                 encoding=sm.get("encoding", "raw"),
             )
-            cb = torch.as_tensor(np.asarray(cb_np, dtype=np.float32))
-            idx = torch.as_tensor(np.asarray(idx_np, dtype=np.int64)).reshape(-1)
+            cb = torch.as_tensor(np.asarray(cb_np, dtype=np.float32), device=device)
+            idx = torch.as_tensor(np.asarray(idx_np, dtype=np.int64), device=device).reshape(-1)
             rr = cb[idx].reshape(-1)
             if int(rr.numel()) != total:
                 return
             r += rr
     except Exception:
         return
-    mask = torch.ones(total, dtype=torch.float32)
+    mask = torch.ones(total, dtype=torch.float32, device=device)
     sal = _num(c.get("salient_indices"), np.int64, torch.long)
     if sal is not None and int(sal.numel()) == nb:
-        fs = torch.arange(nb) * bs + sal
+        fs = torch.arange(nb, device=device) * bs + sal
         mask[fs[(fs >= 0) & (fs < total)]] = 0.0
-    skip_block = torch.zeros(nb, dtype=torch.bool)
+    skip_block = torch.zeros(nb, dtype=torch.bool, device=device)
     op = _num(c.get("outlier_positions"), np.int64, torch.long)
     if op is not None and int(op.numel()) > 0:
         op = op[(op >= 0) & (op < total)]
@@ -275,11 +275,11 @@ def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_di
     den = (rb * rb).sum(1)
     # v is the NORMALIZED weight (orig = scale_old * v), so the LS-optimal scale
     # is s* = scale_old * <v, r> / <r, r>.
-    factor = torch.where(den > LS_SCALE_DENOM_FLOOR, num / den, torch.ones(nb))
+    factor = torch.where(den > LS_SCALE_DENOM_FLOOR, num / den, torch.ones(nb, device=device))
     s_new = sc * factor
     s_new = torch.where(skip_block, sc, s_new)  # outlier blocks keep block-max
     s_new = torch.where(torch.isfinite(s_new) & (s_new.abs() > LS_SCALE_MIN_MAGNITUDE), s_new, sc)
-    c["row_scales"] = _fp16_storage_roundtrip(s_new.numpy().astype(np.float32))
+    c["row_scales"] = _fp16_storage_roundtrip(s_new.detach().cpu().numpy().astype(np.float32))
 
 
 class EMAQStrategy(PostAssignmentStrategy):
@@ -312,7 +312,8 @@ class MSEScaleStrategy(PostAssignmentStrategy):
     def apply(self, ctx, c: dict) -> None:
         try:
             _refine_scales_ls(
-                c, mse_scale=ctx.mse_scale, block_scale_size=ctx.block_scale_size, out_dir=ctx.out_dir
+                c, mse_scale=ctx.mse_scale, block_scale_size=ctx.block_scale_size,
+                out_dir=ctx.out_dir, device=getattr(ctx, "resolved_device", "cpu"),
             )
         except Exception as exc:  # refinement is optional; never fail the pack
             c.pop("_mse_v", None)
