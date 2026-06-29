@@ -10,9 +10,15 @@ baseline ppl = 59.117.
 - **E8 lattice + incoherence is the keystone win**: PTQ matches orka's 1-hour QAT
   quality at ~4.5 bpw, with **zero codebook and zero training** (1 s/model). Shipped
   as `orka/quant/lattice.py` + `lattice_pack.py`.
-- **Trellis (4-state TCQ) is dead for weight quant** - it is effectively 1-D, and
-  E8's 8-D joint packing dominates. Kept as a tested primitive (`orka/quant/trellis.py`)
-  for possible future high-dimensional (QTIP) work.
+- **Trellis: a naive 4-state TCQ fails, but a correct QTIP-style trellis is
+  competitive with E8** (NOT dead - that earlier claim was a bug). The 4-state
+  primitive (`orka/quant/trellis.py`) is effectively 1-D and explodes on weights.
+  A faithful re-implementation (incoherence processing + bitshift shift-register
+  trellis + exact 1MAD code, validated vs arXiv:2406.11235) reaches **10.76 dB @
+  2.0 bpw vs E8's 11.92 dB** - both near the dim-8 rate-distortion bound, trellis
+  beating the memoryless 2-bit optimum (9.3 dB) by +1.5 dB. QTIP only *beats*
+  lattices with higher L (>=20, which OOMs at 11 GB), the HYB V>1 code, and
+  fine-tuning. See "Trellis re-validation" below.
 - **The RD frontier of lattice ≈ orka**, not a breakthrough. Pushing below ~4.5 bpw
   needs LDLQ error feedback + fine-tuning - both of which orka *already has*
   (`compensated_assign`, `distill`); the win is wiring them onto the lattice, not a
@@ -42,7 +48,7 @@ an ~8.6 dB/bpw RD slope vs orka VQ's 2.6 dB/bpw, at zero codebook.
 | per-tensor adaptive scale `c·std` | ≈ fixed scale | rate is set by the bulk distribution, not the scale knob |
 | outlier extraction (top 0.5-2%) | range ±300→±37 but **entropy unchanged** | rare tails contribute ~0 entropy; they inflate *range* (fixed-width coding), not *rate* (entropy coding) |
 | rANS over zlib for indices | 1% gain @ K=256, 16% @ K=4096 | zlib is already near-entropy for low-K VQ indices |
-| trellis on rotated weights | still exploded | 4-state TCQ is 1-D; needs QTIP's high-order bitshift trellis to rival E8 |
+| trellis on rotated weights (4-state) | still exploded | 4-state TCQ is 1-D; the real QTIP trellis (below) is needed |
 | my toy LDLQ on lattice | -34 dB | dropped the `1/Hinv[i,i]` normalization; use orka's correct `compensated_assign` |
 
 ## Reasoning: why lattice wins where VQ struggles
@@ -76,8 +82,36 @@ an ~8.6 dB/bpw RD slope vs orka VQ's 2.6 dB/bpw, at zero codebook.
    lattice is the QuIP# recipe for sub-4-bit. Reuse orka's tested OBS, don't reinvent.
 3. **Lattice + `distill`** (output-objective fine-tune of per-group scales): the
    dominant lever, already in orka.
-4. Skip: trellis-for-weights, full-width rotation, outlier extraction, custom rANS -
-   all fast-failed above.
+4. Skip on this hardware: full-width rotation, outlier extraction, custom rANS -
+   all fast-failed above. The QTIP trellis is competitive but not better than E8
+   at tractable scale (see below).
+
+## Trellis re-validation (vs arXiv:2406.11235)
+
+An initial 4-state TCQ exploded on weights, which I wrongly generalized to "trellis
+is dead." Re-checking against the QTIP paper found two bugs in the bigger prototype:
+(1) **no incoherence processing** - QTIP applies a random Hadamard so weights are
+i.i.d. Gaussian before the trellis; (2) a pure-`randn` code instead of the exact
+**1MAD** `x=(34038481·w+76625530) mod 2^32; x=sum of 4 bytes; (x-510)/147.8`.
+
+Fixed prototype = incoherence + **bitshift shift-register trellis** (2^(L-k) states,
+k bits/sample, codeword = code[L-bit window], next_state = window mod 2^(L-k)) +
+Viterbi + 1MAD, V=1, L up to 18.
+
+| config (q_proj, 2.0 bpw) | SQNR |
+|---|---:|
+| 4-state TCQ (toy) | ~3 dB (explodes full-model) |
+| QTIP L=16, no incoherence (bug) | 7.8 |
+| **QTIP L=16/18 + incoherence + 1MAD** | **10.6 / 10.8** |
+| memoryless 2-bit optimum (Lloyd-Max) | 9.3 |
+| **E8 lattice @ 1.99 bpw** | **11.92** |
+
+So the correct trellis **beats the memoryless bound by +1.5 dB** (genuine trellis
+gain - it works) and is **within ~1 dB of E8** at matched 2.0 bpw. It does not beat
+E8 here: at dim 8 both are near-optimal and E8 is the provably-optimal packing.
+QTIP's published edge over lattices needs higher L (>=20, which OOMs at 11 GB VRAM),
+the HYB V>1 lookup code, and end-to-end fine-tuning. **Verdict: E8 lattice is the
+better practical choice on this hardware; the trellis is competitive, not dead.**
 
 ## Artifacts
 `orka/quant/{lattice,lattice_pack,trellis}.py` + `tests/test_{lattice,trellis}.py`.
