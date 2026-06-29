@@ -111,8 +111,9 @@ def _add_report_parser(sub):
                           help="codebook-free E8-lattice PTQ (no training, ~QAT quality)")
     latc.add_argument("model", help="HF model dir (safetensors)")
     latc.add_argument("--out", required=True, help="output .lat artifact dir")
-    latc.add_argument("--scales", nargs="+", default=["0.04"],
-                      help="per-stage lattice scales, e.g. --scales 0.05 0.02")
+    latc.add_argument("--scales", nargs="+", default=["0.5", "0.2"],
+                      help="per-stage lattice scales, RELATIVE to each tensor's rotated "
+                           "std (transfers across models). e.g. --scales 0.5 0.2")
     latc.add_argument("--seed", type=int, default=1)
     latc.add_argument("--device", default="auto")
     latc.add_argument("--max-gpu-mem-gb", type=float, default=None)
