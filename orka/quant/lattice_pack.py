@@ -40,11 +40,14 @@ def _pack_keys(keys_per_stage) -> bytes:
     return struct.pack("<i", shift) + blob
 
 
-def compress_model(model_dir: str, out_path: str, scales=(0.05, 0.02), seed: int = 1, device: str = "cuda") -> dict:
+def compress_model(model_dir: str, out_path: str, scales=(0.5, 0.2), seed: int = 1, device: str = "cuda") -> dict:
     """Compress every attn/mlp Linear of an HF model with residual-E8 lattice.
 
-    Returns a manifest dict; writes ``out_path`` (the .lat artifact: meta json +
-    packed payload). fp16 passthrough for everything else.
+    ``scales`` are RELATIVE per-stage coefficients of each tensor's rotated-weight
+    std (the absolute scale = coeff * std is computed and stored per tensor). This
+    makes the quantizer transfer across models - a fixed absolute scale is brittle
+    and exploded on a 1.5B model. Returns a manifest dict; writes ``out_path`` (the
+    .lat artifact: meta json + packed payload). fp16 passthrough for everything else.
     """
     from transformers import AutoModelForCausalLM
 
@@ -65,14 +68,20 @@ def compress_model(model_dir: str, out_path: str, scales=(0.05, 0.02), seed: int
             # seed keyed on the STORED tensor name (name+".weight") so reconstruct,
             # which iterates those keys, regenerates the identical rotation.
             Wr, _, _ = input_incoherence(W, _derive_seed(seed, name + ".weight"))
+            # ADAPTIVE per-tensor scale: `scales` are relative coefficients of the
+            # rotated-weight std, so the quantizer transfers across models/tensors
+            # (a fixed absolute scale is brittle - it exploded on a 1.5B model).
+            std = float(Wr.std().clamp(min=1e-8))
+            abs_scales = [float(c) * std for c in scales]
             flat = Wr.reshape(-1)
             pad = (-flat.numel()) % E8_DIM
             if pad:
                 flat = torch.cat([flat, torch.zeros(pad, device=flat.device)])
-            _, keys, bpw = e8_quantize_raw(flat.reshape(-1, E8_DIM), list(scales))
+            _, keys, bpw = e8_quantize_raw(flat.reshape(-1, E8_DIM), abs_scales)
             blob = _pack_keys(keys)
             meta["tensors"][name + ".weight"] = {
-                "shape": list(W.shape), "len": len(blob), "offset": offset, "bpw": bpw,
+                "shape": list(W.shape), "len": len(blob), "offset": offset,
+                "bpw": bpw, "scales": abs_scales,
             }
             payload += blob
             offset += len(blob)
@@ -119,15 +128,16 @@ def reconstruct_state_dict(art_path: str, device: str = "cuda") -> dict:
         shape = info["shape"]
         numel = int(np.prod(shape))
         nvec = (numel + E8_DIM - 1) // E8_DIM
+        t_scales = info.get("scales", scales)  # per-tensor absolute scales
         import struct
         from orka.quant.ans import ans_decompress
         raw = payload[info["offset"]: info["offset"] + info["len"]]
         shift = struct.unpack("<i", raw[:4])[0]
         sym = ans_decompress(raw[4:], device)
-        keys = (sym + shift).reshape(n_stages, nvec, E8_DIM)
+        keys = (sym + shift).reshape(len(t_scales), nvec, E8_DIM)
         recon_rot = None
-        for s in range(n_stages):
-            pts = keys[s].float() / 2.0 * scales[s]
+        for s in range(len(t_scales)):
+            pts = keys[s].float() / 2.0 * t_scales[s]
             recon_rot = pts if recon_rot is None else recon_rot + pts
         # regenerate the same input-dim incoherence (signs+block) from seed+name to invert it
         Wr = recon_rot.reshape(-1)[:numel].reshape(shape)
