@@ -65,6 +65,25 @@ class QLoRARecoveryTest(unittest.TestCase):
         self.assertTrue(torch.allclose(
             ql(x), torch.nn.functional.linear(x, ql.merged_weight().to(x.dtype)), atol=1e-4))
 
+    def test_build_is_arch_agnostic_and_skips_output_head(self):
+        # Any Linear in the quantized set is wrapped (works for feed_forward / mamba,
+        # not just self_attn/mlp); the output head is skipped (keeps quantized base).
+        import torch.nn as nn
+        from orka.qat.qlora import build_qlora_student
+
+        m = nn.Module()
+        m.add_module("layers", nn.Sequential())
+        m.layers.add_module("0", nn.Module())
+        m.layers[0].add_module("feed_forward", nn.Module())
+        m.layers[0].feed_forward.add_module("down_proj", nn.Linear(8, 8))
+        m.add_module("lm_head", nn.Linear(8, 8))
+        sd = {
+            "layers.0.feed_forward.down_proj.weight": torch.randn(8, 8),
+            "lm_head.weight": torch.randn(8, 8),
+        }
+        wrapped = build_qlora_student(m, sd, rank=4, alpha=8)
+        self.assertEqual(list(wrapped), ["layers.0.feed_forward.down_proj"])
+
 
 if __name__ == "__main__":
     unittest.main()

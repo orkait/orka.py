@@ -53,13 +53,20 @@ class QLoRALinear(nn.Module):
 
 
 def build_qlora_student(model: nn.Module, quantized_sd: dict, rank: int, alpha: float) -> dict:
-    """Replace each attn/mlp Linear with a QLoRALinear whose frozen base is the
-    quantized weight from ``quantized_sd``. Returns {module_name: QLoRALinear}."""
+    """Replace each quantized Linear with a QLoRALinear whose frozen base is the
+    quantized weight from ``quantized_sd``. Returns {module_name: QLoRALinear}.
+
+    Any nn.Linear whose ``<name>.weight`` is in ``quantized_sd`` is wrapped - the
+    quantized set itself is the filter, so this works on any architecture (attn,
+    MLP, feed_forward, mamba projections), not just standard transformers."""
     wrapped = {}
     for full_name, module in list(model.named_modules()):
         if not isinstance(module, nn.Linear):
             continue
-        if not ("self_attn" in full_name or "mlp" in full_name):
+        # Skip the output head: it should keep its quantized base (adapting it skews
+        # logits, same reason error-comp skips it), and as a top-level dotless module
+        # ("lm_head") the parent resolution below would nest it (lm_head.lm_head).
+        if "lm_head" in full_name or "embed_out" in full_name or "." not in full_name:
             continue
         wname = full_name + ".weight"
         if wname not in quantized_sd:
@@ -95,19 +102,20 @@ def main() -> int:
     ap.add_argument("--temp", type=float, default=2.0)
     ap.add_argument("--max-seqs", type=int, default=256)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--trust-remote-code", action="store_true")
     args = ap.parse_args()
 
     from safetensors.torch import load_file
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     dev = args.device
-    tok = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
+    tok = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True, trust_remote_code=args.trust_remote_code)
 
     print("loading quantized base weights...", flush=True)
     quantized_sd = load_file(args.quantized)
 
     print("loading student (frozen quantized base + LoRA adapters)...", flush=True)
-    student = AutoModelForCausalLM.from_pretrained(args.model_dir, local_files_only=True, dtype=torch.bfloat16).to(dev)
+    student = AutoModelForCausalLM.from_pretrained(args.model_dir, local_files_only=True, dtype=torch.bfloat16, trust_remote_code=args.trust_remote_code).to(dev)
     student.config.use_cache = False
     wrapped = build_qlora_student(student, quantized_sd, args.rank, args.alpha)
     print(f"  wrapped {len(wrapped)} linears, rank={args.rank}", flush=True)
@@ -124,7 +132,7 @@ def main() -> int:
     print(f"  trainable adapter params: {n_train/1e6:.2f}M", flush=True)
 
     print("loading teacher (frozen bf16)...", flush=True)
-    teacher = AutoModelForCausalLM.from_pretrained(args.model_dir, local_files_only=True, dtype=torch.bfloat16).to(dev).eval()
+    teacher = AutoModelForCausalLM.from_pretrained(args.model_dir, local_files_only=True, dtype=torch.bfloat16, trust_remote_code=args.trust_remote_code).to(dev).eval()
     for p in teacher.parameters():
         p.requires_grad_(False)
 
