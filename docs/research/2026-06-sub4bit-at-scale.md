@@ -40,9 +40,43 @@ machinery, properly combined.
 3. **orka already had the winning pieces** - the session's audit found 7/9 SOTA
    tricks already in core; combining them (not the new lattice) is the sub-4-bit win.
 
+## Recovery methods at 4 bpw: distill vs QLoRA vs full QAT
+
+Pushing the 4bpw base (1.52) back toward fp16. fp16 baseline ppl 10.5535.
+
+| method | ppl ratio | bpw | fits 10 GB? | wall | notes |
+|---|---:|---:|---|---:|---|
+| 4bpw base (LDLQ, no recovery) | 1.52 | 4.0 | - | - | starting point |
+| **distill** (codebook refine) | **1.16** | **4.0** | yes | ~30 min | trains codebooks only |
+| **QLoRA** (rank-16 adapters) | 1.163 | ~4.23 | yes (~6.5 GB) | **342 s** | frozen base + adapters |
+| full fake-quant QAT | - | 4.0 | **no** | - | ~16 GB floor, infeasible |
+
+**distill and QLoRA both saturate at ~1.16** - the recoverable ceiling of the 4bpw
+base on this calibration set. distill wins on bpw (no adapter overhead); QLoRA is
+5x faster and the industry-standard path. Neither beats the other on quality.
+
+### Why full fake-quant QAT does not fit (verified)
+Full-model QAT keeps an fp32 **shadow** master + its fp32 **grads** + a frozen
+bf16 **teacher**: ~5.2 + 5.2 + 3.1 = **~16 GB** for a 1.5B model - over a 12 GB
+card entirely. `--checkpoint-quantize` frees activations, not the shadow/grads.
+This is the memory-heaviest path and is exactly what industry AVOIDS on consumer
+GPUs: vLLM / llama.cpp are inference-only (load pre-quantized weights); GPTQ /
+AWQ / QuIP# quantize **layer-by-layer** (peak = one block); Unsloth / QLoRA
+**freeze the quantized base and train tiny adapters**. orka's `compensated_assign`
+(LDLQ) IS the block-wise PTQ approach - the 1.16 result is the industry recipe.
+
+### VRAM-fitting QAT modes added (for when full QAT is wanted anyway)
+Combined, these bring full 1.5B QAT to within ~0.3 GB of a 10 GB cap (still the
+wrong tool, but now possible): bf16 shadow (`--shadow-bf16`, ~10.4->5.2 GB and
+half the grad), narrow-int assignment cache (int64->int16, ~3.9->1 GB), checkpoint
+the WHOLE forward not just `quantize()` (frees the ~5 GB of retained `w_q`),
+CPU-offloaded optimizer (`--offload-optim`, moments in host RAM - paged-8bit's
+unified memory still counts against the cap), and loading the teacher after
+codebook init. All bit-identical (verified) or fp32-master-accurate.
+
 ## Next levers
 - **LDLQ + distill at 3 bpw** (between 2.5 and 4) to map the usable RD frontier.
-- **Real QAT** (`orka.qat.train`) instead of light distill - likely pushes 4 bpw
-  below 1.1; VRAM-tight on 1.5B at 10 GB, needs `--checkpoint-quantize`.
+- **Bigger / cleaner calibration corpus** - both recovery methods saturate at
+  1.16 on the tiny bundled set; more data is the likely path below 1.1, not method.
 - **Lattice + LDLQ** - now that the lattice transfers, adding LDLQ (rotated-Hessian)
   could close its RD gap; needs the QuIP#-style incoherent-Hessian build.
