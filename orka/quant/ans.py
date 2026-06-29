@@ -190,12 +190,18 @@ def _auto_K(n: int) -> int:
     return max(64, min(16384, n // 512))
 
 
-def ans_compress(symbols, precision: int = 12, K: int | None = None, device: str = "cuda") -> bytes:
+def ans_compress(symbols, precision: int | None = None, K: int | None = None, device: str = "cuda") -> bytes:
     import struct
+    import math
     import torch
 
     sym = np.asarray(symbols).reshape(-1).astype(np.int64)
     n = int(sym.size)
+    if precision is None:
+        n_sym = int(sym.max()) + 1 if n else 1
+        # precision must satisfy 2^precision >= n_sym (every symbol gets freq>=1),
+        # with headroom for the distribution; cap at 16.
+        precision = min(16, max(12, int(math.ceil(math.log2(max(2, n_sym)))) + 1))
     if n == 0:
         return _MAGIC + struct.pack("<QIBI", 0, 0, precision, 0)
     K = K or _auto_K(n)
