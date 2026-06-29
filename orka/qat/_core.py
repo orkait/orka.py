@@ -92,8 +92,9 @@ class QATVQLinear(nn.Module):
 
     def __init__(self, weight: torch.Tensor, bias, group_size: int, stages: list[int],
                  commitment: float = 0.25, checkpoint: bool = False,
-                 reassign_every: int = 1):
+                 reassign_every: int = 1, shadow_dtype: torch.dtype = torch.float32):
         super().__init__()
+        self.shadow_dtype = shadow_dtype
         self.out_features, self.in_features = weight.shape
         self.group_size = group_size
         self.stages = stages
@@ -117,16 +118,20 @@ class QATVQLinear(nn.Module):
         self.checkpoint = checkpoint
         self.bias = nn.Parameter(bias.clone()) if bias is not None else None
 
-        self.shadow = nn.Parameter(weight.detach().clone().float())
+        # Shadow defaults to fp32 (most stable). bf16 halves the persistent
+        # shadow+grad footprint (~10.4GB -> ~5.2GB on a 1.5B model); the quantize()
+        # math still runs in fp32 via a transient per-layer upcast, so only the
+        # stored master + its grad are bf16 - the standard bf16-master-weight trick.
+        self.shadow = nn.Parameter(weight.detach().clone().to(shadow_dtype))
 
         # Per-block scales normalize magnitude so the codebook only encodes SHAPE.
         # Without this the single codebook must span the full weight dynamic range
         # -> ~40% recon error even with a perfect fit (this was the QAT-broken bug).
         self.block_size = _pick_block_size(self.in_features, group_size)
         n_blocks = self.in_features // self.block_size
-        W = self.shadow.detach()
+        W = self.shadow.detach().float()  # fp32 for scale/kmeans init even if shadow is bf16
         sc = W.reshape(self.out_features, n_blocks, self.block_size).abs().amax(-1).clamp_min(1e-8)
-        self.scales = nn.Parameter(sc)                                  # [out, n_blocks], trainable
+        self.scales = nn.Parameter(sc)                                  # [out, n_blocks], fp32, trainable
 
         # Codebooks fit (Lloyd k-means) on the NORMALIZED residual vectors -> a
         # PTQ-quality warm start. Single large codebook is more bit-efficient than
@@ -168,6 +173,9 @@ class QATVQLinear(nn.Module):
         # Per-block scale via broadcast over a [out, n_blocks, block] view - avoids
         # repeat_interleave materializing a full [out, in] scale temp each forward.
         n_blocks = self.in_features // self.block_size
+        orig_dtype = shadow.dtype
+        shadow = shadow.float()  # transient per-layer fp32 upcast; keeps the VQ math
+                                 # exact while the stored master/grad stay bf16
         sc3 = scales[:, :, None]                                          # [out, n_blocks, 1]
         vn = (shadow.reshape(self.out_features, n_blocks, self.block_size) / sc3
               ).reshape(-1, self.group_size)                             # normalized vectors
@@ -182,9 +190,14 @@ class QATVQLinear(nn.Module):
         for s, cb in enumerate(codebooks):
             if refresh:
                 with torch.no_grad():
-                    self._cached_idx[s] = _chunked_assign(residual.detach(), cb.detach())
+                    idx = _chunked_assign(residual.detach(), cb.detach())
+                    # Cache the argmin in the narrowest int that holds the codebook
+                    # size (int16 <=32768, else int32). int64 here costs ~3.9GB of
+                    # persistent GPU across all layers x stages on a 1.5B model; this
+                    # is ~4x smaller. Upcast to long only transiently at the gather.
+                    self._cached_idx[s] = idx.to(torch.int16) if cb.shape[0] <= 32768 else idx.to(torch.int32)
             assign = self._cached_idx[s]
-            sel = cb[assign]                       # differentiable in cb (idx may be cached)
+            sel = cb[assign.long()]                # differentiable in cb (idx may be cached)
             cb_loss = cb_loss + F.mse_loss(sel, residual.detach())
             decoded = decoded + sel
             residual = vn - decoded
@@ -192,23 +205,37 @@ class QATVQLinear(nn.Module):
                ).reshape(self.out_features, self.in_features)            # de-normalize
         # straight-through: forward uses dec (quantized weight), grad to shadow is identity
         w_q = shadow + (dec - shadow).detach()
-        return w_q, cb_loss
+        # Return in the shadow dtype. This is the checkpoint OUTPUT, retained for
+        # backward across all layers - keeping it bf16 (when the shadow is bf16)
+        # halves that retained-activation cost (~5.2GB fp32 -> ~2.6GB on a 1.5B
+        # model). The STE identity gradient still reaches the bf16 shadow master.
+        return w_q.to(orig_dtype), cb_loss
 
     def quantize(self) -> torch.Tensor:
         w_q, cb_loss = self._quantize_impl(self.shadow, self.scales, *self.codebooks)
         self._last_cb_loss = cb_loss
         return w_q
 
+    def _forward_impl(self, x, shadow, scales, *codebooks):
+        w_q, cb_loss = self._quantize_impl(shadow, scales, *codebooks)
+        return F.linear(x, w_q.to(x.dtype), self.bias), cb_loss
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.checkpoint and self.training:
             import torch.utils.checkpoint as cp
-            w_q, cb_loss = cp.checkpoint(
-                self._quantize_impl, self.shadow, self.scales, *self.codebooks,
+            # Checkpoint the WHOLE forward (quantize + linear), not just quantize.
+            # w_q (the dense weight) and the weight-sized `sel` held by cb_loss's
+            # graph then live only inside the checkpoint and are recomputed in
+            # backward - retaining them across all layers is the ~5GB that blows a
+            # 1.5B QAT run. cb_loss is a real checkpoint OUTPUT so its gradient
+            # survives the recompute; only the small input x / output are kept.
+            out, cb_loss = cp.checkpoint(
+                self._forward_impl, x, self.shadow, self.scales, *self.codebooks,
                 use_reentrant=False,
             )
             self._last_cb_loss = cb_loss
-        else:
-            w_q = self.quantize()
+            return out
+        w_q = self.quantize()
         return F.linear(x, w_q.to(x.dtype), self.bias)
 
     @torch.no_grad()
@@ -231,7 +258,8 @@ class QATVQLinear(nn.Module):
 
 def build_qat_student(model: nn.Module, allocation: dict, group_size: int = 8,
                       commitment: float = 0.25, checkpoint: bool = False,
-                      reassign_every: int = 1) -> dict:
+                      reassign_every: int = 1,
+                      shadow_dtype: torch.dtype = torch.float32) -> dict:
     """Replace each allocated linear in ``model`` with a QATVQLinear using its
     per-tensor stage list. Embeddings / norms / lm_head stay fp16 (sensitive,
     same as Orka's passthrough). Returns {module_name: QATVQLinear}."""
@@ -252,7 +280,7 @@ def build_qat_student(model: nn.Module, allocation: dict, group_size: int = 8,
             continue
         qat = QATVQLinear(module.weight.data, module.bias.data if module.bias is not None else None,
                           group_size, stages, commitment, checkpoint=checkpoint,
-                          reassign_every=reassign_every).to(module.weight.device)
+                          reassign_every=reassign_every, shadow_dtype=shadow_dtype).to(module.weight.device)
         parent = model.get_submodule(full_name.rsplit(".", 1)[0])
         setattr(parent, full_name.rsplit(".", 1)[-1], qat)
         wrapped[full_name] = qat

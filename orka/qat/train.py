@@ -48,6 +48,22 @@ def main() -> int:
     ap.add_argument("--max-seqs", type=int, default=256)
     ap.add_argument("--optim8bit", action="store_true",
                     help="use bitsandbytes AdamW8bit (m+v in int8) to fit small GPUs")
+    ap.add_argument("--paged-optim", action="store_true",
+                    help="use bitsandbytes PagedAdamW8bit - pages optimizer state "
+                         "(m+v) to CPU RAM, freeing ~2.6GB VRAM on a 1.5B model. "
+                         "Implies 8-bit state. Needs host RAM headroom. NOTE: paged "
+                         "state uses CUDA unified memory that still counts against "
+                         "the GPU cap - prefer --offload-optim under a tight cap.")
+    ap.add_argument("--offload-optim", action="store_true",
+                    help="CPU-offloaded AdamW: moments (fp32) live in host RAM and "
+                         "the update runs on CPU, so NO optimizer state sits on the "
+                         "GPU. Lets full-model 1.5B QAT fit a 10GB cap (GPU then "
+                         "peaks at the backward phase). Costs ~5GB PCIe traffic/step.")
+    ap.add_argument("--shadow-bf16", action="store_true",
+                    help="store the trainable shadow master weight (and its grad) "
+                         "in bf16 instead of fp32 - halves the persistent shadow "
+                         "footprint (~10.4GB -> ~5.2GB on 1.5B). The VQ math still "
+                         "runs in fp32 via a transient per-layer upcast.")
     ap.add_argument("--student-bf16", action="store_true",
                     help="load student backbone in bf16 (shadow weights + codebooks "
                          "stay fp32); frozen layers are bf16 -> saves ~1GB on small GPUs")
@@ -74,13 +90,6 @@ def main() -> int:
     tok = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
     allocation = json.loads(Path(args.allocation).read_text())
 
-    print("loading teacher (frozen bf16)...", flush=True)
-    teacher = AutoModelForCausalLM.from_pretrained(
-        args.model_dir, local_files_only=True, dtype=torch.bfloat16
-    ).to(dev).eval()
-    for p in teacher.parameters():
-        p.requires_grad_(False)
-
     print("loading student + wrapping allocated linears...", flush=True)
     student_dtype = torch.bfloat16 if args.student_bf16 else torch.float32
     student = AutoModelForCausalLM.from_pretrained(
@@ -94,10 +103,21 @@ def main() -> int:
             student.gradient_checkpointing_enable()
         except Exception:
             pass
+    shadow_dtype = torch.bfloat16 if args.shadow_bf16 else torch.float32
     wrapped = build_qat_student(student, allocation, group_size=args.group_size,
                                 commitment=args.commit, checkpoint=args.checkpoint_quantize,
-                                reassign_every=args.reassign_every)
+                                reassign_every=args.reassign_every, shadow_dtype=shadow_dtype)
     print(f"  wrapped {len(wrapped)} linears", flush=True)
+
+    # Teacher is loaded AFTER the student's codebook init (k-means) so its ~3GB of
+    # bf16 weights don't sit resident through the init VRAM peak - it is unused
+    # until the training loop. Lets a 1.5B QAT run fit under a 10GB cap.
+    print("loading teacher (frozen bf16)...", flush=True)
+    teacher = AutoModelForCausalLM.from_pretrained(
+        args.model_dir, local_files_only=True, dtype=torch.bfloat16
+    ).to(dev).eval()
+    for p in teacher.parameters():
+        p.requires_grad_(False)
 
     # Train only the quantized layers' shadow weights + codebooks.
     train_params = []
@@ -112,7 +132,15 @@ def main() -> int:
         p.requires_grad_(False)
     for p in train_params:
         p.requires_grad_(True)
-    if args.optim8bit:
+    if args.offload_optim:
+        from orka.qat._offload_optim import CPUOffloadAdamW
+        opt = CPUOffloadAdamW(train_params, lr=args.lr)
+        print("optimizer: CPUOffloadAdamW (fp32 m+v in host RAM, update on CPU)", flush=True)
+    elif args.paged_optim:
+        import bitsandbytes as bnb
+        opt = bnb.optim.PagedAdamW8bit(train_params, lr=args.lr)
+        print("optimizer: bitsandbytes PagedAdamW8bit (int8 m+v, paged to CPU RAM)", flush=True)
+    elif args.optim8bit:
         import bitsandbytes as bnb
         opt = bnb.optim.AdamW8bit(train_params, lr=args.lr)
         print("optimizer: bitsandbytes AdamW8bit (int8 m+v)", flush=True)
