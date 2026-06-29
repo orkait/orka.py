@@ -12,26 +12,48 @@ both now fixed. No correctness issue found in the shipped pack/quant core.
 
 ## Full verdict table
 
-| technique | orka location | source paper | verdict |
-|---|---|---|---|
-| Residual VQ (RVQ stages) | `codebook/`, `spec` | Juang & Gray 1982 | ✅ correct |
-| k-means / Lloyd | `_kmeans_torch` | Lloyd 1982 | ✅ correct |
-| block-max / channel-block-max scales | `transforms/normalize` | per-group absmax (universal) | ✅ correct |
-| power-of-2 block scales (SLRQ) | `_normalize_tensor_slrq_block` | OCP Microscaling MX (E8M0 scale) | ✅ valid (shift-only dequant) |
-| salient-per-block + sensitive weights | SLRQ, `pillar_*` | SqueezeLLM 2306.07629, SpQR 2306.03078 | ✅ correct (keep top values fp16) |
-| outlier extraction (`w²·E[x²]`) | `transforms/outliers` | SpQR / SqueezeLLM sensitivity, OBQ | ✅ correct (output-impact, not raw magnitude) |
-| AWQ per-channel scaling (`W·E[\|x\|]^α`) | `_normalize_tensor_awq` | AWQ 2306.00978 | ⚠️ formula correct; **α is a fixed knob, not the paper's per-layer grid-search** |
-| Hadamard / orthogonal incoherence (pack) | `transforms/rotate` | QuIP 2307.13304, QuIP# 2402.04396, QuaRot | ✅ adequate - `largest-pow2-block` (up to full width) |
-| GPTQ / LDLQ error compensation | `compensated_assign` | GPTQ 2210.17323, OBQ, GPTVQ | ✅ correct block-OBS; empirical +3.8 dB |
-| Hessian-diagonal (AWQ) weighting | `pack.py` `H_diag` | AWQ / OBQ | ✅ correct diagonal output-error; +2.2 dB |
-| EM-AQ joint refinement | `strategies/refinement` | Additive Quantization (Babenko-Lempitsky 2014), AQLM 2401.06118 | ✅ correct coordinate descent |
-| RD bit allocation | `quant/allocate` | Shoham & Gersho 1988 | ✅ correct (Lagrangian `argmin d+λb`, bisect λ, + greedy fill) |
-| output-objective distill | `qat/distill` | GPTQ/QuIP# fine-tune | ✅ correct loss; +5-9 dB |
-| codebook sharing (family/global) | `codebook_mode` | universal/shared codebooks | ✅ valid (amortizes codebook tax) |
-| index entropy coding | `core/_format` (zlib) | ECVQ (Chou-Lookabaugh-Gray 1989) | ✅ adequate; ANS ~16% better at K=4096, ~1% at K=256 |
-| E8 lattice nearest-point | `quant/lattice` | QuIP# 2402.04396, Conway-Sloane | ✅ correct |
-| **lattice incoherence** | `quant/lattice` | QuIP# | ✅ **FIXED** this session (was weak 8-D → full input-dim; +6% single-stage ppl) |
-| **trellis (TCQ)** | `quant/trellis` + proto | QTIP 2406.11235 | ✅ **corrected** (was buggy "dead"; real impl = competitive with E8) |
+CUDA column: ✅ = compute runs on GPU under the (default) torch backend;
+🟡 = partial/has a CPU step; ⚪ = legitimately CPU (storage/entropy-coding/scalar
+bookkeeping). `.cpu()` calls purely for disk serialization are not counted as CPU
+compute.
+
+| technique | orka location | source paper | verdict | CUDA |
+|---|---|---|---|---|
+| Residual VQ (RVQ stages) | `codebook/`, `spec` | Juang & Gray 1982 | ✅ correct | ✅ |
+| k-means / Lloyd + assign | `_kmeans_torch`, `_assign_kernel` | Lloyd 1982 | ✅ correct | ✅ Triton fp16 argmin |
+| block-max / channel-block-max scales | `transforms/normalize` | per-group absmax (universal) | ✅ correct | ✅ torch path |
+| power-of-2 block scales (SLRQ) | `_normalize_tensor_slrq_block` | OCP Microscaling MX (E8M0 scale) | ✅ valid (shift-only dequant) | ✅ |
+| salient-per-block + sensitive weights | SLRQ, `pillar_*` | SqueezeLLM 2306.07629, SpQR 2306.03078 | ✅ correct (keep top values fp16) | ✅ (`.cpu()` only to store) |
+| outlier extraction (`w²·E[x²]`) | `transforms/outliers` | SpQR / SqueezeLLM sensitivity, OBQ | ✅ correct (output-impact) | ✅ topk on device |
+| AWQ per-channel scaling (`W·E[\|x\|]^α`) | `_normalize_tensor_awq` | AWQ 2306.00978 | ⚠️ formula correct; **α fixed, not grid-searched** | ✅ |
+| Hadamard incoherence (pack) | `transforms/rotate` | QuIP 2307.13304, QuIP# 2402.04396, QuaRot | ✅ `largest-pow2-block` | ✅ FWHT on device |
+| orthogonal incoherence (pack) | `transforms/rotate` | QuIP | ✅ correct | 🟡 random Q via **CPU numpy QR** once/tensor (opt-in; hadamard default is GPU) |
+| GPTQ / LDLQ error compensation | `compensated_assign` | GPTQ 2210.17323, OBQ, GPTVQ | ✅ correct block-OBS; +3.8 dB | ✅ `H=XᵀX`, cholesky on device |
+| Hessian-diagonal (AWQ) weighting | `pack.py` `H_diag` | AWQ / OBQ | ✅ correct diagonal; +2.2 dB | ✅ **FIXED here** (was `as_tensor` on CPU → now `device=`) |
+| EM-AQ joint refinement | `strategies/refinement` | Additive Quant (Babenko-Lempitsky 2014), AQLM 2401.06118 | ✅ correct coordinate descent | ✅ k-means on device |
+| RD bit allocation | `quant/allocate` | Shoham & Gersho 1988 | ✅ correct (Lagrangian + greedy) | 🟡 distortion probes GPU; the λ-bisection / greedy solver is CPU scalar (negligible, not tensor work) |
+| output-objective distill | `qat/distill` | GPTQ/QuIP# fine-tune | ✅ correct loss; +5-9 dB | ✅ GPU-only since #130 |
+| codebook sharing (family/global) | `codebook_mode` | universal/shared codebooks | ✅ valid | ✅ |
+| index entropy coding | `core/_format` (zlib) | ECVQ (Chou-Lookabaugh-Gray 1989) | ✅ adequate; ANS ~16% better at K=4096 | ⚪ CPU (entropy coder is inherently CPU; storage layer) |
+| LS row-scale refine (`--mse-scale`) | `strategies/refinement` | least-squares scale | ✅ correct | ⚪ CPU by design (opt-in, tiny `[n_blocks]` vectors) |
+| E8 lattice nearest-point | `quant/lattice` | QuIP# 2402.04396, Conway-Sloane | ✅ correct | ✅ |
+| **lattice incoherence** | `quant/lattice` | QuIP# | ✅ **FIXED** (weak 8-D → full input-dim; +6% single-stage ppl) | ✅ |
+| **trellis (TCQ)** | `quant/trellis` + proto | QTIP 2406.11235 | ✅ **corrected** (competitive with E8) | ✅ Viterbi on device |
+
+### Device review summary
+- **Hot compute is GPU-only** under the default torch backend: VQ/k-means/assign,
+  all normalizations, outlier/salient scoring, Hadamard rotation, GPTQ/LDLQ, EM-AQ,
+  distill, lattice, trellis, and the allocator's distortion probes.
+- **Fixed here**: the pack's `E[x²]` Hessian-diagonal was computed on CPU
+  (`as_tensor` without `device`); now on the pack device - same class as the distill
+  CPU-sync bug fixed in #130.
+- **Legitimately CPU** (not worth moving): zlib entropy coding, the opt-in
+  `mse_scale` scale-refine (tiny vectors), the Lagrangian/greedy allocation solver
+  (scalar arithmetic over the small RD table, not weight tensors), and all `.cpu()`
+  calls that only serialize codebooks/indices to disk.
+- **One opt-in CPU path remains**: orthogonal-rotation Q is generated via numpy QR
+  on CPU (once per tensor). The default rotation is Hadamard, which is GPU. Could be
+  moved to `torch.linalg.qr` on device if orthogonal rotation ever becomes hot.
 
 ## Bugs found by this validation (all in code I added this session)
 1. **Trellis** - "dead" was wrong; missing incoherence + `randn` instead of 1MAD. Real impl beats memoryless 2-bit by +1.5 dB, competitive with E8 (10.8 vs 11.9 dB). (#132)
