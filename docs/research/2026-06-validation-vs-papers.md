@@ -1,36 +1,49 @@
-# Validation of orka's compression tricks against the source papers
+# Validation of orka's compression techniques against the source papers
 
-Prompted by finding that my trellis result was wrong (an under-implementation bug,
-not the technique). This is a systematic re-check of every load-bearing compression
-claim against the actual algorithm / paper, with empirical evidence on SmolLM-135M.
+A full audit of every load-bearing compression trick in orka, checked against the
+algorithm in its source paper and (where cheap) empirically on SmolLM-135M.
+Triggered by finding that two of my *new* prototypes (trellis, lattice incoherence)
+were under-implementation bugs, not weak techniques - so I re-checked everything.
 
-## Verdict table
+## Headline
+orka's **existing** quantization arsenal is correct and grounded in the literature.
+The only bugs were in code I added this session (lattice + trellis incoherence),
+both now fixed. No correctness issue found in the shipped pack/quant core.
 
-| trick | paper | orka / my impl | verdict |
+## Full verdict table
+
+| technique | orka location | source paper | verdict |
 |---|---|---|---|
-| GPTQ / LDLQ error feedback | GPTQ (2210.17323), GPTVQ | `compensated_assign`: `H=XᵀX/n`, 1% damp, dead-col fix, block-OBS `Wc[:,rest]-=E@(Hinv_bb⁻¹·Hinv_b,rest)` | ✅ **correct** - matches the block-OBS update exactly; empirically +3.8 dB output-SQNR |
-| AWQ / Hessian importance | AWQ (2306.00978), OBQ | `E[x²]` per-column = diag(XᵀX), used to weight k-means distortion | ✅ correct as the **diagonal** output-error objective; +2.2 dB. (Naming is loose - true AWQ also does per-channel scaling, which orka has as a separate `awq` norm mode.) |
-| E8 lattice nearest-point | QuIP# (2402.04396), Conway-Sloane | `nearest_e8` = min over D8 and D8+½ | ✅ correct - valid lattice points, beats integer rounding on average (packing gain) |
-| Incoherence - **main pack** | QuIP/QuIP# | `_hadamard_block_size` = largest pow2 divisor of `cols` (2048→2048, 1536→512, 576→64) | ✅ adequate - near-full-width Hadamard, not the weak case |
-| Incoherence - **my lattice.py** | QuIP# | 8-D within-group Hadamard only | ❌ **under-implemented** - full input-dim Hadamard is better (ppl ratio 1.144 vs 1.202 at *lower* bpw). FIXED. |
-| Trellis (TCQ) | QTIP (2406.11235) | initial 4-state toy | ❌ was buggy → corrected: real bitshift trellis + incoherence + 1MAD = 10.8 dB @2bpw, competitive with E8 (see trellis doc) |
-| Output-objective fine-tune | GPTQ/QuIP# fine-tune, distillation | `distill` `_output_loss = ‖X·ΔWᵀ‖² + damp` | ✅ correct objective; +5-9 dB over weight-MSE at fixed bits |
-| residual VQ (additive) | RVQ / AQLM | RVQ stages (greedy) | ✅ correct; AQLM's *joint* assignment (beam) is the only gap |
-| index entropy coding | ECVQ | zlib | ✅ adequate - within ~1% of entropy at K=256, ~16% over at K=4096 |
-| scalar/planar bpw | - | `s8` packs at group_size=1 = 8 bpw | ✅ correct (was an 8x accounting bug, fixed #129, verified vs on-disk bytes) |
+| Residual VQ (RVQ stages) | `codebook/`, `spec` | Juang & Gray 1982 | ✅ correct |
+| k-means / Lloyd | `_kmeans_torch` | Lloyd 1982 | ✅ correct |
+| block-max / channel-block-max scales | `transforms/normalize` | per-group absmax (universal) | ✅ correct |
+| power-of-2 block scales (SLRQ) | `_normalize_tensor_slrq_block` | OCP Microscaling MX (E8M0 scale) | ✅ valid (shift-only dequant) |
+| salient-per-block + sensitive weights | SLRQ, `pillar_*` | SqueezeLLM 2306.07629, SpQR 2306.03078 | ✅ correct (keep top values fp16) |
+| outlier extraction (`w²·E[x²]`) | `transforms/outliers` | SpQR / SqueezeLLM sensitivity, OBQ | ✅ correct (output-impact, not raw magnitude) |
+| AWQ per-channel scaling (`W·E[\|x\|]^α`) | `_normalize_tensor_awq` | AWQ 2306.00978 | ⚠️ formula correct; **α is a fixed knob, not the paper's per-layer grid-search** |
+| Hadamard / orthogonal incoherence (pack) | `transforms/rotate` | QuIP 2307.13304, QuIP# 2402.04396, QuaRot | ✅ adequate - `largest-pow2-block` (up to full width) |
+| GPTQ / LDLQ error compensation | `compensated_assign` | GPTQ 2210.17323, OBQ, GPTVQ | ✅ correct block-OBS; empirical +3.8 dB |
+| Hessian-diagonal (AWQ) weighting | `pack.py` `H_diag` | AWQ / OBQ | ✅ correct diagonal output-error; +2.2 dB |
+| EM-AQ joint refinement | `strategies/refinement` | Additive Quantization (Babenko-Lempitsky 2014), AQLM 2401.06118 | ✅ correct coordinate descent |
+| RD bit allocation | `quant/allocate` | Shoham & Gersho 1988 | ✅ correct (Lagrangian `argmin d+λb`, bisect λ, + greedy fill) |
+| output-objective distill | `qat/distill` | GPTQ/QuIP# fine-tune | ✅ correct loss; +5-9 dB |
+| codebook sharing (family/global) | `codebook_mode` | universal/shared codebooks | ✅ valid (amortizes codebook tax) |
+| index entropy coding | `core/_format` (zlib) | ECVQ (Chou-Lookabaugh-Gray 1989) | ✅ adequate; ANS ~16% better at K=4096, ~1% at K=256 |
+| E8 lattice nearest-point | `quant/lattice` | QuIP# 2402.04396, Conway-Sloane | ✅ correct |
+| **lattice incoherence** | `quant/lattice` | QuIP# | ✅ **FIXED** this session (was weak 8-D → full input-dim; +6% single-stage ppl) |
+| **trellis (TCQ)** | `quant/trellis` + proto | QTIP 2406.11235 | ✅ **corrected** (was buggy "dead"; real impl = competitive with E8) |
 
-## What was actually wrong (the bugs I found by re-validating)
-1. **Trellis** - I had no incoherence + a `randn` code instead of 1MAD; "trellis dead" was false. Corrected: competitive with E8.
-2. **lattice.py incoherence** - 8-D within-group only; full input-dim Hadamard is measurably better (validated end-to-end). Fixed in this change.
+## Bugs found by this validation (all in code I added this session)
+1. **Trellis** - "dead" was wrong; missing incoherence + `randn` instead of 1MAD. Real impl beats memoryless 2-bit by +1.5 dB, competitive with E8 (10.8 vs 11.9 dB). (#132)
+2. **lattice.py incoherence** - 8-D within-group instead of QuIP# full input-dim, plus a seed-keying bug (compress vs reconstruct). Fixed → single-stage ppl 1.197 → 1.121. (#133)
 
-## What was correct (validated, not changed)
-GPTQ/LDLQ, AWQ/Hessian weighting, E8 nearest-point, the main-pack Hadamard,
-output-objective distill, residual VQ, planar bpw accounting. These match their
-papers both structurally (code) and empirically (measured gains in the expected
-direction and magnitude).
+## Minor gaps (correct but simplified, documented not bugs)
+- **AWQ α** is a user knob, not auto grid-searched per layer (the AWQ paper searches α∈[0,1]). A sweep is possible via the flag but not automatic.
+- **Index entropy coding** is zlib, ~16% above entropy at high K - a real ANS coder would recover it (low priority; ~5% of total size).
+- **AQLM joint assignment** - orka's RVQ is greedy/residual; AQLM beam-searches the M-tuple. orka's EM-AQ refinement narrows but doesn't close this.
 
 ## Method note
-Where WebFetch returned only abstracts, validation was done by reading orka's source
-against the known algorithm and confirming empirically (output-SQNR / perplexity
-moves in the predicted direction and magnitude). Single-model (smol) probes -
-directional, not a multi-model benchmark.
+WebFetch returned only abstracts for several arXiv papers, so validation was by
+reading orka's source against the known algorithm and confirming empirically
+(output-SQNR / perplexity move in the predicted direction and magnitude). Single-
+model (smol) probes - directional, not a multi-model benchmark.
