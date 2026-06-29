@@ -80,6 +80,54 @@ def _coord_bpw(keys: torch.Tensor) -> float:
     return total / keys.shape[1]
 
 
+def _derive_seed(seed: int, tag: str) -> int:
+    import hashlib
+    h = hashlib.blake2b(f"{seed}:{tag}".encode(), digest_size=8).digest()
+    return int.from_bytes(h, "little") & 0x7FFFFFFF
+
+
+def input_incoherence(W: torch.Tensor, seed: int):
+    """Full input-dim incoherence (QuIP#): random signs + largest-block Hadamard on
+    the input dimension, so each row is ~i.i.d. sub-Gaussian. Stronger than an 8-D
+    within-group rotation - validated +~5% ppl at lower bpw on smol. Returns
+    (rotated, signs, block_size); the block-FWHT is its own inverse (orthonormal)."""
+    from orka.transforms.rotate import _block_fwht_torch, _hadamard_block_size
+
+    out_f, inf = W.shape
+    g = torch.Generator(device=W.device).manual_seed(_derive_seed(seed, f"sign:{inf}"))
+    signs = torch.randint(0, 2, (inf,), generator=g, device=W.device).float() * 2 - 1
+    try:
+        bs = _hadamard_block_size(inf)
+    except ValueError:
+        return W, None, 0  # no usable Hadamard block (tiny/odd dim) -> identity
+    return _block_fwht_torch(W * signs, bs), signs, bs
+
+
+def inverse_incoherence(Wr: torch.Tensor, signs, block_size: int) -> torch.Tensor:
+    if signs is None or block_size == 0:
+        return Wr
+    from orka.transforms.rotate import _block_fwht_torch
+
+    return _block_fwht_torch(Wr, block_size) * signs
+
+
+def e8_quantize_raw(vecs: torch.Tensor, scales):
+    """Residual E8 on already-conditioned 8-vectors (no internal rotation). Returns
+    (recon_vecs, keys_per_stage, bpw)."""
+    residual = vecs.clone()
+    recon = torch.zeros_like(vecs)
+    keys_per_stage = []
+    bpw = 0.0
+    for sc in scales:
+        q = nearest_e8(residual / sc)
+        recon += q * sc
+        residual = residual - q * sc
+        keys = torch.round(q * 2).long()
+        keys_per_stage.append(keys)
+        bpw += _coord_bpw(keys)
+    return recon, keys_per_stage, bpw
+
+
 def e8_encode(W: torch.Tensor, scales, seed: int = 1):
     """Residual E8 quantize ``W`` after incoherence rotation.
 

@@ -57,10 +57,18 @@ def compress_model(model_dir: str, out_path: str, scales=(0.05, 0.02), seed: int
     tot_bits = 0.0
     tot_w = 0
     pass_t = {}
+    from orka.quant.lattice import input_incoherence, e8_quantize_raw, _derive_seed
     for name, mod in model.named_modules():
         if _is_quantizable(name, mod):
             W = mod.weight.data.float()
-            _, keys, bpw = e8_encode(W, list(scales), seed=seed)
+            # seed keyed on the STORED tensor name (name+".weight") so reconstruct,
+            # which iterates those keys, regenerates the identical rotation.
+            Wr, _, _ = input_incoherence(W, _derive_seed(seed, name + ".weight"))
+            flat = Wr.reshape(-1)
+            pad = (-flat.numel()) % E8_DIM
+            if pad:
+                flat = torch.cat([flat, torch.zeros(pad, device=flat.device)])
+            _, keys, bpw = e8_quantize_raw(flat.reshape(-1, E8_DIM), list(scales))
             blob = _pack_keys(keys)
             meta["tensors"][name + ".weight"] = {
                 "shape": list(W.shape), "len": len(blob), "offset": offset, "bpw": bpw,
@@ -103,8 +111,8 @@ def reconstruct_state_dict(art_path: str, device: str = "cuda") -> dict:
     seed = meta["seed"]
     payload = (art / "payload.bin").read_bytes()
     from safetensors.torch import load_file
+    from orka.quant.lattice import input_incoherence, inverse_incoherence, _derive_seed
     sd = {k: v.to(device) for k, v in load_file(str(art / "passthrough.safetensors")).items()}
-    R = incoherence_rotation(seed, device)
     n_stages = len(scales)
     for name, info in meta["tensors"].items():
         shape = info["shape"]
@@ -117,8 +125,10 @@ def reconstruct_state_dict(art_path: str, device: str = "cuda") -> dict:
         for s in range(n_stages):
             pts = keys[s].float() / 2.0 * scales[s]
             recon_rot = pts if recon_rot is None else recon_rot + pts
-        W = (recon_rot @ R.t()).reshape(-1)[:numel].reshape(shape)
-        sd[name] = W.half()
+        # regenerate the same input-dim incoherence (signs+block) from seed+name to invert it
+        Wr = recon_rot.reshape(-1)[:numel].reshape(shape)
+        _, signs, bs = input_incoherence(torch.zeros(shape, device=device), _derive_seed(seed, name))
+        sd[name] = inverse_incoherence(Wr, signs, bs).half()
     for alias, source in meta.get("aliases", {}).items():
         if source in sd:
             sd[alias] = sd[source]

@@ -62,3 +62,25 @@ class LatticeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IncoherenceTest(unittest.TestCase):
+    def _dev(self):
+        return "cuda" if HAVE_CUDA else "cpu"
+
+    def test_input_incoherence_roundtrip_identity(self):
+        # forward then inverse must recover W exactly (orthonormal block-FWHT + signs)
+        from orka.quant.lattice import input_incoherence, inverse_incoherence
+        torch.manual_seed(0)
+        W = torch.randn(48, 576, device=self._dev()) * 0.1
+        Wr, signs, bs = input_incoherence(W, seed=123)
+        back = inverse_incoherence(Wr, signs, bs)
+        self.assertLess((W - back).abs().max().item(), 1e-4)
+
+    def test_incoherence_seed_deterministic(self):
+        from orka.quant.lattice import input_incoherence
+        torch.manual_seed(0)
+        W = torch.randn(16, 128, device=self._dev())
+        a, sa, _ = input_incoherence(W, seed=5)
+        b, sb, _ = input_incoherence(W, seed=5)
+        self.assertTrue(torch.equal(a, b) and torch.equal(sa, sb))
