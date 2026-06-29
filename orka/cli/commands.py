@@ -402,13 +402,17 @@ def cmd_autoquant(args: argparse.Namespace) -> int:
     if not sfs:
         print(f"no safetensors in {model}")
         return 1
+    import torch
     weights: dict[str, np.ndarray] = {}
     for sf in sfs:
-        with safe_open(str(sf), "np") as f:
+        # Read via torch, not numpy: numpy cannot represent bf16 (the dtype of most
+        # modern checkpoints) and safe_open("np") raises "data type 'bfloat16' not
+        # understood". torch reads bf16, then we upcast to fp32 numpy for analysis.
+        with safe_open(str(sf), "pt") as f:
             for k in f.keys():
                 t = f.get_tensor(k)
                 if t.ndim in (1, 2):
-                    weights[k] = t.astype("float32")
+                    weights[k] = t.to(torch.float32).numpy()
     llm_fn = None
     if not args.no_llm:
         from orka.autoquant.transport import make_llm_fn, NoLLMBackend

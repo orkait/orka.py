@@ -14,6 +14,26 @@ from __future__ import annotations
 
 from orka.pipeline.strategies.base import PostAssignmentStrategy
 
+# Block-OBS error compensation minimises the LINEAR output error E[(Wx - What x)^2].
+# That is the right proxy only when the layer's output feeds a (locally) linear path
+# - the standard GPTQ/QuIP setting for attention/MLP projections. It is INVALID for:
+#   * the output head (lm_head / embed_out): its output goes through softmax, so the
+#     LM loss is not the weight-reconstruction error - compensating it skews the logits
+#     (observed: degenerate repetition + WORSE perplexity than plain VQ).
+#   * Mamba / SSM projections (in_proj / out_proj inside a state-space recurrence):
+#     the output feeds a nonlinear scan + conv + gating, not a linear map, so the OBS
+#     correction over-fits the calibration covariance and injects error.
+# Plain VQ on these layers is fine; only the compensation step misbehaves. Verified on
+# FalconH1-0.5B: 4bpw plain ppl ratio 1.10, 4bpw+error-comp 1.50 (error-comp made it
+# worse) - skipping these layers restores the plain-VQ quality.
+_ERROR_COMP_SKIP_SUBSTRINGS = ("lm_head", "embed_out", "mamba")
+
+
+def _skip_error_comp(name: str) -> bool:
+    """True for output-head / SSM tensors where block-OBS's linear-downstream
+    assumption does not hold, so compensation should be skipped (plain VQ kept)."""
+    return any(s in name for s in _ERROR_COMP_SKIP_SUBSTRINGS)
+
 
 class ErrorCompensationStrategy(PostAssignmentStrategy):
     name = "error_compensation"
@@ -52,6 +72,8 @@ def maybe_compensate_candidate(
 
     if backend != "torch":
         return False
+    if _skip_error_comp(c["name"]):
+        return False  # output head / SSM layer: OBS proxy invalid, keep plain VQ
     if awq_activations is None or c["name"] not in awq_activations:
         return False
     if c.get("rotation", "none") != "none":
