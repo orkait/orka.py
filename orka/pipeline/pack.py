@@ -538,6 +538,21 @@ def pack_checkpoint(
     # Per-tensor processing (stage loop + strategies + manifest entry) and the stage-spec
     # resolver live in orka.pipeline.pack_pipeline. Bundle the resolved config into a
     # PackCtx and hand each candidate to process_streamed_per_tensor_candidate below.
+    # Resolve the error-comp skip set STRUCTURALLY (output head by vocab-width, recurrent/
+    # SSM by sibling state params) from a cheap header-only scan - robust across
+    # architectures, unlike name substrings. None when shapes are unavailable (e.g. a
+    # non-safetensors source) -> the strategy falls back to name-based detection.
+    error_comp_skip_names = None
+    if error_compensation:
+        from orka.core._checkpoint import _read_vocab_size, _tensor_shapes
+        from orka.quant import output_head_names, recurrent_block_names
+
+        _shapes = _tensor_shapes(source)
+        if _shapes:
+            error_comp_skip_names = output_head_names(
+                _shapes, _read_vocab_size(source)
+            ) | recurrent_block_names(_shapes.keys())
+
     ctx = PackCtx(
         backend=backend,
         n_stages=n_stages,
@@ -567,6 +582,7 @@ def pack_checkpoint(
         family_stages_resolved=family_stages_resolved,
         tensor_stages_resolved=tensor_stages_resolved,
         tensor_transforms_resolved=tensor_transforms_resolved,
+        error_comp_skip_names=error_comp_skip_names,
         manifest=manifest,
     )
 

@@ -76,6 +76,11 @@ class PackCtx:
     # allocation map. Honored only in per-tensor codebook mode; absent fields fall back
     # to the global ctx value, so the default (None) is byte-identical to prior behaviour.
     tensor_transforms_resolved: dict | None = None
+    # Names where error-comp block-OBS must be skipped, resolved STRUCTURALLY once by
+    # pack_checkpoint (output head by vocab-width + recurrent/SSM by sibling state params).
+    # None -> the strategy falls back to name-based detection (orka.quant.family). Default
+    # None keeps prior behaviour byte-identical when a caller builds PackCtx directly.
+    error_comp_skip_names: set | None = None
     total_index_bytes: int = 0
 
 
