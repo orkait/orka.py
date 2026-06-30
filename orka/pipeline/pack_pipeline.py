@@ -81,6 +81,10 @@ class PackCtx:
     # None -> the strategy falls back to name-based detection (orka.quant.family). Default
     # None keeps prior behaviour byte-identical when a caller builds PackCtx directly.
     error_comp_skip_names: set | None = None
+    # Vocab size (config else dominant 2-D output dim), used to identify vocab-width
+    # tensors (input embedding / output head) structurally for pillar protection. None
+    # when unresolvable -> callers fall back to name-based detection.
+    vocab_size: int | None = None
     total_index_bytes: int = 0
 
 
