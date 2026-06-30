@@ -24,8 +24,43 @@ import torch
 from orka.quant.lattice import E8_DIM, e8_encode, incoherence_rotation
 
 
-def _is_quantizable(name: str, module) -> bool:
-    return isinstance(module, torch.nn.Linear) and ("self_attn" in name or "mlp" in name)
+def _output_head_modules(model) -> set:
+    """The model's output-head module(s), detected STRUCTURALLY (no name match): HF's
+    ``get_output_embeddings()`` by identity, plus any Linear whose ``out_features`` equals
+    ``config.vocab_size`` (catches a tied / aliased head). These stay fp16 - quantizing the
+    logit projection explodes perplexity. Keying on identity/shape, not the string
+    'lm_head', is what makes this hold across architectures."""
+    heads = set()
+    try:
+        oe = model.get_output_embeddings()
+        if oe is not None:
+            heads.add(oe)
+    except Exception:
+        pass
+    vocab = getattr(getattr(model, "config", None), "vocab_size", None)
+    if vocab:
+        heads |= {m for m in model.modules()
+                  if isinstance(m, torch.nn.Linear) and m.out_features == vocab}
+    return heads
+
+
+def _is_quantizable(name: str, module, head_modules=frozenset()) -> bool:
+    """Any 2-D Linear except the output head. The old allow-list ("self_attn"/"mlp") was
+    written for a standard transformer and silently skipped everything an architecture
+    names differently - on a FalconH1 hybrid it covered only 9% of params (just self_attn),
+    leaving feed_forward (43%) and mamba in/out_proj (35%) in fp16 and reporting a fictional
+    ``avg_bpw_quantized`` over the 9%. Plain weight quant is valid for feed_forward and SSM
+    matrices alike (VQ packs them too); only the output head must stay fp16.
+
+    The head is identified structurally via ``head_modules`` (``_output_head_modules``);
+    the ``is_output_head`` name test is only a fallback for when that set is unavailable."""
+    from orka.quant import is_output_head
+
+    if not isinstance(module, torch.nn.Linear) or module.weight.dim() != 2:
+        return False
+    if module in head_modules:
+        return False
+    return not is_output_head(name)
 
 
 def _pack_keys(keys_per_stage) -> bytes:
@@ -41,7 +76,8 @@ def _pack_keys(keys_per_stage) -> bytes:
 
 
 def compress_model(model_dir: str, out_path: str, scales=(0.5, 0.2), seed: int = 1, device: str = "cuda") -> dict:
-    """Compress every attn/mlp Linear of an HF model with residual-E8 lattice.
+    """Compress every 2-D Linear (except the output head) of an HF model with residual-E8
+    lattice - attn, mlp/feed_forward, and mamba/SSM in_proj/out_proj alike.
 
     ``scales`` are RELATIVE per-stage coefficients of each tensor's rotated-weight
     std (the absolute scale = coeff * std is computed and stored per tensor). This
@@ -61,9 +97,10 @@ def compress_model(model_dir: str, out_path: str, scales=(0.5, 0.2), seed: int =
     tot_bits = 0.0
     tot_w = 0
     pass_t = {}
+    head_modules = _output_head_modules(model)  # structural: kept fp16 (passthrough)
     from orka.quant.lattice import input_incoherence, e8_quantize_raw, _derive_seed
     for name, mod in model.named_modules():
-        if _is_quantizable(name, mod):
+        if _is_quantizable(name, mod, head_modules):
             W = mod.weight.data.float()
             # seed keyed on the STORED tensor name (name+".weight") so reconstruct,
             # which iterates those keys, regenerates the identical rotation.
