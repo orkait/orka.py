@@ -34,7 +34,7 @@ const hStyle = "!bg-bd2 !border-0 !w-1.5 !h-1.5";
 
 const IoNode = memo(({ data }: NodeProps<Node<IoData>>) => (
   <div onClick={() => data.pick && data.onPick(data.pick)}
-    className={"w-[92px] rounded-xl border px-3 py-3 text-center bg-crit/[0.07] border-crit/30 text-crit " + (data.pick ? "cursor-pointer hover:bg-crit/15" : "")}>
+    className={"nodrag nopan w-[92px] rounded-xl border px-3 py-3 text-center bg-crit/[0.07] border-crit/30 text-crit " + (data.pick ? "cursor-pointer hover:bg-crit/15" : "")}>
     <Handle type="target" position={Position.Left} className={hStyle} />
     <div className="text-[13px] font-semibold">{data.label}</div>
     <div className="text-[10px] text-dim mt-0.5">{data.sub}</div>
@@ -55,7 +55,7 @@ const LayerNode = memo(({ data }: NodeProps<Node<LayerData>>) => (
       <div className="flex items-center gap-1">
         {data.count > 1 && <span className="text-[10px] font-semibold rounded px-1.5 py-0.5 bg-ac/15 text-ac mono">×{data.count}</span>}
         <button onClick={data.onExpand} title="expand block dataflow"
-          className="text-ac text-[12px] leading-none rounded px-1 hover:bg-ac/15">⤢</button>
+          className="nodrag nopan text-ac text-[12px] leading-none rounded px-1 hover:bg-ac/15">⤢</button>
       </div>
     </div>
     <div className="flex flex-col gap-1">
@@ -64,7 +64,7 @@ const LayerNode = memo(({ data }: NodeProps<Node<LayerData>>) => (
         return (
           <button key={m.name} onClick={() => data.onPick(m.name)}
             title={`${m.name}  ${m.shape.join("×")}  ${m.treatment}`}
-            className={"text-[10.5px] rounded-md px-2 py-1 text-left truncate border transition hover:brightness-125 " +
+            className={"nodrag nopan text-[10.5px] rounded-md px-2 py-1 text-left truncate border transition hover:brightness-125 " +
               treatClass(m.treatment) + (sel ? " outline outline-2 outline-ok" : "")}>
             {short(m.name)}
           </button>
@@ -82,7 +82,7 @@ const BlockNode = memo(({ data }: NodeProps<Node<BlockData>>) => (
     <Handle type="target" position={Position.Left} className={hStyle} />
     <div className="flex items-center justify-between px-3 py-2 border-b border-bd">
       <span className="text-[11px] font-semibold text-ac mono">{data.label} · forward dataflow</span>
-      <button onClick={data.onCollapse} title="collapse" className="text-mut text-[13px] leading-none rounded px-1 hover:bg-bd hover:text-tx">✕</button>
+      <button onClick={data.onCollapse} title="collapse" className="nodrag nopan text-mut text-[13px] leading-none rounded px-1 hover:bg-bd hover:text-tx">✕</button>
     </div>
     <Handle type="source" position={Position.Right} className={hStyle} />
   </div>
@@ -91,7 +91,7 @@ BlockNode.displayName = "BlockNode";
 
 const TensorNode = memo(({ data }: NodeProps<Node<TensorData>>) => (
   <div onClick={() => data.onPick(data.name)} title={data.name}
-    className={"w-[112px] rounded-lg border px-2 py-1.5 text-[10px] text-center cursor-pointer transition hover:brightness-125 " +
+    className={"nodrag nopan w-[112px] rounded-lg border px-2 py-1.5 text-[10px] text-center cursor-pointer transition hover:brightness-125 " +
       treatClass(data.treatment) + (data.selected ? " outline outline-2 outline-ok" : "")}>
     <Handle type="target" position={Position.Left} className={hStyle} />
     {short(data.name)}
@@ -217,7 +217,7 @@ export function ArchFlow() {
       colorMode="dark" fitView fitViewOptions={{ padding: 0.18 }}
       minZoom={0.1} maxZoom={1.8}
       nodesDraggable={false} nodesConnectable={false} elementsSelectable={false} edgesFocusable={false}
-      panOnScroll zoomOnScroll zIndexMode="auto"
+      zoomOnScroll panOnDrag zIndexMode="auto"
       proOptions={{ hideAttribution: true }}
     >
       <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#221F2E" />
