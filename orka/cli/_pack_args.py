@@ -56,6 +56,16 @@ def _add_pack_args(p):
         help="number of EM-AQ joint refinement passes after greedy RVQ. 0 disables.",
     )
     p.add_argument(
+        "--keep-head-fp16",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="keep the vocab-width output head + embedding fp16 (passthrough) instead of "
+             "quantizing them. 'auto' = on when the model ties word embeddings (then the "
+             "head IS the logit projection - quantizing it at low bpw explodes perplexity); "
+             "off for untied models, where the head quantizes fine. Trades ratio for "
+             "quality on tied / huge-vocab models.",
+    )
+    p.add_argument(
         "--no-slrq-salient",
         dest="slrq_salient",
         action="store_false",
