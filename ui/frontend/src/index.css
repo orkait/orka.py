@@ -50,3 +50,10 @@ body {
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb { background: var(--color-bd2); border-radius: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* React Flow disables node pointer-events when nodes are non-selectable/draggable, which
+   routes clicks to the pan layer instead of our in-node buttons. Re-enable them so the
+   tensor chips / expand / collapse / io nodes are clickable (panning still works on gaps). */
+.react-flow__node {
+  pointer-events: all !important;
+}
