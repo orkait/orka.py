@@ -145,6 +145,7 @@ def cmd_pack(args: argparse.Namespace) -> int:
             tensor_partition_index=args.tensor_partition_index,
             error_compensation=getattr(args, "error_compensation", False),
             mse_scale=getattr(args, "mse_scale", False),
+            keep_head_fp16=getattr(args, "keep_head_fp16", "auto"),
         )
         print(
             json.dumps(
@@ -240,6 +241,7 @@ def _run_sequential_pack(args: argparse.Namespace, source_file: Path) -> int:
         codebook_dtype=getattr(args, "codebook_dtype", "float16"),
         em_aq_passes=getattr(args, "em_aq_passes", 3),
         slrq_salient=getattr(args, "slrq_salient", True),
+        keep_head_fp16=getattr(args, "keep_head_fp16", "auto"),
         codebook_cache_dir=Path(args.codebook_cache).expanduser()
         if args.codebook_cache
         else None,
