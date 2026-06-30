@@ -33,6 +33,7 @@ class VQLinear(nn.Module):
         self.n_stages = n_stages
         self.group_size = group_size
         self.block_size = block_size
+        self._n1_ok = None  # cached cuda_planes.supported() result (N=1 hot path)
         # Per-stage codebook sizes (RVQ stages may use different cb sizes:
         # 256/896/4096 from the per-tensor allocation). int16 indices hold all.
         if isinstance(cb_sizes, int):
@@ -219,16 +220,24 @@ class VQLinear(nn.Module):
         # ~9x less HBM traffic). Opt-in; transparent fallback to the custom op below.
         xr = x.reshape(-1, K)
         if xr.shape[0] == 1 and xr.is_cuda:
-            try:
+            # supported() (~9 checks + a module lookup) is invariant per layer, but
+            # this runs once per token per layer (~19k/decode). Cache it so the N=1
+            # hot path is a single attribute read, not the full eligibility probe -
+            # the decode is dispatch-bound, so per-call CPU work directly costs util.
+            ok = self._n1_ok
+            if ok is None:
                 from orka.inference import cuda_planes
-                if cuda_planes.supported(self):
+                ok = self._n1_ok = bool(cuda_planes.supported(self))
+            if ok:
+                from orka.inference import cuda_planes
+                try:
                     y = cuda_planes.forward_n1(self, xr)
                     if y is not None:
                         if self.bias is not None:
                             y = y + self.bias
                         return y.reshape(*x.shape[:-1], M).to(x.dtype)
-            except Exception:
-                pass
+                except Exception:
+                    pass
         # Compile-traceable path: a single custom op (no graph break) for the uniform
         # 2-stage, correction-free case. torch.compile/CUDA-graphs can capture this.
         from orka.inference.plane_ops import plane_op_supported, vq_plane_linear
