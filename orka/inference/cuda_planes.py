@@ -113,8 +113,19 @@ def _get_module():
             functions=["decode_planes"],
             verbose=False,
         )
-    except Exception:
+    except Exception as exc:
         _MODULE = False
+        # Surface the failure once: without this kernel, N=1 decode silently falls to
+        # the slower Triton path (measured ~0.66x -> 0.47x). The usual cause is a
+        # missing `ninja` (torch's JIT extension builder needs it); installing it
+        # recovers the fast path. Warn so deployments don't run slow unknowingly.
+        import warnings
+        hint = " (install `ninja` - torch JIT needs it)" if "Ninja" in str(exc) else ""
+        warnings.warn(
+            f"orka: CUDA plane-decode kernel unavailable, using the slower fallback"
+            f"{hint}. Reason: {type(exc).__name__}: {str(exc)[:120]}",
+            RuntimeWarning, stacklevel=2,
+        )
         return None
     return _MODULE
 
