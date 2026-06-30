@@ -11,6 +11,17 @@ SHAPES = {
 }
 
 
+def test_moe_detected_from_config_not_just_names():
+    # granitemoe names experts 'block_sparse_moe.*' (no 'expert' substring) - must still
+    # detect MoE via the config's expert count.
+    a = build_architecture(
+        {"vocab_size": 32, "num_local_experts": 8},
+        {"model.layers.0.block_sparse_moe.input_linear.weight": (8, 32)},
+    )
+    assert a.flags["has_moe"] is True
+    assert a.arch_class == "moe"
+
+
 def test_flags_and_treatment():
     a = build_architecture(CONFIG, SHAPES)
     assert a.flags["tied_head"] is True

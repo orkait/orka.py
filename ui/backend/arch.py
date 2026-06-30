@@ -41,7 +41,12 @@ def build_architecture(config: dict, shapes: dict) -> Architecture:
         for f, p in sorted(fam_params.items(), key=lambda kv: -kv[1])
     ]
 
-    has_moe = any("expert" in n.lower() for n in shapes)
+    # MoE detection: prefer the config's expert count (robust) - names vary
+    # (Mixtral/Qwen use 'experts.N', granitemoe uses 'block_sparse_moe.*' with no
+    # 'expert' substring). Name check is only a fallback.
+    moe_experts = (config.get("num_local_experts") or config.get("num_experts")
+                   or config.get("n_routed_experts") or 0)
+    has_moe = bool(moe_experts) or any("expert" in n.lower() for n in shapes)
     has_ssm = len(profile.recurrent_names) > 0
     arch_class = "moe" if has_moe else ("hybrid" if has_ssm else "dense")
     flags = {"tied_head": tied, "has_moe": has_moe, "has_ssm": has_ssm}
