@@ -1,6 +1,12 @@
 """Quantization spec + family classification + payload size estimation."""
 
-from orka.quant.family import classify_tensor_family
+from orka.quant.family import (
+    classify_tensor_family,
+    is_output_head,
+    is_recurrent_block,
+    output_head_names,
+    recurrent_block_names,
+)
 from orka.quant.spec import (
     PayloadEstimate,
     QUANT_SPEC_MAX_PER_STAGE_BITS,

@@ -9,6 +9,44 @@ from typing import Iterable
 from orka.core._tensor import _tensor_numel, _tensor_shape
 
 
+def _tensor_shapes(path: Path) -> dict:
+    """Tensor name -> shape tuple, read CHEAPLY (safetensors header only - no tensor data
+    materialized). Used to resolve structural head/recurrent detection up front without a
+    second full checkpoint load. Returns {} for formats whose shapes need a real load
+    (.pt/.bin/.json) - callers then fall back to name-based detection."""
+    import struct
+
+    shapes: dict = {}
+    if path.is_dir():
+        for shard in sorted(path.glob("*.safetensors")):
+            shapes.update(_tensor_shapes(shard))
+        return shapes
+    if path.suffix.lower() != ".safetensors":
+        return shapes
+    try:
+        with path.open("rb") as f:
+            n = struct.unpack("<Q", f.read(8))[0]
+            header = json.loads(f.read(n))
+        for name, info in header.items():
+            if name != "__metadata__" and isinstance(info, dict) and "shape" in info:
+                shapes[name] = tuple(info["shape"])
+    except Exception:
+        return {}
+    return shapes
+
+
+def _read_vocab_size(source: Path) -> int | None:
+    """Best-effort vocab_size from a config.json beside the source (dir or file parent).
+    Only a refinement: output_head_names falls back to the dominant output dim without it."""
+    base = source if source.is_dir() else source.parent
+    try:
+        cfg = json.loads((base / "config.json").read_text())
+        v = cfg.get("vocab_size")
+        return int(v) if v else None
+    except Exception:
+        return None
+
+
 def _load_tensors(path: Path) -> Iterable[tuple[str, object]]:
     if path.is_dir():
         # Sharded Checkpoint Support
