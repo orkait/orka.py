@@ -80,11 +80,11 @@ class PackCtx:
     # pack_checkpoint (output head by vocab-width + recurrent/SSM by sibling state params).
     # None -> the strategy falls back to name-based detection (orka.quant.family). Default
     # None keeps prior behaviour byte-identical when a caller builds PackCtx directly.
-    error_comp_skip_names: set | None = None
-    # Vocab size (config else dominant 2-D output dim), used to identify vocab-width
-    # tensors (input embedding / output head) structurally for pillar protection. None
-    # when unresolvable -> callers fall back to name-based detection.
-    vocab_size: int | None = None
+    # The checkpoint's ArchProfile (orka.quant.ArchProfile): the single source of truth for
+    # per-tensor identification - which tensors are the output head / vocab-width embedding
+    # (pillar protection) and which are recurrent/SSM (error-comp skip). Resolved once by
+    # pack_checkpoint from the checkpoint shapes; structural-primary with name fallback.
+    arch_profile: object | None = None
     total_index_bytes: int = 0
 
 
