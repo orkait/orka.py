@@ -1,6 +1,6 @@
 import { create } from "zustand";
-import type { Journey } from "./types";
-import { analyze } from "./api";
+import type { Journey, TensorProbe } from "./types";
+import { analyze, probeTensor } from "./api";
 
 export type View = "map" | "tensor" | "td3" | "journey";
 
@@ -10,12 +10,15 @@ interface State {
   journey: Journey | null;
   view: View;
   selectedTensor: string | null;
+  probe: TensorProbe | null;
+  probeLoading: boolean;
+  probeError: string | null;
   loading: boolean;
   error: string | null;
   setModel: (m: string) => void;
   setBpw: (b: number) => void;
   setView: (v: View) => void;
-  selectTensor: (name: string | null) => void;
+  selectTensor: (name: string) => Promise<void>;
   run: () => Promise<void>;
 }
 
@@ -25,16 +28,27 @@ export const useStore = create<State>((set, get) => ({
   journey: null,
   view: "map",
   selectedTensor: null,
+  probe: null,
+  probeLoading: false,
+  probeError: null,
   loading: false,
   error: null,
   setModel: (m) => set({ model: m }),
   setBpw: (b) => set({ bpw: b }),
   setView: (v) => set({ view: v }),
-  selectTensor: (name) => set({ selectedTensor: name, view: "tensor" }),
+  selectTensor: async (name) => {
+    set({ selectedTensor: name, view: "tensor", probe: null, probeError: null, probeLoading: true });
+    try {
+      const p = await probeTensor(get().model, name);
+      if (get().selectedTensor === name) set({ probe: p, probeLoading: false });
+    } catch (e) {
+      if (get().selectedTensor === name) set({ probeError: (e as Error).message, probeLoading: false });
+    }
+  },
   run: async () => {
     const m = get().model.trim();
     if (!m) return;
-    set({ loading: true, error: null });
+    set({ loading: true, error: null, probe: null, selectedTensor: null });
     try {
       const j = await analyze(m, get().bpw);
       set({ journey: j, loading: false });

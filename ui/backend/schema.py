@@ -85,3 +85,34 @@ class Journey(BaseModel):
     pipeline: list[Stage]
     tricks: list[Trick]
     result: Result
+
+
+class RDPoint(BaseModel):
+    bpw: float
+    sqnr: float
+
+
+class TensorProbe(BaseModel):
+    """Deep-probe of one tensor, computed on a range-fetched weight sample (CPU, no GPU)."""
+    name: str
+    shape: list[int]
+    dtype: str
+    sampled_elems: int
+    std: float
+    mean: float
+    vmin: float
+    vmax: float
+    outlier_pct: float
+    distribution: list[float]
+    dist_range: list[float]
+    codebook_values: list[float]
+    rd: list[RDPoint]
+    utilization: list[float]
+    entropy_bits: float
+    entropy_max: float
+    weights_block: list[list[float]]
+    error_block: list[list[float]]
+    sqnr_3bpw: float
+    error_pct: float
+    vectors3d: list[list[float]]
+    centroids3d: list[list[float]]

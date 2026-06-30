@@ -15,8 +15,11 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from . import journey
+from .fetch import fetch_tensor_block
 from .jobs import JobQueue
 from .live import run_live
+from .probe import probe_tensor
+from .settings import HF_TOKEN
 
 _queue = JobQueue()
 
@@ -45,6 +48,26 @@ def analyze(model: str = Query(...), bpw: float = 3.0,
             raise HTTPException(403, "model gated/private - set HF_TOKEN")
         raise HTTPException(502, f"HF fetch failed ({code})")
     return j.model_dump()
+
+
+@app.get("/tensor")
+def tensor(model: str = Query(...), name: str = Query(...)):
+    """Deep-probe one tensor: range-fetch a weight sample, run VQ on it (CPU), return the
+    distribution / RD curve / codebook / error / 3D projection for the Tensor + 3D views."""
+    try:
+        flat, shape, dtype = fetch_tensor_block(model, name, token=HF_TOKEN)
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code if exc.response is not None else 502
+        if code == 404:
+            raise HTTPException(404, f"tensor or model not found: {name}")
+        if code in (401, 403):
+            raise HTTPException(403, "model gated/private - set HF_TOKEN")
+        raise HTTPException(502, f"HF fetch failed ({code})")
+    except KeyError:
+        raise HTTPException(404, f"tensor not in safetensors index: {name}")
+    p = probe_tensor(flat)
+    return {"name": name, "shape": list(shape), "dtype": dtype,
+            "sampled_elems": int(flat.size), **p}
 
 
 class PackRequest(BaseModel):

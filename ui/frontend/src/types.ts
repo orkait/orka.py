@@ -39,3 +39,23 @@ export interface Journey {
   tricks: Trick[];
   result: Result;
 }
+
+export interface RDPoint { bpw: number; sqnr: number; }
+export interface TensorProbe {
+  name: string;
+  shape: number[];
+  dtype: string;
+  sampled_elems: number;
+  std: number; mean: number; vmin: number; vmax: number; outlier_pct: number;
+  distribution: number[];
+  dist_range: number[];
+  codebook_values: number[];
+  rd: RDPoint[];
+  utilization: number[];
+  entropy_bits: number; entropy_max: number;
+  weights_block: number[][];
+  error_block: number[][];
+  sqnr_3bpw: number; error_pct: number;
+  vectors3d: number[][];
+  centroids3d: number[][];
+}
