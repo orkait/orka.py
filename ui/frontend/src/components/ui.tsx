@@ -32,11 +32,21 @@ export function Card({ title, right, children, className }: { title?: string; ri
   );
 }
 
-export function Switch({ on }: { on: boolean }) {
+export function Switch({ on, onClick }: { on: boolean; onClick?: () => void }) {
   return (
-    <span className={cn("w-8 h-[18px] rounded-full relative transition shrink-0", on ? "bg-ac" : "bg-[#26222F]")}>
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={!onClick}
+      aria-pressed={on}
+      className={cn(
+        "w-8 h-[18px] rounded-full relative transition shrink-0",
+        on ? "bg-ac" : "bg-[#26222F]",
+        onClick ? "cursor-pointer hover:brightness-110" : "cursor-default opacity-70",
+      )}
+    >
       <i className={cn("absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white transition-all", on ? "left-4" : "left-0.5")} />
-    </span>
+    </button>
   );
 }
 

@@ -8,6 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@xyflow/react": "^12.11.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.460.0",
     "react": "^18.3.1",
@@ -16,7 +17,10 @@
     "zustand": "^5.0.1"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "@tailwindcss/oxide"]
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "@tailwindcss/oxide"
+    ]
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",

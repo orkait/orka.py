@@ -11,8 +11,10 @@ async function getJSON<T>(path: string): Promise<T> {
   return r.json();
 }
 
-export const analyze = (model: string, bpw = 3.0) =>
-  getJSON<Journey>(`/analyze?model=${encodeURIComponent(model)}&bpw=${bpw}`);
+export const analyze = (model: string, bpw = 3.0, keepHead = true, lattice = false) =>
+  getJSON<Journey>(
+    `/analyze?model=${encodeURIComponent(model)}&bpw=${bpw}&keep_head=${keepHead}&lattice=${lattice}`,
+  );
 
 export const probeTensor = (model: string, name: string) =>
   getJSON<TensorProbe>(`/tensor?model=${encodeURIComponent(model)}&name=${encodeURIComponent(name)}`);
