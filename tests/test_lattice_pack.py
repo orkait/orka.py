@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 import torch
 
+from orka.quant import ArchProfile
 from orka.quant.lattice import e8_encode, E8_DIM
 from orka.quant.lattice_pack import _is_quantizable, _pack_keys
 
@@ -12,7 +13,10 @@ HAVE_CUDA = torch.cuda.is_available()
 class LatticeCoverageTest(unittest.TestCase):
     """_is_quantizable must cover any 2-D Linear except the output head, regardless of
     architecture. The old allow-list ('self_attn'/'mlp') silently skipped feed_forward
-    and mamba on a FalconH1 hybrid -> only 9% of params quantized, fictional bpw."""
+    and mamba on a FalconH1 hybrid -> only 9% of params quantized, fictional bpw. Head is
+    identified by the shared ArchProfile (name fallback here, since no live model)."""
+
+    PROFILE = ArchProfile.from_shapes({})  # name-fallback profile (no shapes)
 
     def test_covers_non_transformer_linears(self):
         lin = torch.nn.Linear(16, 16)
@@ -23,15 +27,15 @@ class LatticeCoverageTest(unittest.TestCase):
             "model.layers.0.mamba.in_proj",            # SSM linear (old check missed)
             "backbone.layers.3.mixer.out_proj",
         ):
-            self.assertTrue(_is_quantizable(name, lin), name)
+            self.assertTrue(_is_quantizable(name, lin, self.PROFILE), name)
 
     def test_excludes_output_head_and_non_linear(self):
         lin = torch.nn.Linear(16, 16)
-        self.assertFalse(_is_quantizable("lm_head", lin))
-        self.assertFalse(_is_quantizable("model.embed_out", lin))
+        self.assertFalse(_is_quantizable("lm_head", lin, self.PROFILE))
+        self.assertFalse(_is_quantizable("model.embed_out", lin, self.PROFILE))
         # non-Linear modules are never quantized (Conv1d / Embedding stay fp16)
-        self.assertFalse(_is_quantizable("model.layers.0.mamba.conv1d", torch.nn.Conv1d(8, 8, 4)))
-        self.assertFalse(_is_quantizable("model.embed_tokens", torch.nn.Embedding(32, 16)))
+        self.assertFalse(_is_quantizable("model.layers.0.mamba.conv1d", torch.nn.Conv1d(8, 8, 4), self.PROFILE))
+        self.assertFalse(_is_quantizable("model.embed_tokens", torch.nn.Embedding(32, 16), self.PROFILE))
 
 
 class LatticePackTest(unittest.TestCase):

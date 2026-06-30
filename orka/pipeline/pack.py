@@ -538,24 +538,14 @@ def pack_checkpoint(
     # Per-tensor processing (stage loop + strategies + manifest entry) and the stage-spec
     # resolver live in orka.pipeline.pack_pipeline. Bundle the resolved config into a
     # PackCtx and hand each candidate to process_streamed_per_tensor_candidate below.
-    # Structural metadata resolved once from a cheap header-only scan - robust across
-    # architectures, unlike name substrings. vocab_size (config else the dominant 2-D
-    # output dim) identifies vocab-width tensors (head / embedding); the error-comp skip
-    # set adds recurrent/SSM layers (by sibling state params). Both fall back to name-based
-    # detection when shapes are unavailable (e.g. a non-safetensors source).
+    # One ArchProfile for the whole pack: structural per-tensor identification (output head
+    # / vocab-width embedding / recurrent SSM), the single source of truth shared by pillar
+    # protection and the error-comp gate. Built from a cheap header-only shape scan -
+    # structural across architectures, name-fallback when shapes are unavailable.
     from orka.core._checkpoint import _read_vocab_size, _tensor_shapes
+    from orka.quant import ArchProfile
 
-    _shapes = _tensor_shapes(source)
-    vocab_size = _read_vocab_size(source) or (
-        max((s[0] for s in _shapes.values() if len(s) == 2), default=0) or None
-    )
-    error_comp_skip_names = None
-    if error_compensation and _shapes:
-        from orka.quant import output_head_names, recurrent_block_names
-
-        error_comp_skip_names = output_head_names(
-            _shapes, vocab_size
-        ) | recurrent_block_names(_shapes.keys())
+    arch_profile = ArchProfile.from_shapes(_tensor_shapes(source), _read_vocab_size(source))
 
     ctx = PackCtx(
         backend=backend,
@@ -586,8 +576,7 @@ def pack_checkpoint(
         family_stages_resolved=family_stages_resolved,
         tensor_stages_resolved=tensor_stages_resolved,
         tensor_transforms_resolved=tensor_transforms_resolved,
-        error_comp_skip_names=error_comp_skip_names,
-        vocab_size=vocab_size,
+        arch_profile=arch_profile,
         manifest=manifest,
     )
 
@@ -625,18 +614,10 @@ def pack_checkpoint(
         _report_progress(progress_file, f"Prepared {c['name']} {c['shape']} (Ready for Quantization)")
 
         # --- Frequency-Aware Pillar Protection (SmolLM/Qwen research branch) ---
-        # Vocab-width tensors (input embedding + output head) carry per-token rows, so
-        # they are the pillar-protection targets. Detect them STRUCTURALLY by shape
-        # (shape[0] == vocab_size), not by a hardcoded name list that breaks on any model
-        # naming its embedding differently; name list kept only as a fallback.
-        is_embedding = (
-            ctx.vocab_size is not None
-            and len(c["shape"]) == 2
-            and c["shape"][0] == ctx.vocab_size
-        ) or c["name"].lower() in (
-            "model.embed_tokens.weight", "gpt_neox.embed_in.weight",
-            "embed_out.weight", "lm_head.weight"
-        )
+        # Vocab-width tensors (input embedding + output head) carry per-token rows, so they
+        # are the pillar-protection targets. The shared ArchProfile identifies them
+        # structurally (out dim == vocab_size), not by a hardcoded name list.
+        is_embedding = ctx.arch_profile.is_output_head(c["name"], c["shape"])
         pillar_positions = None
         pillar_values = None
 
