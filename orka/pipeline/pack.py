@@ -344,6 +344,21 @@ def _prefetch_worker(
         prefetch_done.set()
 
 
+def _head_fp16_skip(mode: str, source: Path, head_names) -> set:
+    """Vocab-width head/embedding names to keep fp16 (passthrough), per ``mode``:
+    ``off`` none; ``on`` all of them; ``auto`` only when the model ties word embeddings -
+    then the head IS the logit projection and quantizing it at low bpw explodes perplexity
+    (measured: Qwen2.5-0.5B 3bpw ppl 2.10x incl-head vs 1.55x with head+embed fp16). Untied
+    models (auto -> off) keep quantizing the head, which is fine there (FalconH1)."""
+    from orka.core._checkpoint import _read_config_value
+
+    if mode == "off":
+        return set()
+    if mode == "on":
+        return set(head_names)
+    return set(head_names) if _read_config_value(source, "tie_word_embeddings", False) else set()
+
+
 def pack_checkpoint(
     source: Path,
     out_dir: Path,
@@ -379,6 +394,7 @@ def pack_checkpoint(
     tensor_partition_index: int | None = None,
     error_compensation: bool = False,
     mse_scale: bool = False,
+    keep_head_fp16: str = "auto",
 ) -> dict:
     validate_pack_args(
         codebook_mode=codebook_mode,
@@ -546,6 +562,14 @@ def pack_checkpoint(
     from orka.quant import ArchProfile
 
     arch_profile = ArchProfile.from_shapes(_tensor_shapes(source), _read_vocab_size(source))
+
+    # Keep the vocab-width head/embedding fp16 (passthrough) for tied / requested models -
+    # quantizing the logit projection at low bpw explodes ppl. skipped_tensors holds base
+    # names; the producer matches name with/without the .weight suffix.
+    head_skip = _head_fp16_skip(keep_head_fp16, source, arch_profile.head_names)
+    if head_skip:
+        skipped_tensors |= head_skip
+        _report_progress(progress_file, f"keep-head-fp16: passthrough {sorted(head_skip)}")
 
     ctx = PackCtx(
         backend=backend,
@@ -715,7 +739,14 @@ def pack_checkpoint(
         if isinstance(exc, (SystemRAMExceededError, CappedOutOfMemoryError)):
             raise type(exc)(f"prefetch worker: {exc}") from exc
         raise RuntimeError(f"prefetch worker failed: {exc}") from exc
-    if not candidates and streamed_tensor_count == 0 and tensor_partition_count is None:
+    if (
+        not candidates
+        and streamed_tensor_count == 0
+        and not _passthrough
+        and tensor_partition_count is None
+    ):
+        # 0 candidates is only an error when NOTHING was found; an all-passthrough result
+        # is valid (e.g. keep-head-fp16 on a block that is only the vocab-width head/embed).
         raise RuntimeError(
             "prefetch worker produced 0 candidates - no quantizable tensors found "
             "(check model path, tensor shapes, and device errors above)"

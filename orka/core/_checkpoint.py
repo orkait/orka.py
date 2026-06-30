@@ -35,16 +35,21 @@ def _tensor_shapes(path: Path) -> dict:
     return shapes
 
 
-def _read_vocab_size(source: Path) -> int | None:
-    """Best-effort vocab_size from a config.json beside the source (dir or file parent).
-    Only a refinement: output_head_names falls back to the dominant output dim without it."""
+def _read_config_value(source: Path, key: str, default=None):
+    """Best-effort read of one key from a config.json beside the source (dir, or the
+    parent of a file source). Returns ``default`` when absent / unreadable."""
     base = source if source.is_dir() else source.parent
     try:
-        cfg = json.loads((base / "config.json").read_text())
-        v = cfg.get("vocab_size")
-        return int(v) if v else None
+        return json.loads((base / "config.json").read_text()).get(key, default)
     except Exception:
-        return None
+        return default
+
+
+def _read_vocab_size(source: Path) -> int | None:
+    """Best-effort vocab_size from a config.json beside the source. Only a refinement:
+    output_head_names falls back to the dominant output dim without it."""
+    v = _read_config_value(source, "vocab_size")
+    return int(v) if v else None
 
 
 def _load_tensors(path: Path) -> Iterable[tuple[str, object]]:
