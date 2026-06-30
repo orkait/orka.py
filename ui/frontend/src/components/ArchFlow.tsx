@@ -26,7 +26,7 @@ function role(name: string): "attnIn" | "attnOut" | "mlpIn" | "mlpOut" | "other"
 
 type IoData = { label: string; sub: string; pick: string | null; onPick: (n: string) => void };
 type LayerData = { label: string; count: number; modules: ModuleEntry[]; selected: string | null; onPick: (n: string) => void; onExpand: () => void };
-type BlockData = { label: string; onCollapse: () => void };
+type BlockData = { label: string; from: number; to: number; depth: number; onDepth: (d: number) => void; onCollapse: () => void };
 type TensorData = { name: string; treatment: ModuleEntry["treatment"]; selected: boolean; onPick: (n: string) => void };
 type OpData = { label: string };
 
@@ -76,17 +76,32 @@ const LayerNode = memo(({ data }: NodeProps<Node<LayerData>>) => (
 ));
 LayerNode.displayName = "LayerNode";
 
-const BlockNode = memo(({ data }: NodeProps<Node<BlockData>>) => (
-  <div className="w-full h-full rounded-2xl border border-ac/40 bg-s3/60"
-    style={{ boxShadow: "0 0 40px -10px rgba(139,124,246,.3)" }}>
-    <Handle type="target" position={Position.Left} className={hStyle} />
-    <div className="flex items-center justify-between px-3 py-2 border-b border-bd">
-      <span className="text-[11px] font-semibold text-ac mono">{data.label} · forward dataflow</span>
-      <button onClick={data.onCollapse} title="collapse" className="nodrag nopan text-mut text-[13px] leading-none rounded px-1 hover:bg-bd hover:text-tx">✕</button>
+const stepBtn = "nodrag nopan w-5 h-5 rounded text-ac leading-none disabled:opacity-30 hover:bg-ac/15";
+const BlockNode = memo(({ data }: NodeProps<Node<BlockData>>) => {
+  const multi = data.to > data.from;
+  return (
+    <div className="w-full h-full rounded-2xl border border-ac/40 bg-s3/60"
+      style={{ boxShadow: "0 0 40px -10px rgba(139,124,246,.3)" }}>
+      <Handle type="target" position={Position.Left} className={hStyle} />
+      <div className="flex items-center gap-3 px-3 py-2 border-b border-bd">
+        <span className="text-[11px] font-semibold text-ac mono">{data.label} · forward dataflow</span>
+        {multi && (
+          <div className="nodrag nopan flex items-center gap-1.5 ml-1">
+            <button onClick={() => data.onDepth(data.depth - 1)} disabled={data.depth <= data.from} className={stepBtn}>◂</button>
+            <span className="mono text-[11px] text-tx w-10 text-center">L{data.depth}</span>
+            <button onClick={() => data.onDepth(data.depth + 1)} disabled={data.depth >= data.to} className={stepBtn}>▸</button>
+            <input type="range" min={data.from} max={data.to} value={data.depth}
+              onChange={(e) => data.onDepth(parseInt(e.target.value))}
+              className="nodrag nopan w-28 accent-ac" />
+            <span className="text-[10px] text-dim">inspecting layer</span>
+          </div>
+        )}
+        <button onClick={data.onCollapse} title="collapse" className="nodrag nopan ml-auto text-mut text-[13px] leading-none rounded px-1 hover:bg-bd hover:text-tx">✕</button>
+      </div>
+      <Handle type="source" position={Position.Right} className={hStyle} />
     </div>
-    <Handle type="source" position={Position.Right} className={hStyle} />
-  </div>
-));
+  );
+});
 BlockNode.displayName = "BlockNode";
 
 const TensorNode = memo(({ data }: NodeProps<Node<TensorData>>) => (
@@ -157,6 +172,7 @@ export function ArchFlow() {
   const selectedTensor = useStore((s) => s.selectedTensor);
   const selectTensor = useStore((s) => s.selectTensor);
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [depth, setDepth] = useState<number>(0);
 
   const { nodes, edges } = useMemo(() => {
     if (!journey) return { nodes: [] as Node[], edges: [] as Edge[] };
@@ -189,15 +205,17 @@ export function ArchFlow() {
       const id = `g${g.from}`;
       const count = g.to - g.from + 1;
       if (expanded === g.from) {
+        const d = Math.min(g.to, Math.max(g.from, depth));
+        const chosen = layers.find((l) => l.index === d) ?? { modules: g.modules };
         ns.push({ id, type: "block", position: { x, y: 0 }, draggable: false,
           style: { width: BLOCKW, height: BLOCKH },
-          data: { label: count > 1 ? `L${g.from}–L${g.to} (rep. L${g.from})` : `L${g.from}`, onCollapse: () => setExpanded(null) } });
-        const { ns: cn, es: ce } = blockChildren(id, g.modules, selectedTensor, selectTensor);
+          data: { label: count > 1 ? `L${g.from}–L${g.to}` : `L${g.from}`, from: g.from, to: g.to, depth: d, onDepth: setDepth, onCollapse: () => setExpanded(null) } });
+        const { ns: cn, es: ce } = blockChildren(id, chosen.modules, selectedTensor, selectTensor);
         ns.push(...cn); es.push(...ce);
         prevW = BLOCKW;
       } else {
         ns.push({ id, type: "layer", position: { x, y: BLOCKH / 2 - 90 }, draggable: false, style: { width: COLW },
-          data: { label: count > 1 ? `L${g.from}–L${g.to}` : `L${g.from}`, count, modules: g.modules, selected: selectedTensor, onPick: selectTensor, onExpand: () => setExpanded(g.from) } });
+          data: { label: count > 1 ? `L${g.from}–L${g.to}` : `L${g.from}`, count, modules: g.modules, selected: selectedTensor, onPick: selectTensor, onExpand: () => { setExpanded(g.from); setDepth(g.from); } } });
         prevW = COLW;
       }
       link(id);
@@ -209,7 +227,7 @@ export function ArchFlow() {
       data: { label: "head", sub: a.flags.tied_head ? "tied → embed" : "fp16", pick: head?.name ?? null, onPick: selectTensor } });
     link("head");
     return { nodes: ns, edges: es };
-  }, [journey, selectedTensor, selectTensor, expanded]);
+  }, [journey, selectedTensor, selectTensor, expanded, depth]);
 
   return (
     <ReactFlow
