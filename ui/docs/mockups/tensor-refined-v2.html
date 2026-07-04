@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orka — tensor (refined)</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#08070D;--s1:#0B0A11;--s2:#121019;--s3:#17141F;--bd:#221F2E;--bd2:#2E2A3C;
+  --tx:#ECEAF4;--mut:#9C96AE;--dim:#67627B;
+  --ac:#A99BFF;--ac2:#8B7CF6;--acd:#6D5FE0;--ok:#6EE7B7;--warn:#FBBF77;--crit:#F472A6;
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  /* 8px spacing scale */
+  --s-1:4px;--s-2:8px;--s-3:12px;--s-4:16px;--s-5:24px;--s-6:32px;--s-7:48px;
+}
+*{box-sizing:border-box}html,body{margin:0;height:100%}
+body{background:radial-gradient(130% 90% at 88% -12%,rgba(139,124,246,.09),transparent 58%),var(--bg);
+  color:var(--tx);font-family:Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased;font-size:14px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.dim{color:var(--dim)}.mut{color:var(--mut)}
+/* type system */
+.ov{font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);font-weight:600;line-height:1}
+.t-title{font-size:15px;font-weight:600;letter-spacing:-.01em;line-height:1.2}
+.t-disp{font-family:var(--mono);font-size:40px;font-weight:700;letter-spacing:-.03em;line-height:1}
+.t-cap{font-size:12.5px;color:var(--mut);line-height:1.55}
+.t-cap .k{color:var(--ac)} .t-cap.pos{color:var(--ok)} .t-cap.neg{color:var(--crit)}
+
+/* chrome */
+.top{display:flex;align-items:center;gap:var(--s-4);height:60px;padding:0 var(--s-5);
+  border-bottom:1px solid var(--bd);background:rgba(11,10,17,.6);backdrop-filter:blur(10px)}
+.brand{display:flex;align-items:center;gap:var(--s-2);font-weight:800;letter-spacing:-.02em}
+.logo{width:20px;height:20px;border-radius:6px;background:linear-gradient(135deg,var(--ac),var(--acd))}
+.bc{font-size:13px;color:var(--mut)}.bc b{color:var(--tx)}
+.tabs{margin-left:var(--s-5);display:flex;gap:2px;background:#100E18;border:1px solid var(--bd);border-radius:9px;padding:3px}
+.tab{font-size:12px;padding:6px 13px;border-radius:6px;color:var(--mut);cursor:pointer}
+.tab.on{background:var(--s3);color:var(--tx);border:1px solid var(--bd2)}
+.spacer{flex:1}
+.chip{font-size:12.5px;color:var(--mut)}.chip b{font-family:var(--mono);color:var(--tx);font-weight:600;margin-left:5px}
+
+.app{display:grid;grid-template-columns:260px 1fr;height:calc(100% - 60px)}
+.rail{background:var(--s1);border-right:1px solid var(--bd);padding:var(--s-5) var(--s-4);display:flex;flex-direction:column;gap:var(--s-5)}
+.rail .ov{margin-bottom:var(--s-3)}
+.field{margin-bottom:var(--s-4)}
+.field .lab{display:flex;justify-content:space-between;font-size:12.5px;color:var(--mut);margin-bottom:var(--s-2)}
+.field .lab b{font-family:var(--mono);color:var(--ac)}
+.slider{height:5px;background:#1C1928;border-radius:3px;position:relative}.slider>span{position:absolute;height:5px;border-radius:3px;background:var(--ac)}.slider>i{position:absolute;top:50%;width:13px;height:13px;border-radius:50%;background:#fff;transform:translate(-50%,-50%);box-shadow:var(--sh)}
+.tg{display:flex;justify-content:space-between;align-items:center;padding:10px 0;font-size:12.5px;border-top:1px solid var(--bd)}
+.tg:first-of-type{border-top:none}.tg .nm{color:var(--mut)}.tg .nm.off{color:var(--dim)}
+.switch{width:32px;height:18px;border-radius:10px;position:relative}.switch.on{background:var(--ac)}.switch.off{background:#26222F}.switch i{position:absolute;top:2px;width:14px;height:14px;border-radius:50%;background:#fff}.switch.on i{left:16px}.switch.off i{left:2px}
+.btn{margin-top:auto;font-weight:600;font-size:13px;color:#0B0A11;background:var(--ac);border:none;border-radius:9px;padding:12px;cursor:pointer}
+
+main{overflow:auto;padding:var(--s-5) var(--s-6)}
+/* identity */
+.id{display:flex;align-items:baseline;gap:var(--s-3);margin-bottom:var(--s-2)}
+.id .nm{font-family:var(--mono);font-size:18px;font-weight:600;letter-spacing:-.01em}
+.id .meta{font-size:12.5px;color:var(--dim)}
+.tagrow{display:flex;gap:var(--s-2);margin-bottom:var(--s-5)}
+.tag{font-size:11px;font-weight:500;border-radius:6px;padding:3px 9px;border:1px solid var(--bd)}
+.tag.q{background:rgba(169,155,255,.10);color:var(--ac);border-color:rgba(169,155,255,.22)}
+.tag.w{background:rgba(251,191,119,.09);color:var(--warn);border-color:rgba(251,191,119,.22)}
+
+/* key figures band */
+.figs{display:flex;gap:var(--s-6);padding:var(--s-5) 0;margin-bottom:var(--s-6);border-top:1px solid var(--bd);border-bottom:1px solid var(--bd)}
+.fig{display:flex;flex-direction:column;gap:var(--s-2)}
+.fig .v{font-family:var(--mono);font-size:34px;font-weight:700;letter-spacing:-.03em;line-height:1}
+.fig .l{font-size:11px;color:var(--dim);letter-spacing:.04em}
+
+/* content grid */
+.grid{display:grid;grid-template-columns:1.4fr 1fr;gap:var(--s-6) var(--s-7);align-items:start}
+.panel{display:flex;flex-direction:column;gap:var(--s-4)}
+.phead{display:flex;align-items:center;justify-content:space-between}
+.colorbar{display:flex;align-items:center;gap:var(--s-2);font-size:10px;color:var(--dim);font-family:var(--mono)}
+.colorbar .ramp{width:96px;height:8px;border-radius:3px}
+
+/* weight matrix with axes */
+.matwrap{display:grid;grid-template-columns:auto 1fr;grid-template-rows:1fr auto;gap:var(--s-2)}
+.yax{writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;color:var(--dim);font-family:var(--mono);align-self:center}
+.mat{display:grid;gap:1.5px;aspect-ratio:2.6/1}.mat>b{border-radius:1px}
+.xax{grid-column:2;display:flex;justify-content:space-between;font-size:10px;color:var(--dim);font-family:var(--mono)}
+
+/* distribution with codebook ticks */
+.distbox{position:relative}
+.hist{display:flex;align-items:flex-end;gap:2px;height:120px}
+.hist>b{flex:1;border-radius:2px 2px 0 0;background:var(--ac2)}
+.sigma{position:absolute;top:0;height:120px;background:rgba(169,155,255,.06);border-left:1px dashed rgba(169,155,255,.3);border-right:1px dashed rgba(169,155,255,.3)}
+.cbticks{display:flex;height:14px;margin-top:5px;position:relative}
+.cbticks>i{position:absolute;width:1px;height:8px;background:var(--ok);top:0}
+.axticks{display:flex;justify-content:space-between;font-size:10px;color:var(--dim);font-family:var(--mono);margin-top:2px}
+
+/* RD curve */
+.rd{height:150px}
+/* utilization */
+.util{display:flex;align-items:flex-end;gap:2px;height:80px}.util>b{flex:1;border-radius:2px 2px 0 0}
+</style>
+</head>
+<body>
+  <div class="top">
+    <span class="brand"><span class="logo"></span>orka</span>
+    <span class="tabs"><span class="tab">Map</span><span class="tab on">Tensor</span><span class="tab">3D</span><span class="tab">Journey</span></span>
+    <span class="spacer"></span>
+    <span class="chip">compression<b style="color:var(--ac)">4.34×</b></span>
+    <span class="chip">ppl<b>1.35</b></span>
+  </div>
+
+  <div class="app">
+    <aside class="rail">
+      <div><div class="ov">Trick Lab</div>
+        <div class="field"><div class="lab"><span>Bits / weight</span><b>3.0</b></div><div class="slider"><span style="width:55%"></span><i style="left:55%"></i></div></div>
+        <div class="field"><div class="lab"><span>RVQ stages</span><b>2</b></div><div class="slider"><span style="width:40%"></span><i style="left:40%"></i></div></div>
+      </div>
+      <div style="margin-top:calc(-1*var(--s-2))">
+        <div class="tg"><span class="nm">Keep head fp16</span><span class="switch on"><i></i></span></div>
+        <div class="tg"><span class="nm">Hessian weighting</span><span class="switch on"><i></i></span></div>
+        <div class="tg"><span class="nm">EM-AQ refine</span><span class="switch on"><i></i></span></div>
+        <div class="tg"><span class="nm off">Error-comp (LDLQ)</span><span class="switch off"><i></i></span></div>
+        <div class="tg"><span class="nm off">E8 lattice</span><span class="switch off"><i></i></span></div>
+      </div>
+      <button class="btn">Run for real — GPU</button>
+    </aside>
+
+    <main>
+      <div class="id"><span class="nm">layers.2.mlp.down_proj</span><span class="meta mono">512 × 2048 · 1.05M params · mlp</span></div>
+      <div class="tagrow"><span class="tag q">quantize · 3 bpw</span><span class="tag w">sensitivity high</span></div>
+
+      <!-- key figures -->
+      <div class="figs">
+        <div class="fig"><span class="v" style="color:var(--ac)">4.34<span style="font-size:18px">×</span></span><span class="l">COMPRESSION</span></div>
+        <div class="fig"><span class="v" style="color:var(--ok)">31<span style="font-size:18px"> dB</span></span><span class="l">SQNR</span></div>
+        <div class="fig"><span class="v">0.7<span style="font-size:18px">%</span></span><span class="l">MEAN ERROR</span></div>
+        <div class="fig"><span class="v mut">2.0<span style="font-size:18px"> MB</span></span><span class="l">→ 0.47 MB</span></div>
+      </div>
+
+      <div class="grid">
+        <!-- LEFT: weight matrix + error, aligned -->
+        <div class="panel">
+          <div class="phead"><span class="ov">Weight matrix · sampled window</span>
+            <span class="colorbar">−0.21<span class="ramp" style="background:linear-gradient(90deg,#5B54FF,#15131F,#A99BFF)"></span>+0.21</span></div>
+          <div class="matwrap">
+            <span class="yax">out 512</span>
+            <div class="mat" id="mat" style="grid-template-columns:repeat(40,1fr)"></div>
+            <div class="xax"><span>0</span><span>in →</span><span>2048</span></div>
+          </div>
+          <div class="t-cap pos">↳ real bytes (range-fetched, 8 KB). Column-coherent structure, tight <span class="mono">±0.21</span>; the few bright cells are the 0.4% outliers that dominate the residual below.</div>
+
+          <div class="phead" style="margin-top:var(--s-3)"><span class="ov">Quantization error · same window</span>
+            <span class="colorbar">low<span class="ramp" style="background:linear-gradient(90deg,#0D0B12,#7A2E50,#F472A6)"></span>high</span></div>
+          <div class="mat" id="err" style="grid-template-columns:repeat(40,1fr);aspect-ratio:5.2/1"></div>
+          <div class="t-cap pos">↳ error pools on the outlier columns, not spread — exactly where a per-tensor scale or outlier-keep would help.</div>
+        </div>
+
+        <!-- RIGHT: distribution + RD + utilization -->
+        <div class="panel">
+          <div class="phead"><span class="ov">Value distribution</span><span class="dim mono" style="font-size:11px">μ 0.000 · σ 0.018</span></div>
+          <div class="distbox">
+            <div class="sigma" style="left:34%;width:32%"></div>
+            <div class="hist" id="hist"></div>
+            <div class="cbticks" id="cbt"></div>
+            <div class="axticks"><span>−0.06</span><span>−σ</span><span>0</span><span>+σ</span><span>+0.06</span></div>
+          </div>
+          <div class="t-cap"><span style="color:var(--ok)">green ticks</span> = where the 256 codewords land. They pack densely inside <span class="k">±σ</span> (most mass) and thin out at the tails → tail weights round hardest.</div>
+
+          <div class="phead" style="margin-top:var(--s-4)"><span class="ov">Rate–distortion</span><span class="dim mono" style="font-size:11px">probe · 5 specs</span></div>
+          <svg class="rd" viewBox="0 0 200 120" preserveAspectRatio="none">
+            <g stroke="#221F2E" stroke-width=".7"><line x1="22" y1="20" x2="196" y2="20"/><line x1="22" y1="55" x2="196" y2="55"/><line x1="22" y1="90" x2="196" y2="90"/></g>
+            <line x1="22" y1="8" x2="22" y2="104" stroke="#2E2A3C"/><line x1="22" y1="104" x2="196" y2="104" stroke="#2E2A3C"/>
+            <polyline points="30,18 75,44 120,70 165,88 192,96" fill="none" stroke="var(--ac)" stroke-width="2.5" stroke-linecap="round"/>
+            <circle cx="30" cy="18" r="3" fill="#3A3550"/><circle cx="75" cy="44" r="3" fill="#3A3550"/>
+            <circle cx="120" cy="70" r="5" fill="var(--ok)" stroke="#08070D" stroke-width="1.5"/>
+            <circle cx="165" cy="88" r="3" fill="#3A3550"/><circle cx="192" cy="96" r="3" fill="#3A3550"/>
+            <text x="116" y="64" fill="var(--ok)" font-size="8" font-family="JetBrains Mono">3.0</text>
+          </svg>
+          <div class="axticks" style="padding-left:22px"><span>2.0</span><span>2.5</span><span>3.0 bpw</span><span>3.5</span><span>4.0</span></div>
+          <div class="t-cap pos">↳ distortion flattens after 3 bpw — the chosen knee. Below it (2.5) distortion spikes; above adds bits for little gain.</div>
+
+          <div class="phead" style="margin-top:var(--s-4)"><span class="ov">Codebook utilization</span><span class="dim mono" style="font-size:11px">entropy 11.7 / 12 b</span></div>
+          <div class="util" id="util"></div>
+          <div class="t-cap neg">↳ indices near-uniform (well-fit VQ) → entropy ≈ max → ANS / zip can't shrink them. The codebook is the only compressible part.</div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+<script>
+const RAMP=['#5B54FF','#473F9E','#2C2748','#1F1B30','#15131F','#2C2748','#473F9E','#7A6CE8','#A99BFF'];
+// weight matrix: column-coherent (not pure noise) + sparse outliers
+function mat(id,cols,rows){const e=document.getElementById(id);let h='';const colbias=[];for(let c=0;c<cols;c++)colbias[c]=(Math.random()-0.5)*1.2;for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){let v=colbias[c]+(Math.random()-0.5)*0.7;if(Math.random()>0.985)v=(Math.random()>0.5?1:-1)*1.6;const idx=Math.max(0,Math.min(8,Math.round((v/1.8+0.5)*8)));h+='<b style="aspect-ratio:1;background:'+RAMP[idx]+'"></b>';}e.innerHTML=h;}
+mat('mat',40,15);
+// error: aligned, pools on certain columns
+(()=>{const e=document.getElementById('err');const cols=40,rows=8;const hot=[7,8,23,31];let h='';for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){const isHot=hot.includes(c);const r2=Math.random();const col=isHot&&r2>0.4?'#F472A6':isHot?'#7A2E50':r2>0.93?'#3A1828':'#0D0B12';h+='<b style="aspect-ratio:1;background:'+col+'"></b>';}e.innerHTML=h;})();
+// histogram gaussian
+(()=>{const e=document.getElementById('hist');const N=33;let h='';for(let i=0;i<N;i++){const x=(i-N/2)/(N/5);const y=Math.exp(-x*x/2);h+='<b style="height:'+(Math.max(3,y*100))+'%"></b>';}e.innerHTML=h;})();
+// codebook centroid ticks: dense near 0, sparse at tails
+(()=>{const e=document.getElementById('cbt');let h='';for(let i=0;i<48;i++){const u=Math.random()*2-1;const pos=50+Math.sign(u)*Math.pow(Math.abs(u),1.7)*50;h+='<i style="left:'+pos+'%"></i>';}e.innerHTML=h;})();
+// utilization descending-ish, near-uniform
+(()=>{const e=document.getElementById('util');let h='';for(let i=0;i<26;i++){const v=92-i*1.4+(Math.random()*8-4);h+='<b style="height:'+v+'%;background:'+(i<13?'#A99BFF':i<20?'#6D5FE0':'#3A3550')+'"></b>';}e.innerHTML=h;})();
+</script>
+</body>
+</html>
