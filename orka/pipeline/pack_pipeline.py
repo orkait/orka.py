@@ -170,10 +170,16 @@ def _quantize_and_record_stage(
         c_group_size = c["group_size"]
 
     if backend == "torch":
-        c["vectors_orig"] = _onload(c["vectors_orig"], resolved_device)
-        v_res = _onload(v_res, resolved_device)
-        if c["decoded_sum"] is not None:
-            c["decoded_sum"] = _onload(c["decoded_sum"], resolved_device)
+        # Giant tensors (vocab head/embed: >20M vectors, ~3x4GB) can't hold three full
+        # copies on GPU. Keep them CPU-resident: the tiled assign (_torch_assign) moves
+        # only chunks to the device, and decode (cb[idx] gather) + residual subtract run
+        # on CPU - both elementwise, so bytes are identical. Normal tensors onload as before.
+        from orka.codebook._kmeans_torch import _LARGE_ASSIGN_ROWS
+        if int(v_res.shape[0]) <= _LARGE_ASSIGN_ROWS:
+            c["vectors_orig"] = _onload(c["vectors_orig"], resolved_device)
+            v_res = _onload(v_res, resolved_device)
+            if c["decoded_sum"] is not None:
+                c["decoded_sum"] = _onload(c["decoded_sum"], resolved_device)
 
     if shared_cb is not None:
         # Shared codebooks are learned unweighted; assign unweighted too.

@@ -323,7 +323,9 @@ def build_allocation(
                 return None
             extra = _bits(t, nxt) - _bits(t, cur)
             gain = rows[t]["distortions"][cur] - rows[t]["distortions"][nxt]
-            return None if gain <= 0 else (-(gain / extra), t, nxt, extra)
+            # extra <= 0 means the next spec costs no more bits (duplicate-rate
+            # candidates) - not a real upgrade, and a 0 would divide-by-zero.
+            return None if (gain <= 0 or extra <= 0) else (-(gain / extra), t, nxt, extra)
         heap = [s for t in range(len(rows)) if (s := step(t, choice[t])) is not None]
         heapq.heapify(heap)
         while heap:

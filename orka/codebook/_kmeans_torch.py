@@ -116,6 +116,13 @@ def _kmeans_pp_init_torch(
 
 
 
+# Above this row count the full [N,d] rows + [N,d] sel can't sit on GPU (the 1B-param
+# vocab head is ~127M vectors -> 3x4GB). Only such giants take the tiled path below; every
+# normal tensor and every Lloyd-on-sample assign stays on the exact original full path, so
+# their bytes are unchanged (oracle-safe).
+_LARGE_ASSIGN_ROWS = 20_000_000
+
+
 def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_norm_sq=None, vector_weights=None, keep_device=False):
     try:
         import torch
@@ -124,16 +131,41 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_nor
     from orka.inference._assign_kernel import assign as _fused_assign
 
     resolved = _resolve_torch_device(device)
-    rows = _torch_float32_matrix(vectors, device).float()
     centroids = _torch_float32_matrix(codebook, device).float()
 
     # Hessian / importance weighting: weighted L2 == plain L2 on sqrt(w)-scaled vectors.
+    sqrt_W = None
     if vector_weights is not None:
         sqrt_W = torch.sqrt(torch.as_tensor(vector_weights, dtype=torch.float32, device=resolved))
-        rows = rows * sqrt_W
         centroids = centroids * sqrt_W
 
-    width = int(rows.shape[1])
+    n_rows = int(vectors.shape[0])
+    width = int(centroids.shape[1])
+
+    # Tiled path for giant tensors: keep ``vectors`` wherever it lives (typ. CPU for a
+    # giant) and move only a ``chunk_size`` slice to the device per step. Nearest-centroid
+    # argmin is per-row independent, so the returned indices are byte-identical to the full
+    # path; only mse sums in chunk order (and the quantize caller discards mse). Gated on a
+    # large row count so nothing normal changes.
+    if n_rows > _LARGE_ASSIGN_ROWS:
+        idx_out = torch.empty(n_rows, dtype=torch.int64, device=(resolved if keep_device else "cpu"))
+        sse = 0.0
+        with torch.no_grad():
+            for i in range(0, n_rows, chunk_size):
+                ch = _torch_float32_matrix(vectors[i:i + chunk_size], device).float()
+                if sqrt_W is not None:
+                    ch = ch * sqrt_W
+                cidx = _fused_assign(ch, centroids)
+                sel = centroids.index_select(0, cidx)
+                sse += float(((ch - sel) ** 2).sum().item())
+                idx_out[i:i + ch.shape[0]] = cidx if keep_device else cidx.cpu()
+                del ch, sel, cidx
+        return idx_out, (sse / (n_rows * width) if n_rows else 0.0)
+
+    rows = _torch_float32_matrix(vectors, device).float()
+    if sqrt_W is not None:
+        rows = rows * sqrt_W
+
     with torch.no_grad():
         # Fused dist+argmin Triton kernel on CUDA (~4x the chunked-addmm path, never
         # materializes the [N,k] matrix so it can't OOM at large k); addmm fallback on
