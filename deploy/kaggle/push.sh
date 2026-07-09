@@ -36,8 +36,6 @@ mkdir -p "$TMP_DEPLOY"
 cp "$SCRIPT_DIR/orka_smol_kaggle.py" "$TMP_DEPLOY/orka.py"
 cp "$SCRIPT_DIR/kernel-metadata.json" "$TMP_DEPLOY/"
 
-# Fix metadata to point to local orka.py
-sed -i 's|../../orka.py|orka.py|g' "$TMP_DEPLOY/kernel-metadata.json"
 
 cd "$TMP_DEPLOY"
 kaggle kernels push --path .

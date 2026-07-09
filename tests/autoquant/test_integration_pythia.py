@@ -1,3 +1,4 @@
+import sys
 import os
 import json
 import subprocess
@@ -11,7 +12,7 @@ BASE = glob.glob(os.path.expanduser(
 @pytest.mark.skipif(not BASE, reason="pythia-160m not cached")
 def test_autoquant_derives_int8_head(tmp_path):
     out = tmp_path / "alloc.json"
-    r = subprocess.run([".venv/bin/python", "orka.py", "autoquant", BASE[0],
+    r = subprocess.run([sys.executable, "-m", "orka", "autoquant", BASE[0],
                         "--objective", "min-bits", "--no-llm", "--out", str(out)],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr

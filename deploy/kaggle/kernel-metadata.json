@@ -1,7 +1,7 @@
 {
   "id": "superkaiii/orka-optimized-model-pack",
   "title": "Orka Optimized Model Pack",
-  "code_file": "../../orka.py",
+  "code_file": "orka.py",
   "language": "python",
   "kernel_type": "script",
   "is_private": true,
