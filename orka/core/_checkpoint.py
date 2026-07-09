@@ -54,9 +54,8 @@ def _read_vocab_size(source: Path) -> int | None:
 
 def _load_tensors(path: Path) -> Iterable[tuple[str, object]]:
     if path.is_dir():
-        # Sharded Checkpoint Support
         print(f"INFO: Loading sharded checkpoint from directory: {path}", flush=True)
-        # Priority: Safetensors -> Torch -> Bin
+        # First matching pattern wins: safetensors, then torch, then bin.
         patterns = ["*.safetensors", "*.pt", "*.pth", "*.bin"]
         found_any = False
         for pattern in patterns:
@@ -129,8 +128,7 @@ def inspect_checkpoint(path: Path) -> dict:
             continue
         total_params += numel
 
-        # Candidate logic: Dense weights only.
-        # Exclude biases, norms, and architectural sidecars.
+        # Dense weights only: biases, norms and architectural sidecars are excluded below.
         is_candidate = len(shape) >= 2
         name_lower = name.lower()
         if any(

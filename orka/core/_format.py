@@ -409,7 +409,6 @@ def _write_passthrough_tensors(path: Path, tensors: dict) -> None:
             return
         except Exception as exc:
             raise RuntimeError(f"failed to write passthrough tensors (torch): {exc}") from exc
-    # Pure numpy path
     import numpy as np
     arrays = {name: np.asarray(t) for name, t in tensors.items()}
     try:
@@ -472,7 +471,6 @@ def _write_pillars(idx_path: Path, val_path: Path, positions, values) -> None:
         raise RuntimeError("pillar writing requires numpy") from exc
     idx_path.parent.mkdir(parents=True, exist_ok=True)
     val_arr = np.asarray(values, dtype=np.float32)
-    # Check for FP16 overflow just in case
     if np.abs(val_arr).max() > 65504.0:
         val_arr = np.clip(val_arr, -65504.0, 65504.0)
     np.asarray(positions, dtype="<u4").tofile(str(idx_path))
