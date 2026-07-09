@@ -49,7 +49,6 @@ def find_semantic_hubs(embeddings: np.ndarray, threshold: float = 0.999):
     """Phase 3: Finding semantic neighborhoods (Concept Merging hubs)."""
     import torch
     
-    # Move to GPU if possible for massive matrix math
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"  Clustering {embeddings.shape[0]} vectors on {device}...", flush=True)
     
@@ -57,8 +56,6 @@ def find_semantic_hubs(embeddings: np.ndarray, threshold: float = 0.999):
     # Normalize for cosine similarity
     t_emb = torch.nn.functional.normalize(t_emb, p=2, dim=1)
     
-    # We will find the most unique concepts first
-    # This is a simplified Concept Merging discovery
     hubs = []
     processed = torch.zeros(t_emb.shape[0], dtype=torch.bool, device=device)
     
@@ -103,7 +100,6 @@ def profile_architecture(model_dir: Path) -> dict:
     num_layers = cfg.get("num_hidden_layers", 0)
     hidden_size = cfg.get("hidden_size", 0)
     
-    # Detect MoE
     num_experts = cfg.get("num_experts", cfg.get("n_routed_experts", 0))
     is_moe = num_experts > 0
     
@@ -127,12 +123,10 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
     model_input = args.model_dir
     model_dir = Path(model_input)
     
-    # 1. Automatic Download/Resolve
     if not model_dir.exists():
         print(f"--- Resolving {model_input} from HF Hub ---", flush=True)
         try:
             from huggingface_hub import snapshot_download
-            # Download to default HF cache and return path
             model_dir = Path(snapshot_download(model_input))
         except Exception as exc:
             print(f"Error downloading model: {exc}")
@@ -191,19 +185,17 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
     Path(args.out).write_text(json.dumps(analysis, indent=2) + "\n")
     print(f"Analysis saved to {args.out}", flush=True)
 
-    # NEW: Automatic Sensitivity Map Generation for Orka Pack
+    # Sensitivity map consumed by `orka pack --sensitivity-map`.
     if getattr(args, "save_sensitivity_map", None):
         print("--- Generating Sensitivity Map for Pack ---", flush=True)
-        # We define pillars as:
-        # 1. Master tokens of semantic hubs (The unique concepts)
-        # 2. Top 500 productive morphological roots
+        # Pillars are the master tokens of semantic hubs plus the most productive
+        # morphological roots.
         top_tokens = set()
         for hub in hubs:
             top_tokens.add(hub["master_tid"])
         
-        # Add tokens that ARE roots themselves (terminating at a productive node)
-        # This is simplified: we take the first 1000 IDs for now as a heuristic
-        # In Phase 4 we will do exact mapping.
+        # Roots themselves (terminating at a productive node). The first 1000 IDs
+        # stand in for exact root mapping.
         for tid in range(min(1000, vocab_size)):
             top_tokens.add(tid)
 
@@ -235,8 +227,7 @@ def cmd_sem_map(args: argparse.Namespace) -> int:
     # link_table: child_tid -> {parent_tid, relationship_type, confidence}
     link_table = {}
     
-    # 1. Map Geometric Hubs (The 'Synonyms')
-    # These are high-confidence mathematical redundancies.
+    # Geometric hubs: high-confidence mathematical redundancies.
     for hub in hubs:
         master = hub["master_tid"]
         for member in hub["member_tids"]:
@@ -249,9 +240,8 @@ def cmd_sem_map(args: argparse.Namespace) -> int:
             
     print(f"  Mapped {len(link_table)} geometric synonyms.", flush=True)
     
-    # 2. Map Morphological Variations (Placeholder for Phase 4 evolution)
-    # Full morphological mapping requires the tokenizer in this step to match strings to roots.
-    # For now, we utilize the geometric hubs which give the highest compression win.
+    # Morphological mapping would need the tokenizer here to match strings to roots.
+    # Geometric hubs alone give the largest compression win.
     
     map_result = {
         "model": analysis["model"],

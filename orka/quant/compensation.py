@@ -64,8 +64,7 @@ def compensated_assign(
     stage_indices = [
         torch.empty(rows, gpr, dtype=torch.int64, device=device) for _ in codebooks
     ]
-    # Hoist the codebook device transfer out of the per-group loop: codebooks are
-    # frozen, so this ran gpr*n_stages redundant .to(device) copies before.
+    # Codebooks are frozen, so the device transfer hoists out of the per-group loop.
     codebooks_dev = [cb.to(device) for cb in codebooks]
 
     for g in range(gpr):

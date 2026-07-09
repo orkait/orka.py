@@ -11,7 +11,6 @@ from __future__ import annotations
 def classify_tensor_family(name: str) -> str:
     lowered = name.lower()
 
-    # 1. Linguistic/LAVA Pillars & Output Heads
     if (
         any(marker in lowered for marker in ("embed", "embedding", "wte", "wpe", "lm_head", "embed_out"))
         or lowered == "output.weight"
@@ -19,7 +18,7 @@ def classify_tensor_family(name: str) -> str:
     ):
         return "embedding"
 
-    # 2. MoE Specialized Structure (Checked before generic MLP)
+    # MoE structure must be matched before the generic MLP markers below.
     if any(marker in lowered for marker in ("shared_expert", "sharedexpert")):
         return "shared_expert"
 
@@ -49,7 +48,6 @@ def classify_tensor_family(name: str) -> str:
     if any(marker in lowered for marker in (".gate", ".router", ".gating")):
         return "router"
 
-    # 3. Standard Logic Components
     if any(
         marker in lowered
         for marker in (
