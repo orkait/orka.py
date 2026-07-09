@@ -24,7 +24,11 @@ The module layout is deliberately left alone. A codebase audit scored the archit
 | Prevent future secret commits | Changing any packed byte |
 | Remove low-value comments | Removing measured-fact comments |
 
-**Iron constraint:** no change in this spec may alter the bytes written by `pack_checkpoint`. Comments, packaging, and CI are byte-inert by construction. `orka/config.py` (WS4) touches only env-var reads, which do not participate in the pack format.
+**Iron constraint:** no change in this spec may alter the artifact structure produced by `pack_checkpoint`, as measured by `golden_oracle.py`.
+
+Note the guarantee is structural, not byte-for-byte. Raw codebook bytes are non-deterministic under threaded BLAS, so the oracle hashes a config-derived fingerprint of the manifest (per-tensor `group_size`, `shape`, `n_stages`, `index_bits`, `normalization`, outlier/salient presence, `scale_count`) across 12 pack configurations, and combines them into one hash: `d73e0b19fc38f099`.
+
+Comments, packaging, and CI cannot affect that hash by construction. `orka/config.py` (WS4) touches only env-var reads, which do not participate in the pack format.
 
 ## Workstreams
 
@@ -63,8 +67,9 @@ The token must be treated as compromised regardless of the rewrite: it has been 
 
 The highest-value item. Today the format's only guard is a script outside the repository.
 
-- Move `golden_oracle.py` into `tests/test_golden_oracle.py`.
-- Pack a small committed fixture and assert the artifact hash equals `d73e0b19fc38f099`.
+- Move `golden_oracle.py` into `tests/test_golden_oracle.py`, dropping its hardcoded `sys.path.insert`.
+- No fixture is required: the oracle synthesizes a five-tensor multi-family model from a seeded RNG.
+- Assert the combined structural hash across all 12 configurations equals `d73e0b19fc38f099`, and assert each configuration's individual hash so a failure names the branch that moved.
 - Run it in CI on the `numpy` backend, which is the deterministic reference path.
 - Document in `CONTRIBUTING.md`: any change touching `core/_format.py`, `pipeline/`, `codebook/`, or `transforms/` must keep this test green, or must deliberately bump the hash with justification.
 
@@ -125,7 +130,7 @@ Rationale: the history rewrite must be the final mutation. Rewriting before the 
 | No secrets in any ref | `gitleaks detect --no-banner` | 0 findings |
 | Package installs clean | `pip install -e '.[dev]'` then `orka --help` | usage printed, no `sys.path` hack |
 | Numpy path works without torch | `pip install -e .` in a torch-free venv, `orka pack --backend numpy ...` | succeeds |
-| Bytes unchanged | `pytest tests/test_golden_oracle.py` | hash `d73e0b19fc38f099` |
+| Artifact structure unchanged | `pytest tests/test_golden_oracle.py` | combined hash `d73e0b19fc38f099` |
 | Full suite | `pytest` (38 test files) | green |
 | Lint | `ruff check orka tests` | clean |
 | No measured facts lost | `git diff` review of comment trim | every deleted line is narration, scar tissue, or a rewritten invariant |
