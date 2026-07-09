@@ -10,7 +10,7 @@ A residual-vector-quantization compressor for transformer weights: fit per-tenso
 [![torch](https://img.shields.io/badge/PyTorch-optional-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
 [![format](https://img.shields.io/badge/format-RVQ_+_12--bit_bit--planes-4f8ff7)](#-how-it-works)
 [![bits](https://img.shields.io/badge/weights-~2_bits-7c3aed)](#-honest-benchmarks)
-[![ci](https://github.com/orkait/orka-compiler/actions/workflows/ci.yml/badge.svg)](https://github.com/orkait/orka-compiler/actions/workflows/ci.yml)
+[![ci](https://github.com/orkait/orka.py/actions/workflows/ci.yml/badge.svg)](https://github.com/orkait/orka.py/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache_2.0-green)](#-license)
 
 </div>
