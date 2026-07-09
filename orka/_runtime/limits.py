@@ -28,7 +28,7 @@ except ImportError:
 
 # Never let RAM_CAP exceed this regardless of user input. Calibrated for 32GB
 # systems: leaves 5GB for kernel + UI + swap-pressure margin. Bound at import;
-# override via ORKA_HARD_CEILING_GB.
+# raise via ORKA_HARD_CEILING_GB on larger machines (e.g. 64GB).
 HARD_CEILING_GB = config.hard_ceiling_gb()
 
 PREFLIGHT_MIN_AVAIL_GB = config.preflight_min_avail_gb()
