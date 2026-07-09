@@ -241,7 +241,7 @@ def _unrotate_flat(flat, shape, rotation: str, seed: int):
     arr = np.asarray(flat, dtype=np.float32)[: rows * cols].reshape(rows, cols)
     strategy = ROTATION_REGISTRY.get(rotation)
     if strategy is None:
-        # legacy fallback: anything not "hadamard" inverted as orthogonal (matches prior else-branch)
+        # Anything other than "hadamard" inverts as orthogonal.
         strategy = ROTATION_REGISTRY["orthogonal"]
     unrotated = strategy.unrotate(arr, cols=cols, seed=seed)
     return unrotated.reshape(-1)
