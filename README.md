@@ -26,7 +26,7 @@ That's the whole trick. It is not a new number format, not a kernel-fusion mirac
 ## ⚡ Quick start
 
 ```bash
-# core install: numpy only. The numpy backend is the deterministic reference path.
+# core install: no torch. The numpy backend is the deterministic reference path.
 pip install orka-compiler
 
 # GPU packing and HF model loading are extras

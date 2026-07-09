@@ -21,11 +21,20 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = ["numpy>=1.24"]
+# The numpy backend is the deterministic reference path and must install without
+# torch. It is not numpy-only: tqdm is imported unconditionally by both k-means
+# backends, safetensors reads the primary model format and writes passthrough
+# tensors, and psutil backs the RAM cap that --max-system-ram-gb requires.
+dependencies = [
+    "numpy>=1.24",
+    "tqdm>=4.65",
+    "safetensors>=0.4",
+    "psutil>=5.9",
+]
 
 [project.optional-dependencies]
 torch = ["torch>=2.1", "triton>=2.1; platform_system == 'Linux'"]
-hf = ["transformers>=4.40", "safetensors>=0.4", "huggingface_hub>=0.23", "datasets>=2.19"]
+hf = ["transformers>=4.40", "huggingface_hub>=0.23", "datasets>=2.19"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [project.scripts]
