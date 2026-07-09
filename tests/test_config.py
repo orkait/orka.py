@@ -50,3 +50,25 @@ def test_awq_parsing_matches_features_module(monkeypatch):
     for value in ("", "0", "1", "true", "off", "yes"):
         monkeypatch.setenv("ORKA_ENABLE_AWQ", value)
         assert _features.awq_feature_enabled() == config.awq_enabled(), value
+
+
+def test_faiss_truthy_set_is_narrower_than_awq(monkeypatch):
+    """ORKA_KMEANS_FAISS does not accept 'on'; ORKA_ENABLE_AWQ does. Unifying them
+    would silently enable faiss for anyone who set it to 'on' expecting a no-op."""
+    monkeypatch.setenv("ORKA_KMEANS_FAISS", "on")
+    monkeypatch.setenv("ORKA_ENABLE_AWQ", "on")
+    assert config.kmeans_faiss_enabled() is False
+    assert config.awq_enabled() is True
+
+    for value in ("1", "true", "yes"):
+        monkeypatch.setenv("ORKA_KMEANS_FAISS", value)
+        assert config.kmeans_faiss_enabled() is True, value
+
+
+def test_llm_model_defaults(monkeypatch):
+    monkeypatch.delenv("ORKA_LLM_LITE", raising=False)
+    monkeypatch.delenv("ORKA_LLM_STRONG", raising=False)
+    assert config.llm_lite_model() == "claude-sonnet-4-6"
+    assert config.llm_strong_model() == "claude-opus-4-8"
+    monkeypatch.setenv("ORKA_LLM_LITE", "custom")
+    assert config.llm_lite_model() == "custom"

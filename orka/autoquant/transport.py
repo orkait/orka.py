@@ -5,10 +5,11 @@ ordinary escalations and a strong model for stubborn ones."""
 from __future__ import annotations
 
 import importlib.util
-import os
 
-LITE_MODEL = os.environ.get("ORKA_LLM_LITE", "claude-sonnet-4-6")
-STRONG_MODEL = os.environ.get("ORKA_LLM_STRONG", "claude-opus-4-8")
+from orka import config
+
+LITE_MODEL = config.llm_lite_model()
+STRONG_MODEL = config.llm_strong_model()
 
 
 class NoLLMBackend(Exception):

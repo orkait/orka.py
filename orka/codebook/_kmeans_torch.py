@@ -173,9 +173,9 @@ def _faiss_kmeans_enabled() -> bool:
     byte-reproducible regardless of whether faiss happens to be installed; enabling
     it swaps the unweighted CUDA k-means for faiss's GPU Lloyd (~2x faster here, same
     reconstruction MSE, byte-deterministic per seed)."""
-    import os
+    from orka import config
 
-    if os.environ.get("ORKA_KMEANS_FAISS", "").strip().lower() not in ("1", "true", "yes"):
+    if not config.kmeans_faiss_enabled():
         return False
     try:
         import faiss  # noqa: F401

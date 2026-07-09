@@ -12,9 +12,17 @@ DEFAULT_PREFLIGHT_MIN_AVAIL_GB = 5.0
 DEFAULT_PREFLIGHT_MAX_SWAP_GB = 4.0
 DEFAULT_HARD_CEILING_GB = 25.0
 
+DEFAULT_LLM_LITE_MODEL = "claude-sonnet-4-6"
+DEFAULT_LLM_STRONG_MODEL = "claude-opus-4-8"
+
 #: Values of ORKA_ENABLE_AWQ that turn the legacy AWQ path on. Anything else, "0"
 #: and "false" included, leaves it off.
-_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_TRUTHY_AWQ = frozenset({"1", "true", "yes", "on"})
+
+#: ORKA_KMEANS_FAISS accepts a narrower set than ORKA_ENABLE_AWQ: "on" is not
+#: recognised. The two are kept distinct because widening this one would silently
+#: enable faiss for anyone who had set it to "on" expecting it to be ignored.
+_TRUTHY_FAISS = frozenset({"1", "true", "yes"})
 
 
 def _float(name: str, default: float) -> float:
@@ -50,7 +58,19 @@ def kmeans_iters(default: int) -> int:
 
 
 def awq_enabled() -> bool:
-    return os.environ.get("ORKA_ENABLE_AWQ", "").strip().lower() in _TRUTHY
+    return os.environ.get("ORKA_ENABLE_AWQ", "").strip().lower() in _TRUTHY_AWQ
+
+
+def kmeans_faiss_enabled() -> bool:
+    return os.environ.get("ORKA_KMEANS_FAISS", "").strip().lower() in _TRUTHY_FAISS
+
+
+def llm_lite_model() -> str:
+    return os.environ.get("ORKA_LLM_LITE", DEFAULT_LLM_LITE_MODEL)
+
+
+def llm_strong_model() -> str:
+    return os.environ.get("ORKA_LLM_STRONG", DEFAULT_LLM_STRONG_MODEL)
 
 
 def hf_token() -> str | None:
