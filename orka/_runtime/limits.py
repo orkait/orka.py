@@ -26,9 +26,9 @@ except ImportError:
 # touch torch. Deferring it keeps those paths fast.
 
 
-# Hard ceiling: never let RAM_CAP exceed this regardless of user input.
-# Calibrated for 32GB systems: leaves 5GB for kernel + UI + swap-pressure margin.
-# Bound once at import, as before; override via ORKA_HARD_CEILING_GB.
+# Never let RAM_CAP exceed this regardless of user input. Calibrated for 32GB
+# systems: leaves 5GB for kernel + UI + swap-pressure margin. Bound at import;
+# override via ORKA_HARD_CEILING_GB.
 HARD_CEILING_GB = config.hard_ceiling_gb()
 
 PREFLIGHT_MIN_AVAIL_GB = config.preflight_min_avail_gb()
@@ -95,7 +95,6 @@ def _check_ram_cap():
         if _RAM_EXCEEDED_MSG:
             msg = _RAM_EXCEEDED_MSG
             _RAM_EXCEEDED_MSG = None
-            # Aggressive exit if we are way over
             raise SystemRAMExceededError(msg)
 
 
@@ -189,7 +188,6 @@ def _apply_system_ram_cap(
     import sys
 
     if max_ram_gb is None:
-        # User explicitly opted out of cap. Skip everything.
         return
 
     if not _HAS_PSUTIL:
@@ -203,16 +201,10 @@ def _apply_system_ram_cap(
             "Pass --workload-budget-gb on CLI. See orka._runtime per-workload table."
         )
 
-    # Layer 1
     _preflight_memory_check(workload_budget_gb=workload_budget_gb)
-
-    # Layer 2
     max_ram_gb = _enforce_hard_ceiling(max_ram_gb)
-
-    # Layer 3
     _apply_hard_ram_cap(max_ram_gb)
 
-    # Layer 4
     print(
         f"INFO: System RAM cap = {max_ram_gb:.2f} GB (poll 100ms, hard ceiling {HARD_CEILING_GB:.1f}GB, "
         f"workload_budget={workload_budget_gb:.1f}GB)",
