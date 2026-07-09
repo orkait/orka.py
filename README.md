@@ -33,18 +33,20 @@ pip install orka-compiler
 pip install 'orka-compiler[torch,hf]'
 
 # 1. compress a model -> a .orka artifact (~2 bits/weight)
-python -m orka pack  ./SmolLM-135M  --out model.orka \
+orka pack  ./SmolLM-135M  --out model.orka \
     --quant-mode rvq-12-4 --normalization block-max --device cuda
 
 # 2. check what it cost you (perplexity vs the original)
-python -m orka verify  model.orka
+orka verify  model.orka
 
 # 3. decode back to safetensors, or export to a runtime
-python -m orka reconstruct  model.orka --out recon.safetensors --format safetensors
-python -m orka export-vllm   model.orka --out ./model-vllm
+orka reconstruct  model.orka --out recon.safetensors --format safetensors
+orka export-vllm   model.orka --out ./model-vllm
 ```
 
-Want orka to pick the settings for you? `python -m orka autoquant ./model --target-bpw 2.0`.
+Want orka to pick the settings for you? `orka autoquant ./model --target-bpw 2.0`.
+
+`python -m orka <command>` works identically if you prefer not to rely on the console script.
 
 ## 🔬 How it works
 
@@ -58,7 +60,7 @@ weight group [8 values]
 ```
 
 <details>
-<summary>📐 The pieces (and where they live after the great reorg)</summary>
+<summary>📐 The pieces, and where they live</summary>
 
 | Subpackage | Job |
 |---|---|
@@ -69,9 +71,12 @@ weight group [8 values]
 | `orka.pipeline` | the **pack** orchestration |
 | `orka.inference` | the inference-time `VQLinear` + Triton/CUDA kernels |
 | `orka.qat` | quantization-aware training (QATVQLinear, distillation) |
+| `orka.autoquant` | probe, policy and escalation loop behind `orka autoquant` |
 | `orka.artifact` | `.orka` ops - reconstruct, export, gguf, merge, correct |
 | `orka.eval` | metrics, verify, sweeps, reports |
 | `orka.integrations` | HF quantizer + vLLM hooks |
+| `orka.deploy` | Kaggle / Modal bootstrap helpers |
+| `orka.config` | the environment knobs, resolved in one place |
 
 Full map: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 </details>
@@ -90,6 +95,14 @@ Real numbers, real caveats. Perplexity on wikitext-2, SmolLM-135M. Lower is bett
 
 `*` "2-bit indices" but per-tensor codebooks add overhead - on a 135M model a `vq-16` artifact is barely smaller than fp16. The honestly-compressed orka config is the **planar** one (~5x smaller on disk).
 
+<details>
+<summary>How these numbers were measured, and what is missing</summary>
+
+Sliding-window (non-overlapping, 512-token context) perplexity over the wikitext-2 `test` split, fp32 forward, one 12GB consumer GPU. The method is the `_wikitext_ppl` helper in `deploy/kaggle/orka_qat_hi05b_kaggle.py`.
+
+**There is no single committed command that regenerates this table.** `orka eval` measures prompt-loss perplexity, not the wikitext-2 sweep. Treat the numbers as a record of what we measured, not as a reproducible benchmark, until a first-class harness lands. If you reproduce different numbers, we would rather hear it than not.
+</details>
+
 ### 🫡 The honest takeaways
 
 - **2 bits per weight, near-fp16 quality is real** with the full machinery (Hessian weighting + allocation + QAT) - on the right config.
@@ -107,13 +120,20 @@ correct       add low-rank/sparse correction     merge-orka  combine artifacts
 autoquant     auto-pick the config               eval/sweep  benchmark configs
 ```
 
-`python -m orka <command> --help` for the details.
+`orka <command> --help` for the details.
 
-## ⚙️ Performance toggles
+## ⚙️ Environment knobs
+
+All of these resolve through [`orka/config.py`](orka/config.py).
 
 | Env var | Default | Effect |
 |---|---|---|
-| `ORKA_KMEANS_FAISS` | off | `=1` swaps the unweighted CUDA k-means for faiss GPU Lloyd (~2x faster at equal reconstruction MSE, byte-deterministic per seed). Requires `pip install faiss-gpu-cu12`; falls back to the built-in torch path if faiss is missing or the tensor uses Hessian/importance weighting. Off by default so packs stay byte-reproducible regardless of whether faiss is installed. |
+| `ORKA_KMEANS_FAISS` | off | `=1` swaps the unweighted CUDA k-means for faiss GPU Lloyd (~2x faster at equal reconstruction MSE, byte-deterministic per seed). Requires `pip install faiss-gpu-cu12`; falls back to the built-in torch path if faiss is missing or the tensor uses Hessian/importance weighting. Off by default so packs stay reproducible regardless of whether faiss is installed. Truthy values: `1`, `true`, `yes`. |
+| `ORKA_ENABLE_AWQ` | off | `=1` enables the legacy AWQ path, which needs external calibration data. Truthy values: `1`, `true`, `yes`, `on`. |
+| `ORKA_HARD_CEILING_GB` | `25.0` | Upper bound on the RAM cap, whatever the CLI asks for. Raise it on machines larger than 32GB. |
+| `ORKA_PREFLIGHT_MIN_AVAIL_GB` | `5.0` | Refuse to start if `MemAvailable` is below `workload_budget + this`. |
+| `ORKA_PREFLIGHT_MAX_SWAP_GB` | `4.0` | Refuse to start if swap in use exceeds this (the system is already thrashing-prone). |
+| `ORKA_KMEANS_ITERS` | caller's value | Override the Lloyd iteration count, for quick validation runs. |
 
 ## 🧪 Development
 
