@@ -1,5 +1,5 @@
-"""Convert an .orka artifact into a GGUF carrying the RVQ data (phase 1 of the
-llama.cpp path: data format + dequant reference, decoupled from llama.cpp's model graph).
+"""Convert an .orka artifact into a GGUF carrying the RVQ data: data format +
+dequant reference, decoupled from llama.cpp's model graph.
 
 Each quantized linear is stored as separate GGUF tensors - per-stage indices (I16),
 per-stage codebooks (F16), and block scales (F16) - plus per-linear metadata in the GGUF

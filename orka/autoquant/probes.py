@@ -23,7 +23,7 @@ def _sqnr_db(W: np.ndarray, bits: int) -> float:
 class Signals:
     sqnr_curve: dict[int, float]
     rd_knee_bits: int
-    sensitivity: float            # placeholder = weight energy proxy (refined later)
+    sensitivity: float            # weight-energy proxy, not a measured sensitivity
 
     def sqnr_at(self, bits: int) -> float:
         return self.sqnr_curve.get(bits, _nearest(self.sqnr_curve, bits))
