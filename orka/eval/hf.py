@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 # NOTE: reconstruct_artifact is imported lazily inside the function below.
 # orka.artifact.reconstruct -> pipeline.decode -> ... -> eval.metrics -> eval ->

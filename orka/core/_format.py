@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from orka.core._tensor import _is_torch_tensor
-
 
 # v2: fp16 codebooks/scales (with f32 overflow fallback) + optional zlib
 # index streams. v1 artifacts read fine: missing manifest fields default to

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from orka.core._features import ensure_awq_feature_enabled
 from orka.eval.prompts import _read_prompt_file
@@ -52,7 +52,7 @@ def _collect_activations_hf(
             model(input_ids=ids, attention_mask=attn)
     for h in handles:
         h.remove()
-    out: dict[str, "torch.Tensor"] = {}
+    out: dict[str, torch.Tensor] = {}
     for name, xs in activations.items():
         full = xs[0] if len(xs) == 1 else __import__("torch").cat(xs, dim=0)
         if full.shape[0] > max_samples_per_layer:
@@ -64,7 +64,6 @@ def _collect_activations_hf(
     return out
 
 
-import argparse
 
 
 
@@ -79,13 +78,14 @@ def _load_awq_activations(args: argparse.Namespace):
 
     if getattr(args, "awq_activations_file", None):
         import json
+
         import torch
         path = Path(args.awq_activations_file)
         if not path.exists():
             raise FileNotFoundError(f"AWQ activations file not found: {path}")
         print(f"Loading pre-calculated AWQ activations from {path}...", flush=True)
         try:
-            with open(path, "r") as f:
+            with open(path) as f:
                 raw = json.load(f)
             # JSON format often contains lists; convert back to tensors for normalization module
             return {k: torch.tensor(v, dtype=torch.float32) for k, v in raw.items()}

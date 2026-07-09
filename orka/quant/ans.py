@@ -191,8 +191,9 @@ def _auto_K(n: int) -> int:
 
 
 def ans_compress(symbols, precision: int | None = None, K: int | None = None, device: str = "cuda") -> bytes:
-    import struct
     import math
+    import struct
+
     import torch
 
     sym = np.asarray(symbols).reshape(-1).astype(np.int64)
@@ -218,6 +219,7 @@ def ans_compress(symbols, precision: int | None = None, K: int | None = None, de
 
 def ans_decompress(blob: bytes, device: str = "cuda"):
     import struct
+
     import torch
 
     if blob[:4] != _MAGIC:

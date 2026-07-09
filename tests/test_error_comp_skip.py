@@ -9,8 +9,8 @@ GATE wiring; the detection contract itself is locked in test_arch.py.
 """
 import unittest
 
-from orka.quant import ArchProfile
 from orka.pipeline.strategies.error_compensation import maybe_compensate_candidate
+from orka.quant import ArchProfile
 
 
 class ErrorCompGateTest(unittest.TestCase):

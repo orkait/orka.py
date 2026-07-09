@@ -2,12 +2,14 @@
 to the LLM if a trigger fires (unless use_llm=False) -> cached verdict. Returns the per-tensor
 config map. The pack -> pulse-check -> refine loop lives in cmd_autoquant (Task 9/10)."""
 from __future__ import annotations
+
 import numpy as np
-from orka.autoquant.roles import classify_role
-from orka.autoquant.probes import probe_tensor
-from orka.autoquant.policy import decide
-from orka.autoquant.escalation import should_escalate, signature, Cache, default_cache_path
+
+from orka.autoquant.escalation import Cache, default_cache_path, should_escalate, signature
 from orka.autoquant.harness import decide_with_llm
+from orka.autoquant.policy import decide
+from orka.autoquant.probes import probe_tensor
+from orka.autoquant.roles import classify_role
 from orka.autoquant.schema import TensorConfig
 
 

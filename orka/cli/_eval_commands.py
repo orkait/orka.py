@@ -15,27 +15,27 @@ from orka._runtime import (
     _stop_ram_monitor,
     _wrap_capped_oom,
 )
+from orka.artifact.merge import merge_orka_artifacts
+from orka.artifact.reconstruct import reconstruct_artifact
+from orka.core._checkpoint import inspect_checkpoint
 from orka.core._util import _human_bytes, _parse_params
-from orka.quant.activations import _load_awq_activations
 from orka.deploy.kaggle import cmd_kaggle_pack
 from orka.eval import eval_artifact, eval_sweep, pulse_check_artifact
+from orka.eval.report import report_artifact
+from orka.eval.sweep import sweep_checkpoint
+from orka.eval.verify import verify_artifact
 from orka.pipeline.pack import pack_checkpoint
+from orka.quant.activations import _load_awq_activations
+from orka.quant.semantic import (
+    cmd_sem_analyze,
+    cmd_sem_map,
+)
 from orka.quant.spec import (
     _resolve_quant_stages,
     estimate_payload,
     is_rvq_mixed_spec,
     rvq_mixed_family_stages,
 )
-from orka.quant.semantic import (
-    cmd_sem_analyze,
-    cmd_sem_map,
-)
-from orka.artifact.reconstruct import reconstruct_artifact
-from orka.eval.report import report_artifact
-from orka.eval.sweep import sweep_checkpoint
-from orka.eval.verify import verify_artifact
-from orka.core._checkpoint import inspect_checkpoint
-from orka.artifact.merge import merge_orka_artifacts
 
 
 def cmd_sweep(args: argparse.Namespace) -> int:
@@ -53,7 +53,7 @@ def cmd_sweep(args: argparse.Namespace) -> int:
 
         smap = None
         if getattr(args, "sensitivity_map", None):
-            with open(args.sensitivity_map, "r") as f:
+            with open(args.sensitivity_map) as f:
                 smap = json.load(f)
 
         result = _wrap_capped_oom(

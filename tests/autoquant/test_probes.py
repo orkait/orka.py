@@ -1,5 +1,6 @@
 import numpy as np
-from orka.autoquant.probes import probe_tensor, Signals
+
+from orka.autoquant.probes import Signals, probe_tensor
 
 
 def test_signals_shape_and_monotonic_sqnr():

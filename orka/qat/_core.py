@@ -27,7 +27,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # Cap the transient [chunk, k] distance matrix at ~this many float32 elements
 # (~1 GB at 2.5e8). The row-chunk shrinks as the codebook k grows, so a dynamic /
 # larger codebook never blows VRAM.

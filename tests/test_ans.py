@@ -5,12 +5,12 @@ import numpy as np
 import torch
 
 from orka.quant.ans import (
-    build_freq_table,
-    slot_to_symbol,
-    rans_encode_scalar,
-    rans_decode_scalar,
     ans_compress,
     ans_decompress,
+    build_freq_table,
+    rans_decode_scalar,
+    rans_encode_scalar,
+    slot_to_symbol,
 )
 
 HAVE_CUDA = torch.cuda.is_available()

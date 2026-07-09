@@ -7,9 +7,9 @@ from pathlib import Path
 
 import numpy as np
 
-from orka.quant.allocate import allocation_tensor_stages, build_allocation
-from orka.pipeline.pack import pack_checkpoint
 from orka.eval.verify import verify_artifact
+from orka.pipeline.pack import pack_checkpoint
+from orka.quant.allocate import allocation_tensor_stages, build_allocation
 
 
 def _write_source(root: Path) -> Path:
@@ -113,17 +113,20 @@ if __name__ == "__main__":
 
 class SizeAwareAllocateTest(unittest.TestCase):
     def test_codebook_bytes_math(self):
-        from orka.quant.allocate import _spec_codebook_bytes
         from orka.quant import parse_quant_spec
+        from orka.quant.allocate import _spec_codebook_bytes
         # vq-12 = K=4096 entries x group 8 x 2 bytes (fp16).
         self.assertEqual(_spec_codebook_bytes(parse_quant_spec("vq-12"), 8, 2), 4096 * 8 * 2)
         # planar (scalar) stages carry no codebook.
         self.assertEqual(_spec_codebook_bytes(parse_quant_spec("rvq-s8-s8"), 8, 2), 0)
 
     def test_small_tensor_escapes_to_planar_under_size_aware(self):
-        import json, tempfile
-        import numpy as np
+        import json
+        import tempfile
         from pathlib import Path
+
+        import numpy as np
+
         from orka.quant.allocate import build_allocation
         rng = np.random.default_rng(0)
         with tempfile.TemporaryDirectory() as tmp:
@@ -154,8 +157,9 @@ class HessianWeightedAllocateTest(unittest.TestCase):
         # skewed weights do not. (End-to-end spec flips are shown on real tensors -
         # tiny random tensors quantize losslessly, hiding the effect.)
         import numpy as np
-        from orka.quant.allocate import _probe_spec_distortion
+
         from orka.quant import parse_quant_spec
+        from orka.quant.allocate import _probe_spec_distortion
         rng = np.random.default_rng(0)
         V = rng.standard_normal((4096, 8)).astype(np.float32)
         st = parse_quant_spec("vq-8")  # lossy at this size -> non-degenerate distortion
@@ -169,9 +173,12 @@ class HessianWeightedAllocateTest(unittest.TestCase):
         self.assertNotAlmostEqual(raw, wtd, places=4)   # skewed differs
 
     def test_uniform_importance_matches_unweighted(self):
-        import json, tempfile
-        import numpy as np
+        import json
+        import tempfile
         from pathlib import Path
+
+        import numpy as np
+
         from orka.quant.allocate import build_allocation
         rng = np.random.default_rng(1)
         with tempfile.TemporaryDirectory() as tmp:

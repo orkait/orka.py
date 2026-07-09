@@ -8,15 +8,15 @@ from pathlib import Path
 import numpy as np
 
 try:
-    import torch
+    import torch  # noqa: F401
     import transformers  # noqa: F401
     HAS_HF = True
 except ImportError:
     HAS_HF = False
 
+from orka.eval.verify import verify_artifact
 from orka.pipeline.pack import pack_checkpoint
 from orka.pipeline.sequential import _block_key, _group_tensors_by_block
-from orka.eval.verify import verify_artifact
 
 
 class BlockGroupingTest(unittest.TestCase):

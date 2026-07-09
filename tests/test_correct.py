@@ -13,9 +13,9 @@ try:
 except ImportError:
     HAS_TORCH = False
 
-from orka.pipeline.pack import pack_checkpoint
 from orka.eval.report import report_artifact
 from orka.eval.verify import verify_artifact
+from orka.pipeline.pack import pack_checkpoint
 
 
 def _write_source(root: Path) -> Path:

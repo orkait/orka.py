@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from orka.core._tensor import _is_numpy_array, _is_torch_tensor
 
 
 def _codebook_cache_key(parts: Sequence[object]) -> str:
-    import hashlib
 
     payload = "|".join(str(p) for p in parts).encode("utf-8")
     return hashlib.blake2b(payload, digest_size=16).hexdigest()

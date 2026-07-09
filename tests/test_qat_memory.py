@@ -69,6 +69,7 @@ class QLoRARecoveryTest(unittest.TestCase):
         # Any Linear in the quantized set is wrapped (works for feed_forward / mamba,
         # not just self_attn/mlp); the output head is skipped (keeps quantized base).
         import torch.nn as nn
+
         from orka.qat.qlora import build_qlora_student
 
         m = nn.Module()

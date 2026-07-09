@@ -1,10 +1,9 @@
 import unittest
 
-import numpy as np
 import torch
 
 from orka.quant import ArchProfile
-from orka.quant.lattice import e8_encode, E8_DIM
+from orka.quant.lattice import E8_DIM, e8_encode
 from orka.quant.lattice_pack import _is_quantizable, _pack_keys
 
 HAVE_CUDA = torch.cuda.is_available()
@@ -47,6 +46,7 @@ class LatticePackTest(unittest.TestCase):
         # _pack_keys rANS-codes a stack of [N,8] int keys; verify exact recovery
         # through the shift + ans round-trip (mirrors reconstruct_state_dict).
         import struct
+
         from orka.quant.ans import ans_decompress
         torch.manual_seed(0)
         W = torch.randn(64, 256, device=self._dev()) * 0.02

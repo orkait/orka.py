@@ -6,8 +6,8 @@ Each mode has numpy + torch implementations side by side. Dispatcher
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Sequence
 
 from orka.core._format import _fp16_storage_roundtrip
 from orka.core._tensor import _numpy_float32_array, _torch_f32

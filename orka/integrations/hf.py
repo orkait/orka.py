@@ -51,7 +51,7 @@ def _orka_state_dict(orka_dir, dtype=None) -> dict:
 def load_orka_model(
     orka_dir,
     *,
-    config_dir: Optional[str] = None,
+    config_dir: str | None = None,
     device: str = "cpu",
     dtype=None,
 ):

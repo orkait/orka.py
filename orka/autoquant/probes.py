@@ -2,7 +2,9 @@
 sqnr_at(bits): SQNR of a fast scalar-quant probe at `bits`. rd_knee_bits: smallest bits
 hitting the SQNR target. These rank tensors and drive the policy's bit choice."""
 from __future__ import annotations
+
 from dataclasses import dataclass
+
 import numpy as np
 
 

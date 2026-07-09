@@ -57,7 +57,7 @@ def register_orka_vllm() -> None:
         """vLLM config for orka-quantized checkpoints. Carries the per-module VQ metadata
         emitted in the HF repo's quantization_config."""
 
-        def __init__(self, modules: Optional[dict] = None) -> None:
+        def __init__(self, modules: dict | None = None) -> None:
             super().__init__()
             self.modules = modules or {}
 
@@ -78,7 +78,7 @@ def register_orka_vllm() -> None:
             return []
 
         @classmethod
-        def from_config(cls, config: dict) -> "OrkaQuantConfig":
+        def from_config(cls, config: dict) -> OrkaQuantConfig:
             return cls(modules=config.get("modules", {}))
 
         def get_quant_method(self, layer, prefix: str):
@@ -107,7 +107,7 @@ def register_orka_vllm() -> None:
                     name, torch.nn.Parameter(buf, requires_grad=False)
                 )
 
-        def apply(self, layer, x: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        def apply(self, layer, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
             vq = layer.orka_vq
             # sync any vLLM-loaded parameter data back onto the VQLinear buffers
             for name, p in layer.named_parameters(recurse=False):

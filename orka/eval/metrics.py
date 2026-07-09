@@ -7,7 +7,7 @@ metric variants (_denorm_metrics_from_flat).
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from collections.abc import Sequence
 
 from orka.core._tensor import _is_numpy_array, _is_torch_tensor
 from orka.transforms.normalize import (

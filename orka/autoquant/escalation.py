@@ -4,9 +4,11 @@ post-pack regression, or unknown role. Verdicts are cached by signature (role + 
 bucket + sensitivity bucket + objective) in a global JSON, so they are reproducible and
 reused across models."""
 from __future__ import annotations
-import json
+
 import hashlib
+import json
 from pathlib import Path
+
 from orka.autoquant.probes import Signals
 
 CONF_THRESHOLD = 0.6

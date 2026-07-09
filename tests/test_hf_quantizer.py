@@ -64,11 +64,12 @@ def _pack(root: Path, group_size: int, block: int) -> Path:
 
 class OrkaQuantizerRegistrationTest(unittest.TestCase):
     def test_registers_idempotently(self):
-        from orka.integrations.hf_quantizer import register_orka_quantizer
         from transformers.quantizers.auto import (
-            AUTO_QUANTIZER_MAPPING,
             AUTO_QUANTIZATION_CONFIG_MAPPING,
+            AUTO_QUANTIZER_MAPPING,
         )
+
+        from orka.integrations.hf_quantizer import register_orka_quantizer
 
         register_orka_quantizer()
         register_orka_quantizer()  # second call must be a no-op, not raise
@@ -86,8 +87,9 @@ class OrkaQuantizerRegistrationTest(unittest.TestCase):
         self.assertFalse(_is_embedding("model.layers.0.self_attn.q_proj.weight"))
 
     def test_config_round_trips(self):
-        import orka.integrations.hf_quantizer  # noqa: F401 (ensures registration)
         from transformers.quantizers.auto import AUTO_QUANTIZATION_CONFIG_MAPPING
+
+        import orka.integrations.hf_quantizer  # noqa: F401 (ensures registration)
 
         OrkaConfig = AUTO_QUANTIZATION_CONFIG_MAPPING["orka"]
         cfg = OrkaConfig(modules={"m.0": {"out_features": 8}})

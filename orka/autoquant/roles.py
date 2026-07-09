@@ -2,6 +2,7 @@
 output head from the input embedding (they need opposite treatment) and resolving sub-roles.
 Returns (role, confidence). Unknown names fall to ('unknown', low) -> escalation."""
 from __future__ import annotations
+
 from orka.quant import classify_tensor_family
 
 _OUT_HEAD = ("lm_head", "embed_out", "output.weight")

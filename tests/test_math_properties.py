@@ -227,7 +227,7 @@ class DistanceMathTest(unittest.TestCase):
         )
         np.testing.assert_array_equal(indices, direct)
         chosen_sse = float(
-            (((rows - cb[direct]) ** 2).sum())
+            ((rows - cb[direct]) ** 2).sum()
         )
         self.assertAlmostEqual(mse, chosen_sse / rows.size, places=4)
 
@@ -281,9 +281,9 @@ class RVQAdditivityAndMirrorTest(unittest.TestCase):
         """Strongest single check: distill's autograd decode must reproduce
         the production numpy decoder bit-for-bit (within f32 accumulation)
         across the FULL transform chain."""
-        from orka.qat.distill import _differentiable_decode, _load_decode_consts
         from orka.pipeline.decode import _decode_tensor
         from orka.pipeline.pack import pack_checkpoint
+        from orka.qat.distill import _differentiable_decode, _load_decode_consts
 
         rng = np.random.default_rng(10)
         with tempfile.TemporaryDirectory() as tmp:
@@ -316,10 +316,9 @@ class RVQAdditivityAndMirrorTest(unittest.TestCase):
             np.testing.assert_allclose(mirror, production, rtol=1e-5, atol=1e-6)
 
     def test_rvq_decode_is_sum_of_stage_lookups(self) -> None:
-        from orka.pipeline.decode import _read_codebook
         from orka.core._format import _read_indices
+        from orka.pipeline.decode import _decode_tensor, _read_codebook
         from orka.pipeline.pack import pack_checkpoint
-        from orka.pipeline.decode import _decode_tensor
 
         rng = np.random.default_rng(11)
         with tempfile.TemporaryDirectory() as tmp:
@@ -399,6 +398,7 @@ class FaissKmeansTest(unittest.TestCase):
 
     def test_opt_in_gate_off_by_default(self) -> None:
         import os
+
         from orka.codebook._kmeans_torch import _faiss_kmeans_enabled
 
         prev = os.environ.pop("ORKA_KMEANS_FAISS", None)

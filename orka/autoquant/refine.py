@@ -3,9 +3,11 @@ attribute any regression to the worst tensors, escalate those (bump bits / add a
 repeat until the objective is met or the loop stops improving. pack_fn and pulse_fn are
 injected so the loop logic is testable without a real pack."""
 from __future__ import annotations
+
 from dataclasses import dataclass
-from orka.autoquant.schema import TensorConfig
+
 from orka.autoquant.probes import Signals
+from orka.autoquant.schema import TensorConfig
 
 _BITS_LADDER = [2, 3, 4, 6, 8]
 

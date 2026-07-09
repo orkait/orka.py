@@ -3,8 +3,9 @@ backend is installed (litellm preferred, then anthropic); raises NoLLMBackend if
 cmd_autoquant falls back to the deterministic policy. A role router picks a lite model for
 ordinary escalations and a strong model for stubborn ones."""
 from __future__ import annotations
-import os
+
 import importlib.util
+import os
 
 LITE_MODEL = os.environ.get("ORKA_LLM_LITE", "claude-sonnet-4-6")
 STRONG_MODEL = os.environ.get("ORKA_LLM_STRONG", "claude-opus-4-8")

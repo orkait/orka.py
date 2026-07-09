@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import argparse
+import json
+from collections import Counter, defaultdict
 from pathlib import Path
-from collections import defaultdict, Counter
+
 import numpy as np
+
 
 def build_morphological_trie(token_strings: list[tuple[str, int]]):
     """Phase 2: Unsupervised discovery of linguistic roots."""
@@ -117,8 +119,9 @@ def profile_architecture(model_dir: Path) -> dict:
 
 def cmd_sem_analyze(args: argparse.Namespace) -> int:
     """Entry point for orka sem-analyze (Phases 0-3)."""
-    from transformers import AutoTokenizer, AutoModelForCausalLM
     import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
     from orka.deploy.kaggle import _hf_snapshot_with_retry
     
     model_input = args.model_dir
@@ -135,7 +138,7 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
             print(f"Error downloading model: {exc}")
             return 1
     
-    print(f"--- Phase 0: Architectural Profiling ---", flush=True)
+    print("--- Phase 0: Architectural Profiling ---", flush=True)
     profile = profile_architecture(model_dir)
     print(f"  Type: {profile.get('architecture', 'unknown').upper()} ({'MoE' if profile.get('is_moe') else 'Dense'})", flush=True)
     if profile.get("is_moe"):
@@ -158,14 +161,14 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
         print(f"Error during ingestion: {exc}")
         return 1
 
-    print(f"--- Phase 2: Morphological Trie Discovery ---", flush=True)
+    print("--- Phase 2: Morphological Trie Discovery ---", flush=True)
     vocab = tokenizer.get_vocab()
     sorted_vocab = sorted(vocab.items(), key=lambda x: x[1])
     
     roots = build_morphological_trie(sorted_vocab)
     print(f"  Discovered {len(roots)} productive linguistic roots.", flush=True)
     
-    print(f"--- Phase 3: Geometric Neighborhood Discovery ---", flush=True)
+    print("--- Phase 3: Geometric Neighborhood Discovery ---", flush=True)
     hubs = find_semantic_hubs(embeddings)
     print(f"  Identified {len(hubs)} distinct semantic hubs (Concept Clusters).", flush=True)
     
@@ -190,7 +193,7 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
 
     # NEW: Automatic Sensitivity Map Generation for Orka Pack
     if getattr(args, "save_sensitivity_map", None):
-        print(f"--- Generating Sensitivity Map for Pack ---", flush=True)
+        print("--- Generating Sensitivity Map for Pack ---", flush=True)
         # We define pillars as:
         # 1. Master tokens of semantic hubs (The unique concepts)
         # 2. Top 500 productive morphological roots

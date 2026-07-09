@@ -29,7 +29,7 @@ import torch
 
 
 def load_fast(
-    hf_dense_dir: Union[str, Path],
+    hf_dense_dir: str | Path,
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     compile_model: bool = True,

@@ -2,6 +2,7 @@
 from priors. RVQ roles take their bit count from the rate-distortion knee; sensitive roles
 (attn.v, mlp.down) get one extra stage; head/norm/bias follow their fixed priors."""
 from __future__ import annotations
+
 from orka.autoquant.priors import ROLE_PRIORS
 from orka.autoquant.probes import Signals
 from orka.autoquant.schema import TensorConfig

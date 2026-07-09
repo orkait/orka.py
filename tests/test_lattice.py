@@ -4,10 +4,10 @@ import unittest
 import torch
 
 from orka.quant.lattice import (
-    e8_encode,
     e8_decode,
-    nearest_e8,
+    e8_encode,
     incoherence_rotation,
+    nearest_e8,
 )
 
 HAVE_CUDA = torch.cuda.is_available()

@@ -75,6 +75,7 @@ def _write_complete_safetensors_reconstruction_binary(
 ) -> dict:
     """Reconstruct full model using a custom binary writer to avoid RAM OOMs."""
     import struct
+
     import numpy as np
     from safetensors import safe_open
 
@@ -94,7 +95,7 @@ def _write_complete_safetensors_reconstruction_binary(
     source = Path(manifest["source"])
     source_map = {}
     if source.exists():
-        print(f"INFO: Indexing source checkpoint for reconstruction fallback...", flush=True)
+        print("INFO: Indexing source checkpoint for reconstruction fallback...", flush=True)
         for name, tensor in _load_tensors(source):
             if name not in packed_names and name not in registry:
                 registry[name] = {"shape": _tensor_shape(tensor), "source": "source_fallback"}

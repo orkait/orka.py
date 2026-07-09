@@ -13,8 +13,8 @@ from orka.core._format import (
     _unpack_indices,
     _write_indices,
 )
-from orka.pipeline.pack import pack_checkpoint
 from orka.eval.verify import verify_artifact
+from orka.pipeline.pack import pack_checkpoint
 
 
 class IndexEncodingTest(unittest.TestCase):

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
-from typing import Sequence
 
 
 def _derive_seed(parts: Sequence[object]) -> int:

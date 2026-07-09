@@ -16,27 +16,27 @@ from orka._runtime import (
     _stop_ram_monitor,
     _wrap_capped_oom,
 )
+from orka.artifact.merge import merge_orka_artifacts
+from orka.artifact.reconstruct import reconstruct_artifact
+from orka.core._checkpoint import inspect_checkpoint
 from orka.core._util import _human_bytes, _parse_params
-from orka.quant.activations import _load_awq_activations
 from orka.deploy.kaggle import cmd_kaggle_pack
 from orka.eval import eval_artifact, eval_sweep, pulse_check_artifact
+from orka.eval.report import report_artifact
+from orka.eval.sweep import sweep_checkpoint
+from orka.eval.verify import verify_artifact
 from orka.pipeline.pack import pack_checkpoint
+from orka.quant.activations import _load_awq_activations
+from orka.quant.semantic import (
+    cmd_sem_analyze,
+    cmd_sem_map,
+)
 from orka.quant.spec import (
     _resolve_quant_stages,
     estimate_payload,
     is_rvq_mixed_spec,
     rvq_mixed_family_stages,
 )
-from orka.quant.semantic import (
-    cmd_sem_analyze,
-    cmd_sem_map,
-)
-from orka.artifact.reconstruct import reconstruct_artifact
-from orka.eval.report import report_artifact
-from orka.eval.sweep import sweep_checkpoint
-from orka.eval.verify import verify_artifact
-from orka.core._checkpoint import inspect_checkpoint
-from orka.artifact.merge import merge_orka_artifacts
 
 
 def cmd_calc(args: argparse.Namespace) -> int:
@@ -104,7 +104,7 @@ def cmd_pack(args: argparse.Namespace) -> int:
             codebook_mode = args.codebook_mode
         smap = None
         if getattr(args, "sensitivity_map", None):
-            with open(args.sensitivity_map, "r") as f:
+            with open(args.sensitivity_map) as f:
                 smap = json.load(f)
         tensor_map = _load_allocation_map(args)
         manifest = _wrap_capped_oom(
@@ -167,7 +167,7 @@ def _load_allocation_map(args: argparse.Namespace):
         return None
     from orka.quant.allocate import allocation_tensor_stages
 
-    with open(args.allocation_map, "r") as f:
+    with open(args.allocation_map) as f:
         allocation = json.load(f)
     return allocation_tensor_stages(allocation)
 
@@ -179,7 +179,7 @@ def _load_allocation_transforms(args: argparse.Namespace):
         return None
     from orka.quant.allocate import allocation_tensor_transforms
 
-    with open(args.allocation_map, "r") as f:
+    with open(args.allocation_map) as f:
         allocation = json.load(f)
     return allocation_tensor_transforms(allocation) or None
 
@@ -323,7 +323,7 @@ def cmd_distill(args: argparse.Namespace) -> int:
         if not path.exists():
             raise FileNotFoundError(f"activations file not found: {path}")
         try:
-            with open(path, "r") as f:
+            with open(path) as f:
                 raw = json.load(f)
             activations = {
                 k: torch.tensor(v, dtype=torch.float32) for k, v in raw.items()
@@ -331,8 +331,8 @@ def cmd_distill(args: argparse.Namespace) -> int:
         except (UnicodeDecodeError, json.JSONDecodeError):
             activations = torch.load(str(path), map_location="cpu")
     elif args.model_dir and args.prompts:
-        from orka.quant.activations import _collect_activations_hf
         from orka.eval.prompts import _read_prompt_file
+        from orka.quant.activations import _collect_activations_hf
 
         prompts = _read_prompt_file(
             Path(args.prompts), max_prompts=args.calibration_max_prompts
@@ -394,8 +394,10 @@ def cmd_reconstruct(args: argparse.Namespace) -> int:
 def cmd_autoquant(args: argparse.Namespace) -> int:
     import json as _json
     from pathlib import Path
+
     import numpy as np
     from safetensors import safe_open
+
     from orka.autoquant.orchestrator import derive_config
     from orka.autoquant.schema import to_allocation_map
 
@@ -417,7 +419,7 @@ def cmd_autoquant(args: argparse.Namespace) -> int:
                     weights[k] = t.to(torch.float32).numpy()
     llm_fn = None
     if not args.no_llm:
-        from orka.autoquant.transport import make_llm_fn, NoLLMBackend
+        from orka.autoquant.transport import NoLLMBackend, make_llm_fn
         try:
             llm_fn = make_llm_fn()
         except NoLLMBackend as e:
@@ -436,4 +438,9 @@ def cmd_autoquant(args: argparse.Namespace) -> int:
     return 0
 
 # eval-family handlers live in _eval_commands (re-exported for the parser wiring)
-from orka.cli._eval_commands import cmd_sweep, cmd_eval, cmd_pulse_check, cmd_eval_sweep  # noqa: E402,F401
+from orka.cli._eval_commands import (  # noqa: E402,F401
+    cmd_eval,
+    cmd_eval_sweep,
+    cmd_pulse_check,
+    cmd_sweep,
+)

@@ -1,8 +1,9 @@
-import sys
-import os
-import json
-import subprocess
 import glob
+import json
+import os
+import subprocess
+import sys
+
 import pytest
 
 BASE = glob.glob(os.path.expanduser(

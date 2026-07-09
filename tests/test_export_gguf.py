@@ -44,9 +44,8 @@ class ExportGgufRoundTripTest(unittest.TestCase):
         return art, json.loads((art / "manifest.json").read_text()), name
 
     def _dequant_matches_reconstruct(self, group_size, codebook_size, block_scale_size):
-        import torch
-        from orka.inference.vq_linear import build_vq_linear
         from orka.artifact.export_gguf import dequant_linear
+        from orka.inference.vq_linear import build_vq_linear
 
         with tempfile.TemporaryDirectory() as tmp:
             art, manifest, name = self._pack(tmp, group_size, codebook_size, block_scale_size)
@@ -72,6 +71,7 @@ class ExportGgufRoundTripTest(unittest.TestCase):
     @unittest.skipUnless(_has_gguf(), "gguf not installed")
     def test_gguf_export_roundtrips_tensors(self):
         from gguf import GGUFReader
+
         from orka.artifact.export_gguf import export_gguf
 
         with tempfile.TemporaryDirectory() as tmp:

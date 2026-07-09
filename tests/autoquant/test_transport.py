@@ -1,5 +1,12 @@
 import pytest
-from orka.autoquant.transport import route_model, make_llm_fn, NoLLMBackend, LITE_MODEL, STRONG_MODEL
+
+from orka.autoquant.transport import (
+    LITE_MODEL,
+    STRONG_MODEL,
+    NoLLMBackend,
+    make_llm_fn,
+    route_model,
+)
 
 
 def test_route_model_lite_vs_strong():

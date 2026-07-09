@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Sequence
 
 from orka.core._tensor import _numpy_float32_array, _torch_f32
 

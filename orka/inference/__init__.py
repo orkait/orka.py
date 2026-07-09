@@ -33,8 +33,8 @@ Indices/scales are stored group-major so both backends read them coalesced (the
 constexpr in the Triton kernels).
 """
 
-from orka.inference.vq_linear import VQLinear, build_vq_linear
 from orka.inference.export import export_inference
 from orka.inference.fast import load_fast
+from orka.inference.vq_linear import VQLinear, build_vq_linear
 
 __all__ = ["VQLinear", "build_vq_linear", "export_inference", "load_fast"]

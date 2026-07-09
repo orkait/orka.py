@@ -45,6 +45,7 @@ def _pack_keys(keys_per_stage) -> bytes:
     # GPU rANS entropy-codes the lattice keys to ~entropy (vs zlib's overhead).
     # Keys are small signed ints; shift to non-negative symbols, store the shift.
     import struct
+
     from orka.quant.ans import ans_compress
 
     flat = torch.cat([k.reshape(-1) for k in keys_per_stage]).to(torch.int64)
@@ -78,7 +79,7 @@ def compress_model(model_dir: str, out_path: str, scales=(0.5, 0.2), seed: int =
     from orka.quant import ArchProfile
 
     profile = ArchProfile.from_model(model)  # head kept fp16 (passthrough), structural
-    from orka.quant.lattice import input_incoherence, e8_quantize_raw, _derive_seed
+    from orka.quant.lattice import _derive_seed, e8_quantize_raw, input_incoherence
     for name, mod in model.named_modules():
         if _is_quantizable(name, mod, profile):
             W = mod.weight.data.float()
@@ -138,7 +139,8 @@ def reconstruct_state_dict(art_path: str, device: str = "cuda") -> dict:
     seed = meta["seed"]
     payload = (art / "payload.bin").read_bytes()
     from safetensors.torch import load_file
-    from orka.quant.lattice import input_incoherence, inverse_incoherence, _derive_seed
+
+    from orka.quant.lattice import _derive_seed, input_incoherence, inverse_incoherence
     sd = {k: v.to(device) for k, v in load_file(str(art / "passthrough.safetensors")).items()}
     n_stages = len(scales)
     for name, info in meta["tensors"].items():
@@ -147,6 +149,7 @@ def reconstruct_state_dict(art_path: str, device: str = "cuda") -> dict:
         nvec = (numel + E8_DIM - 1) // E8_DIM
         t_scales = info.get("scales", scales)  # per-tensor absolute scales
         import struct
+
         from orka.quant.ans import ans_decompress
         raw = payload[info["offset"]: info["offset"] + info["len"]]
         shift = struct.unpack("<i", raw[:4])[0]

@@ -15,9 +15,9 @@ from pathlib import Path
 
 import numpy as np
 
+from orka.eval.verify import verify_artifact
 from orka.pipeline.pack import pack_checkpoint
 from orka.quant.allocate import allocation_tensor_transforms
-from orka.eval.verify import verify_artifact
 
 A = "model.layers.0.mlp.up_proj.weight"
 B = "model.layers.0.mlp.down_proj.weight"

@@ -3,7 +3,7 @@ import unittest
 
 import torch
 
-from orka.quant.trellis import tcq_encode, tcq_decode
+from orka.quant.trellis import tcq_decode, tcq_encode
 
 HAVE_CUDA = torch.cuda.is_available()
 

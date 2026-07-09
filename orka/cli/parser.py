@@ -7,10 +7,8 @@ from __future__ import annotations
 
 import argparse
 
-from orka.cli._pack_args import _add_pack_args
-
-from orka.quant.allocate import DEFAULT_CANDIDATE_SPECS, cmd_allocate
 from orka.artifact.export import cmd_export_vllm
+from orka.cli._pack_args import _add_pack_args
 from orka.cli.commands import (
     cmd_autoquant,
     cmd_calc,
@@ -20,18 +18,18 @@ from orka.cli.commands import (
     cmd_eval_sweep,
     cmd_inspect,
     cmd_kaggle_pack,
-    cmd_pack,
     cmd_merge_orka,
+    cmd_pack,
     cmd_pulse_check,
     cmd_reconstruct,
     cmd_report,
     cmd_sem_analyze,
-    cmd_sem_map,
     cmd_sem_calc,
+    cmd_sem_map,
     cmd_sweep,
     cmd_verify,
 )
-
+from orka.quant.allocate import DEFAULT_CANDIDATE_SPECS, cmd_allocate
 
 
 def _add_calc_parser(sub):

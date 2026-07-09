@@ -13,9 +13,9 @@ from orka.core._format import (
     _read_codebook,
     _write_codebook,
 )
-from orka.pipeline.pack import pack_checkpoint
 from orka.eval.report import report_artifact
 from orka.eval.verify import verify_artifact
+from orka.pipeline.pack import pack_checkpoint
 
 
 class Int8CodebookFormatTest(unittest.TestCase):

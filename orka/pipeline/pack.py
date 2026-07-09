@@ -11,22 +11,30 @@ import json
 import os
 import queue
 import threading
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
+from orka._runtime import (
+    _BG_WRITER,
+    _check_ram_cap,
+    _maybe_fallback_cuda_to_cpu,
+    _resolve_auto_backend,
+    _resolve_torch_device,
+)
+from orka.codebook import (
+    _codebook_cache_key,
+    _codebook_cache_load,
+    _codebook_cache_save,
+    learn_codebook_auto,
+    quantize_vectors_auto,
+)
+from orka.core._checkpoint import _load_tensors
 from orka.core._format import (
     ORKA_VERSION,
     _cast_codebook_storage,
     _write_codebook,
     _write_indices,
     _write_passthrough_tensors,
-)
-from orka._runtime import (
-    _BG_WRITER,
-    _maybe_fallback_cuda_to_cpu,
-    _resolve_auto_backend,
-    _resolve_torch_device,
-    _check_ram_cap,
 )
 from orka.core._tensor import (
     _concat_vector_parts,
@@ -46,15 +54,14 @@ from orka.core._util import (
     _safe_tensor_name,
     _source_signature,
 )
-from orka.core._checkpoint import _load_tensors
-from orka.codebook import (
-    _codebook_cache_key,
-    _codebook_cache_load,
-    _codebook_cache_save,
-    learn_codebook_auto,
-    quantize_vectors_auto,
+from orka.pipeline.pack_config import (
+    EMBEDDING_MAX_GROUP_SIZE,
+    IMPORTANCE_WEIGHT_FLOOR,
+    PREFETCH_POLL_TIMEOUT_S,
+    PREFETCH_QUEUE_DEPTH,
+    SENSITIVITY_SKIP_LOSS_DELTA,
+    validate_pack_args,
 )
-from orka.quant import classify_tensor_family
 from orka.pipeline.pack_helpers import (
     _numpy_vectors_from_tensor,
     _sample_vectors_and_weights,
@@ -77,23 +84,13 @@ from orka.pipeline.strategies import (
     _run_em_aq_refinement,
     maybe_compensate_candidate,
 )
+from orka.quant import classify_tensor_family
 from orka.transforms import (
     _apply_normalization,
     _extract_outliers,
     _rotate_tensor_to_2d,
     stores_block_scales,
 )
-
-
-from orka.pipeline.pack_config import (
-    EMBEDDING_MAX_GROUP_SIZE,
-    IMPORTANCE_WEIGHT_FLOOR,
-    PREFETCH_POLL_TIMEOUT_S,
-    PREFETCH_QUEUE_DEPTH,
-    SENSITIVITY_SKIP_LOSS_DELTA,
-    validate_pack_args,
-)
-
 
 # Vector-prep helpers (_weights_digest, _sample_vectors_and_weights,
 # _numpy_vectors_from_tensor, _torch_vectors_from_tensor) live in
@@ -119,7 +116,7 @@ def _prefetch_worker(
     awq_alpha: float,
     slrq_salient: bool,
     max_values_per_tensor: int | None,
-    prefetch_queue: "queue.Queue",
+    prefetch_queue: queue.Queue,
     prefetch_done: threading.Event,
     _prefetch_exc: list,
     _prefetch_state: dict,
@@ -659,8 +656,8 @@ def pack_checkpoint(
             if p_pos:
                 from orka.core._format import _fp16_storage_roundtrip
                 if _is_torch_tensor(c["vectors"]):
-                    import torch
                     import numpy as np
+                    import torch
                     flat = c["vectors"].reshape(-1)
                     pillar_positions = np.array(p_pos, dtype=np.int64)
                     pillar_values = _fp16_storage_roundtrip(
@@ -735,7 +732,7 @@ def pack_checkpoint(
         # to RuntimeError loses that signal for callers/CLI.
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise exc
-        from orka._runtime import SystemRAMExceededError, CappedOutOfMemoryError
+        from orka._runtime import CappedOutOfMemoryError, SystemRAMExceededError
         if isinstance(exc, (SystemRAMExceededError, CappedOutOfMemoryError)):
             raise type(exc)(f"prefetch worker: {exc}") from exc
         raise RuntimeError(f"prefetch worker failed: {exc}") from exc

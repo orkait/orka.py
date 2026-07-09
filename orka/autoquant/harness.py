@@ -2,7 +2,9 @@
 as llm_fn(messages)->str (production = litellm; tests = canned). The model receives the
 role, shape, signals and objective and returns a JSON quant config, schema-validated here."""
 from __future__ import annotations
+
 import json
+
 from orka.autoquant.probes import Signals
 from orka.autoquant.schema import TensorConfig
 

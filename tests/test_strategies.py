@@ -12,8 +12,8 @@ import unittest
 
 from orka.pipeline.strategies import (
     POST_ASSIGNMENT_STRATEGIES,
-    PostAssignmentStrategy,
     STRATEGY_REGISTRY,
+    PostAssignmentStrategy,
 )
 from orka.pipeline.strategies.refinement import EMAQStrategy, MSEScaleStrategy
 

@@ -5,8 +5,8 @@ PayloadEstimate / estimate_payload (artifact size from params + group + codebook
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 from orka.core._util import _index_bits_for_size
 
@@ -61,10 +61,6 @@ def estimate_payload(
         total_payload_bytes=index_bytes + scale_bytes,
     )
 
-from typing import Sequence, Union
-
-# ... (PayloadEstimate remains same)
-
 QUANT_SPEC_MAX_PER_STAGE_BITS = 64
 QUANT_SPEC_MAX_TOTAL_BITS = 64
 
@@ -80,7 +76,7 @@ RVQ_MIXED_FAMILY_BITS = {
 }
 
 
-def rvq_mixed_family_stages() -> dict[str, list[Union[int, str]]]:
+def rvq_mixed_family_stages() -> dict[str, list[int | str]]:
     """Returns family -> list of (codebook_size or 's<bits>')"""
     res = {}
     for fam, bits in RVQ_MIXED_FAMILY_BITS.items():
@@ -98,7 +94,7 @@ def is_rvq_mixed_spec(spec: str | None) -> bool:
     return spec == "rvq-mixed"
 
 
-def parse_quant_spec(spec: str) -> list[Union[int, str]]:
+def parse_quant_spec(spec: str) -> list[int | str]:
     if not isinstance(spec, str):
         raise ValueError(f"quant spec must be a string: {spec!r}")
     if spec.startswith("rvq-"):
@@ -140,7 +136,7 @@ def parse_quant_spec(spec: str) -> list[Union[int, str]]:
     return stages
 
 
-def quant_spec_from_sizes(sizes: Sequence[Union[int, str]]) -> str:
+def quant_spec_from_sizes(sizes: Sequence[int | str]) -> str:
     parts = []
     for k in sizes:
         if isinstance(k, str) and k.startswith("s"):
@@ -155,7 +151,7 @@ def _resolve_quant_stages(
     quant_mode: str | None,
     codebook_sizes: Sequence[int] | None,
     codebook_size: int,
-) -> list[Union[int, str]]:
+) -> list[int | str]:
     if codebook_sizes:
         return [int(x) for x in codebook_sizes]
     if quant_mode:

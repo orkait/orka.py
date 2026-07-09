@@ -4,18 +4,21 @@ Backend implementations live in _kmeans_numpy / _kmeans_torch."""
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from collections.abc import Sequence
 
-from orka._runtime import _resolve_torch_device, _check_ram_cap
-from orka.core._tensor import _is_numpy_array, _is_torch_tensor, _torch_float32_matrix
-
-
+from orka._runtime import _check_ram_cap, _resolve_torch_device
 from orka.codebook._kmeans_numpy import (  # noqa: F401
-    _kmeans_parallel_init_numpy, _numpy_assign, _numpy_centroid_sums, _learn_codebook_numpy,
+    _kmeans_parallel_init_numpy,
+    _learn_codebook_numpy,
+    _numpy_assign,
+    _numpy_centroid_sums,
 )
 from orka.codebook._kmeans_torch import (  # noqa: F401
-    _kmeans_pp_init_torch, _torch_assign, _learn_codebook_torch,
+    _kmeans_pp_init_torch,
+    _learn_codebook_torch,
+    _torch_assign,
 )
+from orka.core._tensor import _is_numpy_array, _is_torch_tensor, _torch_float32_matrix
 
 
 def learn_codebook_auto(

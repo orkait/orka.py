@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import heapq
 import json
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from orka._runtime import _resolve_auto_backend
+from orka.codebook import learn_codebook_auto, quantize_vectors_auto
 from orka.core._checkpoint import _load_tensors
 from orka.core._tensor import (
     _decode_to_vectors_format,
@@ -28,7 +29,6 @@ from orka.core._tensor import (
     _vectors_subtract,
 )
 from orka.core._util import _derive_seed, _index_bits_for_size, _report_progress
-from orka.codebook import learn_codebook_auto, quantize_vectors_auto
 from orka.quant import parse_quant_spec
 
 DEFAULT_CANDIDATE_SPECS = ("vq-4", "vq-8", "vq-12", "rvq-12-8", "rvq-16-8")
@@ -220,7 +220,7 @@ def build_allocation(
         denorm_factor = 1.0
         probe_flat = flat
         if search_transforms:
-            from orka.quant.transform_search import apply_transform, DEFAULT_TRANSFORM_GRID
+            from orka.quant.transform_search import DEFAULT_TRANSFORM_GRID, apply_transform
 
             w2d = flat.reshape(shape[0], -1) if len(shape) >= 2 else flat.reshape(1, -1)
             ref_stages = parse_quant_spec(_TRANSFORM_RANK_SPEC)

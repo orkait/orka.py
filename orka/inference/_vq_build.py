@@ -16,7 +16,8 @@ def _register_layer_buffers(layer, artifact_dir, stages, group_size, block_size,
     """Load codebooks/indices (per stage) and block scales into the layer's
     registered buffers. Returns the loaded scales array (or None)."""
     import numpy as np
-    from orka.core._format import _read_codebook, _read_indices, _read_float_vector
+
+    from orka.core._format import _read_codebook, _read_float_vector, _read_indices
     from orka.transforms.normalize import stores_block_scales
 
     # --- Load codebooks + indices ---
@@ -76,7 +77,8 @@ def _build_csr_correction(layer, artifact_dir, tensor_meta, n_stages, group_size
     into a position->final-value map with salient priority (NOT summed).
     """
     import numpy as np
-    from orka.core._format import _read_salient, _read_outliers
+
+    from orka.core._format import _read_outliers, _read_salient
 
     def _vq_decoded_at(flat_pos_np):
         """W_vq = vq_decode * block_scale at given flat positions."""
@@ -189,14 +191,19 @@ def _to_group_major(layer, n_stages, group_size, block_size, in_features, out_fe
 def build_vq_linear(
     artifact_dir: Path,
     tensor_meta: dict,
-    bias: Optional[torch.Tensor],
+    bias: torch.Tensor | None,
     device: str | torch.device = "cpu",
 ) -> VQLinear:
     """Construct and populate a VQLinear from one tensor's .orka metadata."""
     import numpy as np
+
     from orka.core._format import (
-        _read_codebook, _read_indices, _read_salient, _read_outliers,
-        _read_float_vector, _float_value_dtype,
+        _float_value_dtype,
+        _read_codebook,
+        _read_float_vector,
+        _read_indices,
+        _read_outliers,
+        _read_salient,
     )
 
     shape = [int(x) for x in tensor_meta["shape"]]

@@ -31,9 +31,10 @@ def _has_cuda():
 class VQLinearGroup4ParityTest(unittest.TestCase):
     def _pack_and_load(self, group_size, block_scale_size, codebook_size, n_stages=2):
         import torch
-        from orka.pipeline.pack import pack_checkpoint
-        from orka.pipeline.decode import _decode_tensor
+
         from orka.inference.vq_linear import build_vq_linear
+        from orka.pipeline.decode import _decode_tensor
+        from orka.pipeline.pack import pack_checkpoint
 
         M, K = 256, 256   # 16384 vectors at group 4 - enough for codebooks up to 8192
         rng = np.random.RandomState(0)

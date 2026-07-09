@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import math
 import tempfile
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Sequence
 
 from orka.core._format import ORKA_VERSION
 from orka.core._util import _best_run, _require_non_empty, _safe_exp, _safe_tensor_name

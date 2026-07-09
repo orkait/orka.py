@@ -6,7 +6,7 @@ Other modules call these instead of branching on backend themselves.
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from collections.abc import Sequence
 
 from orka._runtime import _resolve_torch_device
 

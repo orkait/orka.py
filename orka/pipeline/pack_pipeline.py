@@ -12,8 +12,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from orka.core._format import _cast_codebook_storage, _write_codebook, _write_indices
 from orka._runtime import _BG_WRITER, _check_ram_cap
+from orka.codebook import (
+    _codebook_cache_key,
+    _codebook_cache_load,
+    _codebook_cache_save,
+    learn_codebook_auto,
+    quantize_vectors_auto,
+)
+from orka.core._format import _cast_codebook_storage, _write_codebook, _write_indices
 from orka.core._tensor import (
     _concat_vector_parts,
     _decode_to_vectors_format,
@@ -26,13 +33,6 @@ from orka.core._util import (
     _index_bits_for_size,
     _report_progress,
     _safe_tensor_name,
-)
-from orka.codebook import (
-    _codebook_cache_key,
-    _codebook_cache_load,
-    _codebook_cache_save,
-    learn_codebook_auto,
-    quantize_vectors_auto,
 )
 from orka.pipeline.pack_helpers import _sample_vectors_and_weights, _weights_digest
 from orka.pipeline.pack_manifest import _finalize_tensor_manifest_entry, _persist_manifest

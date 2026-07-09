@@ -8,6 +8,18 @@ This package re-exports the public names so ``from orka._runtime import X`` keep
 working unchanged; import from the submodules directly only when adding new code.
 """
 
+from orka._runtime.device import (
+    CUBLAS_WORKSPACE_SLOP_BYTES,
+    CappedOutOfMemoryError,
+    _apply_gpu_memory_cap,
+    _cuda_sm_major,
+    _is_cuda_oom,
+    _maybe_fallback_cuda_to_cpu,
+    _resolve_auto_backend,
+    _resolve_torch_device,
+    _wrap_capped_oom,
+)
+from orka._runtime.io import _BG_WRITER, BackgroundWriter
 from orka._runtime.limits import (
     HARD_CEILING_GB,
     PREFLIGHT_MAX_SWAP_GB,
@@ -25,18 +37,6 @@ from orka._runtime.limits import (
     _set_ram_exceeded,
     _stop_ram_monitor,
 )
-from orka._runtime.device import (
-    CUBLAS_WORKSPACE_SLOP_BYTES,
-    CappedOutOfMemoryError,
-    _apply_gpu_memory_cap,
-    _cuda_sm_major,
-    _is_cuda_oom,
-    _maybe_fallback_cuda_to_cpu,
-    _resolve_auto_backend,
-    _resolve_torch_device,
-    _wrap_capped_oom,
-)
-from orka._runtime.io import BackgroundWriter, _BG_WRITER
 
 __all__ = [
     "HARD_CEILING_GB",

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from orka.core._format import (
     _float_value_dtype,
@@ -190,8 +190,8 @@ def _decode_tensor(out_dir: Path, tensor_meta: dict):
 
 def _decode_tensor_torch(out_dir: Path, tm: dict, device: str):
     """Decode a single quantized tensor on GPU, return torch tensor in original shape."""
-    import torch
     import numpy as np
+    import torch
 
     group_size = int(tm["group_size"])
     padded_values = int(tm["padded_values"])

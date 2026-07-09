@@ -21,8 +21,8 @@ import torch.nn as nn
 
 
 def export_inference(
-    artifact_dir: Union[str, Path],
-    hf_model_dir: Union[str, Path],
+    artifact_dir: str | Path,
+    hf_model_dir: str | Path,
     device: str = "cuda",
     dtype: torch.dtype = torch.float16,
 ) -> nn.Module:
@@ -97,7 +97,7 @@ def export_inference(
             else:
                 _replace(child, full)
 
-    print(f"replacing quantized linears with VQLinear ...", flush=True)
+    print("replacing quantized linears with VQLinear ...", flush=True)
     _replace(model)
     print(f"  replaced {n_replaced} layers", flush=True)
 

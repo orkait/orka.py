@@ -4,6 +4,7 @@ A large, self-contained block of argparse options; kept separate so parser.py
 stays scannable."""
 from __future__ import annotations
 
+
 def _add_pack_args(p):
     p.add_argument("--group-size", type=int, default=8)
     p.add_argument("--codebook-size", type=int, default=256)

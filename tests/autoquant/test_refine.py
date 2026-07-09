@@ -1,6 +1,6 @@
-from orka.autoquant.refine import Quality, meets, attribute, escalate_cfg, refine
-from orka.autoquant.schema import TensorConfig
 from orka.autoquant.probes import Signals
+from orka.autoquant.refine import Quality, attribute, escalate_cfg, meets, refine
+from orka.autoquant.schema import TensorConfig
 
 
 def _rvq(bits=3, stages=2):

@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from collections.abc import Sequence
 
-from orka._runtime import _resolve_torch_device, _check_ram_cap
+from orka._runtime import _check_ram_cap, _resolve_torch_device
 from orka.core._tensor import _is_numpy_array, _is_torch_tensor, _torch_float32_matrix
 
 

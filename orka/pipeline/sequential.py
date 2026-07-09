@@ -115,8 +115,8 @@ def pack_checkpoint_sequential(
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    from orka.eval.prompts import _read_prompt_file
     from orka.artifact.merge import merge_orka_artifacts
+    from orka.eval.prompts import _read_prompt_file
     from orka.pipeline.decode import _decode_tensor
     from orka.pipeline.pack import pack_checkpoint
 

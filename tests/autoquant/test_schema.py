@@ -1,4 +1,4 @@
-from orka.autoquant.schema import TensorConfig, to_allocation_map, from_allocation_map
+from orka.autoquant.schema import TensorConfig, from_allocation_map, to_allocation_map
 
 
 def test_roundtrip():

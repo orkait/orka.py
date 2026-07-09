@@ -21,7 +21,6 @@ from orka.core._checkpoint import _load_tensors
 from orka.eval.hf import _copy_hf_sidecars, _resolve_eval_model_dir
 from orka.pipeline.decode import _decode_tensor, _read_lowrank
 
-
 _EXPORT_DTYPES = {"bfloat16", "float16", "float32"}
 
 
@@ -71,7 +70,7 @@ def export_vllm(
     packed_meta = {t["name"]: t for t in manifest.get("tensors", [])}
     corrections: dict[str, tuple] = {}
 
-    weights: dict[str, "torch.Tensor"] = {}
+    weights: dict[str, torch.Tensor] = {}
     for name, tm in packed_meta.items():
         tm_decode = dict(tm)
         lr_meta = tm_decode.get("lowrank")
@@ -132,7 +131,7 @@ def _write_peft_adapter(adapter_dir: Path, corrections: dict) -> dict:
     max_rank = max(a.shape[1] for a, _ in corrections.values())
     target_leaves = sorted({_leaf_name(n) for n in corrections})
 
-    tensors: dict[str, "torch.Tensor"] = {}
+    tensors: dict[str, torch.Tensor] = {}
     for name, (a, b) in corrections.items():
         module = _module_path(name)
         a_t = torch.from_numpy(a.copy())  # [out, r]

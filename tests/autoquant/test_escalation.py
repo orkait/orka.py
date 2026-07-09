@@ -1,4 +1,4 @@
-from orka.autoquant.escalation import should_escalate, signature, Cache
+from orka.autoquant.escalation import Cache, should_escalate, signature
 from orka.autoquant.probes import Signals
 
 

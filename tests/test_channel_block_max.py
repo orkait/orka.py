@@ -5,10 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from orka.pipeline.pack import pack_checkpoint
 from orka.artifact.reconstruct import reconstruct_artifact
 from orka.eval.report import report_artifact
 from orka.eval.verify import verify_artifact
+from orka.pipeline.pack import pack_checkpoint
 
 
 class ChannelBlockMaxRoundTripTest(unittest.TestCase):

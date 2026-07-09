@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from orka.core._features import AWQ_DISABLED_MESSAGE, awq_feature_enabled
 
-
 # --- Tunable thresholds ---------------------------------------------------------
 # Named so they are not magic numbers buried in the pipeline body.
 

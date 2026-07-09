@@ -1,7 +1,8 @@
 """Data contract for autoquant decisions. TensorConfig is one tensor's decision;
 to/from_allocation_map (de)serialize the per-tensor map consumed by `orka pack`."""
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+
+from dataclasses import asdict, dataclass
 
 
 @dataclass(frozen=True)

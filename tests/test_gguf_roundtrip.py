@@ -79,8 +79,8 @@ def test_gguf_roundtrip(tmp_path):
         capture_output=True,
     )
 
-    from gguf import GGUFReader
     import verify_gguf
+    from gguf import GGUFReader
 
     reader = GGUFReader(str(gguf_path))
     gguf_tensors = {t.name: t for t in reader.tensors}

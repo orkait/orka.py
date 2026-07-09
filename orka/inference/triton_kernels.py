@@ -19,7 +19,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 # ---------------------------------------------------------------------------
 # Decode-optimized kernel (N=1 autoregressive hot path)
 # ---------------------------------------------------------------------------

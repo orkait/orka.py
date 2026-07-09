@@ -176,6 +176,7 @@ def apply_transform(weight, normalization: str | None, rotation: str | None, *, 
         hb = _hadamard_block_size(cols)
         if device is not None and "cuda" in str(device):
             import torch
+
             from orka.transforms.rotate import _block_fwht_torch
 
             t = torch.as_tensor(Wn, dtype=torch.float32, device=device).reshape(rows, cols)

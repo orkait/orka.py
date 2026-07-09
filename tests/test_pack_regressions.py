@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from orka.pipeline.pack import pack_checkpoint
 from orka.eval.verify import verify_artifact
+from orka.pipeline.pack import pack_checkpoint
 
 
 def _write_multi_family_source(path: Path) -> None:

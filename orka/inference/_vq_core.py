@@ -10,7 +10,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-
 class VQLinear(nn.Module):
     """Linear layer backed by VQ codebooks.
 
@@ -25,7 +24,7 @@ class VQLinear(nn.Module):
         group_size: int,
         block_size: int,
         cb_sizes: list[int] | int,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.out_features = out_features
@@ -39,7 +38,7 @@ class VQLinear(nn.Module):
         if isinstance(cb_sizes, int):
             cb_sizes = [cb_sizes] * n_stages
         self.cb_sizes = list(cb_sizes)
-        self._triton_ok: Optional[bool] = None
+        self._triton_ok: bool | None = None
 
         total = out_features * in_features
         n_groups = math.ceil(total / group_size)
@@ -107,7 +106,7 @@ class VQLinear(nn.Module):
     # Correction sparse tensor (rebuilt on first forward or after .to())
     # ------------------------------------------------------------------
 
-    def _correction_sparse(self) -> Optional[torch.Tensor]:
+    def _correction_sparse(self) -> torch.Tensor | None:
         if self.corr_col.numel() == 0:
             return None
         # Wrap the stored CSR buffers as a torch CSR sparse tensor for cuSPARSE

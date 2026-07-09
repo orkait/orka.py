@@ -24,8 +24,8 @@ grouping in family mode) and ``autoquant.roles.classify_role`` (bit-allocation p
 """
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Iterable, Mapping
 
 _OUTPUT_HEAD_MARKERS = ("lm_head", "embed_out", "output.weight")
 # Documented state-space / recurrent block names (name fallback only). Mamba/Mamba2 register
@@ -105,7 +105,7 @@ class ArchProfile:
     recurrent_names: frozenset[str]
 
     @classmethod
-    def from_shapes(cls, tensor_shapes: Mapping, vocab_size: int | None = None) -> "ArchProfile":
+    def from_shapes(cls, tensor_shapes: Mapping, vocab_size: int | None = None) -> ArchProfile:
         twod = [tuple(s) for s in tensor_shapes.values() if len(s) == 2]
         vocab = vocab_size or (max((s[0] for s in twod), default=0) or None)
         return cls(
@@ -115,7 +115,7 @@ class ArchProfile:
         )
 
     @classmethod
-    def from_model(cls, model) -> "ArchProfile":
+    def from_model(cls, model) -> ArchProfile:
         """Live-model profile: the output head is found by ``get_output_embeddings()``
         IDENTITY (the canonical signal) plus any Linear of vocab width; recurrent blocks by
         the sibling state params over ``named_parameters()``."""

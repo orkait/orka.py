@@ -17,9 +17,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from orka.pipeline.pack import pack_checkpoint
-from orka.pipeline.decode import _decode_tensor
 from orka.inference.vq_linear import VQLinear, build_vq_linear
+from orka.pipeline.decode import _decode_tensor
+from orka.pipeline.pack import pack_checkpoint
 
 
 def _write_source(path: Path) -> None:

@@ -49,6 +49,7 @@ def dequant_linear(idx_stages, codebooks, scales, M, K, group_size, block_size, 
 def export_gguf(artifact_dir, config_dir, out_path) -> dict:
     """Write a GGUF with the orka RVQ data. Returns a summary."""
     from gguf import GGUFWriter
+
     from orka.inference.vq_linear import build_vq_linear
     from orka.pipeline.decode import _decode_tensor
 
