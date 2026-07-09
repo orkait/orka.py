@@ -62,7 +62,11 @@ if __name__ == "__main__":
 
     from huggingface_hub import login
 
-    login(token="***REMOVED-HF-TOKEN***")
+    from orka.deploy.kaggle import _load_hf_token
+
+    token = _load_hf_token()
+    if token:
+        login(token=token)
 
     from orka.cli import main
 

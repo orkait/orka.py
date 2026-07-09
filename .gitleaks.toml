@@ -1,0 +1,37 @@
+title = "orka-compiler secret rules"
+
+# Stock gitleaks has no HuggingFace rule and reports a clean scan on a repo whose
+# history carries a live hf_ token. Every provider this project touches is declared
+# explicitly rather than relying on the default set.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "huggingface-token"
+description = "HuggingFace access token"
+regex = '''hf_[A-Za-z0-9]{30,40}'''
+keywords = ["hf_"]
+
+[[rules]]
+id = "huggingface-inline-login"
+description = "HuggingFace login() with a literal token"
+regex = '''login\(\s*token\s*=\s*["'][^"']+["']'''
+keywords = ["login("]
+
+[[rules]]
+id = "kaggle-api-key"
+description = "Kaggle API key in kaggle.json form"
+regex = '''"key"\s*:\s*"[a-f0-9]{32}"'''
+keywords = ["kaggle", "\"key\""]
+
+[[rules]]
+id = "generic-token-assignment"
+description = "Credential assigned to a literal"
+regex = '''(?i)(api[_-]?key|auth[_-]?token|access[_-]?token|secret)\s*[:=]\s*["'][A-Za-z0-9_\-]{20,}["']'''
+
+[allowlist]
+description = "Paths that legitimately contain token-shaped fixtures or docs"
+paths = [
+    '''\.gitleaks\.toml$''',
+    '''docs/superpowers/specs/.*\.md$''',
+]
