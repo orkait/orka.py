@@ -6,12 +6,12 @@
 
 A residual-vector-quantization compressor for transformer weights: fit per-tensor codebooks, store indices as bit-planes, recover quality with QAT, and export to GGUF or vLLM. No magic, just codebooks and honest engineering.
 
-[![python](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org)
-[![torch](https://img.shields.io/badge/PyTorch-CUDA-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
+[![python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org)
+[![torch](https://img.shields.io/badge/PyTorch-optional-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org)
 [![format](https://img.shields.io/badge/format-RVQ_+_12--bit_bit--planes-4f8ff7)](#-how-it-works)
 [![bits](https://img.shields.io/badge/weights-~2_bits-7c3aed)](#-honest-benchmarks)
-[![tests](https://img.shields.io/badge/tests-154_green-2ea043)](#-development)
-[![license](https://img.shields.io/badge/license-MIT-green)](#-license)
+[![ci](https://github.com/orkait/orka-compiler/actions/workflows/ci.yml/badge.svg)](https://github.com/orkait/orka-compiler/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-Apache_2.0-green)](#-license)
 
 </div>
 
@@ -26,8 +26,11 @@ That's the whole trick. It is not a new number format, not a kernel-fusion mirac
 ## ⚡ Quick start
 
 ```bash
-# deps (the usual ML stack)
-pip install torch transformers datasets numpy safetensors bitsandbytes
+# core install: numpy only. The numpy backend is the deterministic reference path.
+pip install orka-compiler
+
+# GPU packing and HF model loading are extras
+pip install 'orka-compiler[torch,hf]'
 
 # 1. compress a model -> a .orka artifact (~2 bits/weight)
 python -m orka pack  ./SmolLM-135M  --out model.orka \
@@ -115,14 +118,20 @@ autoquant     auto-pick the config               eval/sweep  benchmark configs
 ## 🧪 Development
 
 ```bash
-python -m pytest tests/ -q       # 156 tests; the structural contract (pack is byte-non-deterministic)
+pip install -e '.[dev,torch,hf]'
+pre-commit install
+
+pytest -q                            # full suite
+pytest tests/test_golden_oracle.py   # the structural pack gate
 ```
+
+`pack_checkpoint` output is **not byte-reproducible** (codebook bytes move under threaded BLAS), so the invariant we protect is structural: `tests/test_golden_oracle.py` packs a seeded model through 12 configurations and hashes a fingerprint of each manifest. Any change that moves the combined hash changed pack behaviour. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 The package is organized by domain (see the table above). Old flat import paths (`orka.hf`, `orka.reconstruct`, ...) still work via compat shims while callers migrate to the canonical ones.
 
 ## 📄 License
 
-MIT.
+[Apache License 2.0](LICENSE).
 
 ---
 
