@@ -29,3 +29,10 @@ kernel/test_orka_vq_ci
 kernel/ggml_orka_op
 artifacts/
 .superpowers/
+
+# credentials
+*.token
+kaggle.json
+credentials.json
+*.pem
+.env.*

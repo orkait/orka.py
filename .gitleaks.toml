@@ -36,5 +36,6 @@ regexes = [
 ]
 paths = [
     '''\.gitleaks\.toml$''',
-    '''docs/superpowers/specs/.*\.md$''',
+    '''\.pre-commit-config\.yaml$''',
+    '''docs/superpowers/.*\.md$''',
 ]
