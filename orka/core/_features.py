@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+from orka import config
 
 AWQ_DISABLED_MESSAGE = (
     "AWQ support is disabled by default because it depends on external "
@@ -11,8 +11,7 @@ AWQ_DISABLED_MESSAGE = (
 
 
 def awq_feature_enabled() -> bool:
-    value = os.environ.get("ORKA_ENABLE_AWQ", "")
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    return config.awq_enabled()
 
 
 def ensure_awq_feature_enabled() -> None:

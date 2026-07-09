@@ -11,6 +11,8 @@ import os
 import threading
 import time
 
+from orka import config
+
 try:
     import psutil
     _HAS_PSUTIL = True
@@ -26,12 +28,11 @@ except ImportError:
 
 # Hard ceiling: never let RAM_CAP exceed this regardless of user input.
 # Calibrated for 32GB systems: leaves 5GB for kernel + UI + swap-pressure margin.
-# Override only via env var ORKA_HARD_CEILING_GB (e.g. for 64GB machines).
-HARD_CEILING_GB = float(os.environ.get("ORKA_HARD_CEILING_GB", "25.0"))
+# Bound once at import, as before; override via ORKA_HARD_CEILING_GB.
+HARD_CEILING_GB = config.hard_ceiling_gb()
 
-# Preflight thresholds (override via env vars if you know what you're doing):
-PREFLIGHT_MIN_AVAIL_GB = float(os.environ.get("ORKA_PREFLIGHT_MIN_AVAIL_GB", "5.0"))
-PREFLIGHT_MAX_SWAP_GB = float(os.environ.get("ORKA_PREFLIGHT_MAX_SWAP_GB", "4.0"))
+PREFLIGHT_MIN_AVAIL_GB = config.preflight_min_avail_gb()
+PREFLIGHT_MAX_SWAP_GB = config.preflight_max_swap_gb()
 
 
 class SystemRAMExceededError(RuntimeError):

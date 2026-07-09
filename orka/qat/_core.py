@@ -57,8 +57,8 @@ def _kmeans_fit(vectors: torch.Tensor, k: int, iters: int = 12) -> torch.Tensor:
     a PTQ-quality warm start; from random seeds the 4096-centroid assignment is
     ~40% off and 150 steps cannot recover it. ORKA_KMEANS_ITERS overrides the
     iteration count (fewer = faster warm-start for quick validation)."""
-    import os
-    iters = int(os.environ.get("ORKA_KMEANS_ITERS", iters))
+    from orka import config
+    iters = config.kmeans_iters(iters)
     cb = _kmeans_init(vectors, k)
     for _ in range(iters):
         assign = _chunked_assign(vectors, cb)
