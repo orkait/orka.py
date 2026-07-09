@@ -1,8 +1,5 @@
 """``pack_checkpoint``: source -> normalize -> rotate -> outliers -> RVQ stages
 -> joint EM-AQ -> manifest write.
-
-Currently a single ~700 LOC orchestrator. Splitting into named phases is a
-follow-up; would not change semantics.
 """
 
 from __future__ import annotations
@@ -92,18 +89,6 @@ from orka.transforms import (
     stores_block_scales,
 )
 
-# Vector-prep helpers (_weights_digest, _sample_vectors_and_weights,
-# _numpy_vectors_from_tensor, _torch_vectors_from_tensor) live in
-# orka.pipeline.pack_helpers and are imported above.
-
-
-# Sidecar persistence + manifest assembly (_persist_tensor_sidecars,
-# _build_tensor_manifest_entry, _release_candidate_payload, _finalize_tensor_manifest_entry,
-# _persist_manifest) live in orka.pipeline.pack_manifest and are imported above.
-
-# The EM-AQ joint-optimization phase (_run_em_aq_refinement) and _offload_to_cpu
-# live in orka.pipeline.strategies.refinement and are imported above.
-
 
 def _prefetch_worker(
     ctx: PackCtx,
@@ -130,10 +115,8 @@ def _prefetch_worker(
     Config that already lives on PackCtx (backend, normalization, rotation, etc.) is
     read off ``ctx``; the remaining run knobs and the shared mutable state (queue, the
     prefetch_done Event, _prefetch_exc / _prefetch_state, _passthrough, awq_fallbacks)
-    are threaded in explicitly. Pulled out of pack_checkpoint as a module-level function
-    so the orchestrator shrinks; behaviour is identical to the former nested closure.
+    are threaded in explicitly.
     """
-    # Unpack the ctx-resident config so the body below reads exactly as it did inline.
     backend = ctx.backend
     n_stages = ctx.n_stages
     codebook_mode = ctx.codebook_mode
@@ -548,9 +531,6 @@ def pack_checkpoint(
 
     streamed_tensor_count = 0
 
-    # Per-tensor processing (stage loop + strategies + manifest entry) and the stage-spec
-    # resolver live in orka.pipeline.pack_pipeline. Bundle the resolved config into a
-    # PackCtx and hand each candidate to process_streamed_per_tensor_candidate below.
     # One ArchProfile for the whole pack: structural per-tensor identification (output head
     # / vocab-width embedding / recurrent SSM), the single source of truth shared by pillar
     # protection and the error-comp gate. Built from a cheap header-only shape scan -

@@ -3,7 +3,7 @@
 PackCtx bundles the resolved pack configuration + run accumulators (built once by
 pack_checkpoint after arg resolution), and process_streamed_per_tensor_candidate does the
 per-tensor work: the RVQ stage loop, then the post-assignment strategies
-(error_compensation -> em_aq -> mse_scale), then the manifest entry. Pulled out of pack.py
+(error_compensation -> em_aq -> mse_scale), then the manifest entry.
 so pack_checkpoint is the orchestrator and this module is the worker.
 """
 
@@ -308,7 +308,6 @@ def _quantize_and_record_stage(
 
 
 def process_streamed_per_tensor_candidate(ctx: PackCtx, c: dict, stream_index: int) -> None:
-    # Unpack resolved config so the body below reads exactly as it did inline.
     backend = ctx.backend
     n_stages = ctx.n_stages
     group_size = ctx.group_size
