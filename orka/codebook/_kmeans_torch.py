@@ -65,7 +65,6 @@ def _kmeans_pp_init_torch(
         # Update min_d2 with GEMM-form distance, chunking by ~256 MB matrix budget.
         c_norm_sq = torch.sum(new_centers * new_centers, dim=1, keepdim=True).T
         c_count = int(new_centers.shape[0])
-        # Budget per chunk: 256 MB / (elem_size * c_count)
         elem_size = 2 if use_half else 4
         batch_size = max(256, min(65536, (1 << 28) // (elem_size * max(c_count, 1))))
         for i in range(0, n, batch_size):
@@ -138,8 +137,8 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_nor
     with torch.no_grad():
         # Fused dist+argmin Triton kernel on CUDA (~4x the chunked-addmm path, never
         # materializes the [N,k] matrix so it can't OOM at large k); addmm fallback on
-        # CPU. fp32 throughout - a more accurate nearest than the old fp16 ranking, so
-        # recon error is <= the previous path (the ||v||^2 norm drops out of argmin).
+        # CPU. fp32 throughout, so the nearest centroid is exact rather than fp16-ranked
+        # (the ||v||^2 term is constant across centroids and drops out of the argmin).
         idx = _fused_assign(rows, centroids)                       # int64 [N]
         sel = centroids.index_select(0, idx)                       # [N, d]
         mse = ((rows - sel) ** 2).sum() / (rows.shape[0] * width)
@@ -236,7 +235,6 @@ def _learn_codebook_torch(
     k = min(int(codebook_size), n)
     effective_iters = min(iterations, 3) if k >= int(n * 0.9) else iterations
 
-    # Pre-resolve target dtype and pre-calculate row norms once
     resolved = _resolve_torch_device(device)
 
     # Opt-in faiss GPU Lloyd: unweighted CUDA path only (faiss has no per-dimension
@@ -282,7 +280,6 @@ def _learn_codebook_torch(
                 print(f"      [Lloyd] Iteration {iter_i + 1}/{effective_iters}", flush=True)
             _check_ram_cap()
 
-            # Save old codebook to monitor convergence shift
             old_codebook = codebook.clone()
 
             indices, _ = _torch_assign(
