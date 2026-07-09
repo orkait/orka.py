@@ -42,6 +42,6 @@ The historical flat paths (`orka.hf`, `orka.reconstruct`, `orka.qat_train`, `ork
 
 ## ✅ Invariants
 
-- **Tests are the structural gate.** `pytest tests/` (154 tests) must stay green across any move; the pack is byte-non-deterministic, so the suite is the contract.
+- **Tests are the structural gate.** `pytest` must stay green across any move. The pack is not byte-reproducible (codebook bytes shift under threaded BLAS), so the contract is `tests/test_golden_oracle.py`: it packs a seeded model through 12 configurations and hashes a manifest-derived fingerprint. A change that moves the combined hash changed pack behaviour.
 - **`core` stays dependency-free** within `orka` - if a `core` module needs another subpackage, the boundary is wrong.
 - **One concern per subpackage** - a file that mixes pack + eval + integration logic should be split along these lines.

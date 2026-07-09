@@ -125,7 +125,7 @@ The default compiler path is still CPU-first:
 Example GPU pack:
 
 ```bash
-python3 orka.py pack model.safetensors \
+orka pack model.safetensors \
   --out model.orka \
   --group-size 8 \
   --codebook-size 256 \
@@ -138,7 +138,7 @@ python3 orka.py pack model.safetensors \
 Example GPU sweep:
 
 ```bash
-python3 orka.py sweep model.safetensors \
+orka sweep model.safetensors \
   --out /tmp/orka-sweep.json \
   --group-sizes 8 16 \
   --codebook-sizes 256 \
@@ -154,7 +154,7 @@ CUDA support requires a working PyTorch CUDA install. If CUDA is requested but u
 
 ## Compiler Scope v0
 
-`orka.py` owns the research compiler prototype:
+The `orka` CLI (`orka.cli`) owns the research compiler prototype:
 
 - `calc`: estimate payload size from parameter count and quantization geometry.
 - `inspect`: report candidate tensors in a local safetensors or PyTorch checkpoint.
@@ -188,7 +188,7 @@ Use `awq` and `awq-block-max` only when calibration activations are available an
 Example:
 
 ```bash
-python3 orka.py pack model.safetensors \
+orka pack model.safetensors \
   --out model-slrq.orka \
   --group-size 8 \
   --codebook-size 256 \
@@ -222,13 +222,13 @@ inspect checkpoint -> pack checkpoint -> report artifact -> verify artifact -> r
 Example:
 
 ```bash
-python3 orka.py calc --params 8.03b --group-size 8 --codebook-size 256
-python3 orka.py inspect model.safetensors
-python3 orka.py pack model.safetensors --out model.orka --group-size 8 --codebook-size 256
-python3 orka.py report model.orka
-python3 orka.py verify model.orka
-python3 orka.py reconstruct model.orka --out reconstructed.json
-python3 orka.py reconstruct model.orka --out reconstructed.safetensors --format safetensors
+orka calc --params 8.03b --group-size 8 --codebook-size 256
+orka inspect model.safetensors
+orka pack model.safetensors --out model.orka --group-size 8 --codebook-size 256
+orka report model.orka
+orka verify model.orka
+orka reconstruct model.orka --out reconstructed.json
+orka reconstruct model.orka --out reconstructed.safetensors --format safetensors
 ```
 
 Use `--max-values-per-tensor` during early experiments to test the compiler on tensor samples before packing full checkpoints.
@@ -237,7 +237,7 @@ JSON reconstruction is dependency-free. Safetensors reconstruction requires opti
 For larger local safetensors checkpoints, use sampled codebook training. Use the torch backend when a CUDA GPU is available:
 
 ```bash
-python3 orka.py pack model.safetensors \
+orka pack model.safetensors \
   --out model.orka \
   --group-size 8 \
   --codebook-size 256 \
@@ -252,7 +252,7 @@ python3 orka.py pack model.safetensors \
 Use `sweep` when comparing settings:
 
 ```bash
-python3 orka.py sweep model.safetensors \
+orka sweep model.safetensors \
   --out /tmp/orka-sweep.json \
   --group-sizes 4 8 16 \
   --codebook-sizes 256 \
@@ -269,7 +269,7 @@ The sweep summary records every artifact path plus artifact size, index bytes, c
 Use `eval` after sweep has identified one candidate artifact:
 
 ```bash
-python3 orka.py eval /tmp/orka-sweep.artifacts/g8-k256-global-block-max.orka \
+orka eval /tmp/orka-sweep.artifacts/g8-k256-global-block-max.orka \
   --prompts prompts.txt \
   --out /tmp/orka-eval.json \
   --model-dir /path/to/hf-model-dir \
@@ -282,7 +282,7 @@ python3 orka.py eval /tmp/orka-sweep.artifacts/g8-k256-global-block-max.orka \
 Use `eval-sweep` when the sweep has multiple candidates and behavior-level ranking matters:
 
 ```bash
-python3 orka.py eval-sweep /tmp/orka-sweep.json \
+orka eval-sweep /tmp/orka-sweep.json \
   --prompts prompts.txt \
   --out /tmp/orka-eval-sweep.json \
   --model-dir /path/to/hf-model-dir \
@@ -312,8 +312,8 @@ Family mode uses deterministic name-based routing:
 Example:
 
 ```bash
-python3 orka.py pack model.safetensors --out model-global.orka --group-size 8 --codebook-size 256 --codebook-mode global
-python3 orka.py pack model.safetensors --out model-family.orka --group-size 8 --codebook-size 256 --codebook-mode family
+orka pack model.safetensors --out model-global.orka --group-size 8 --codebook-size 256 --codebook-mode global
+orka pack model.safetensors --out model-family.orka --group-size 8 --codebook-size 256 --codebook-mode family
 ```
 
 ## Quant Spec Naming
@@ -375,7 +375,7 @@ changed calibration data never reuses a stale cached codebook.
 ### Sequential Calibration Packing
 
 ```bash
-python3 orka.py pack model.safetensors \
+orka pack model.safetensors \
   --out model-seq.orka \
   --sequential-calibration \
   --awq-model-dir /path/to/hf-model-dir \
@@ -394,7 +394,7 @@ is required; the manifest records `sequential_calibration`.
 ### Error-Compensated Assignment (GPTVQ-lite)
 
 ```bash
-python3 orka.py pack model.safetensors --out model.orka \
+orka pack model.safetensors --out model.orka \
   --error-compensation \
   --awq-calibration calib.txt --awq-model-dir /path/to/hf-model-dir \
   --codebook-mode per-tensor --backend torch --device cuda ...
@@ -431,7 +431,7 @@ low-rank correction. No rotation, no error compensation.
 ### Post-Pack Codebook Distillation
 
 ```bash
-python3 orka.py distill model.orka --steps 200 --lr 1e-3 \
+orka distill model.orka --steps 200 --lr 1e-3 \
   --model-dir /path/to/hf-model-dir --prompts prompts.txt
 ```
 
@@ -465,10 +465,10 @@ Format v2 attacks artifact bytes at zero quality cost:
 ## Measured Bit Allocation
 
 ```bash
-python3 orka.py allocate model.safetensors --out alloc.json --target-bpw 3.0 \
+orka allocate model.safetensors --out alloc.json --target-bpw 3.0 \
   --candidates vq-8 vq-12 rvq-8-8 rvq-12-8 rvq-12-12 \
   --backend torch --device cuda
-python3 orka.py pack model.safetensors --out model.orka \
+orka pack model.safetensors --out model.orka \
   --allocation-map alloc.json --codebook-mode per-tensor ...
 ```
 
@@ -488,7 +488,7 @@ for small models, or use measured allocation with small-k candidates.
 ## Low-Rank Correction
 
 ```bash
-python3 orka.py correct model.orka --rank 8 --device cuda
+orka correct model.orka --rank 8 --device cuda
 ```
 
 Factors each tensor's post-pack residual `W - decode(W)` with truncated SVD
@@ -499,7 +499,7 @@ sidecars that do not reduce error are dropped automatically.
 ## Serving Exports
 
 ```bash
-python3 orka.py export-vllm model.orka --out model-hf \
+orka export-vllm model.orka --out model-hf \
   --model-dir /path/to/hf-model-dir --dtype bfloat16
 ```
 

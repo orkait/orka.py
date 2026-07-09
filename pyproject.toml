@@ -35,7 +35,7 @@ dependencies = [
 [project.optional-dependencies]
 torch = ["torch>=2.1", "triton>=2.1; platform_system == 'Linux'"]
 hf = ["transformers>=4.40", "huggingface_hub>=0.23", "datasets>=2.19"]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = ["pytest>=8.0", "ruff>=0.6", "pre-commit>=3.7"]
 
 [project.scripts]
 orka = "orka.cli:main"

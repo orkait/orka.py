@@ -44,7 +44,15 @@ orka reconstruct  model.orka --out recon.safetensors --format safetensors
 orka export-vllm   model.orka --out ./model-vllm
 ```
 
-Want orka to pick the settings for you? `orka autoquant ./model --target-bpw 2.0`.
+Want orka to pick the settings for you?
+
+```bash
+# autoquant's --target is a KL budget against fp16, not a bit-width
+orka autoquant ./model --objective min-bits --target 0.05 --out alloc.json
+
+# for an explicit bit-width target, allocate is the command with --target-bpw
+orka allocate ./model --target-bpw 4.0 --out alloc.json
+```
 
 `python -m orka <command>` works identically if you prefer not to rely on the console script.
 
