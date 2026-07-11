@@ -40,6 +40,7 @@ from orka.core._tensor import (
     _is_torch_tensor,
     _numpy_float32_array,
     _sample_vector_rows,
+    _tensor_numel,
     _tensor_shape,
     _torch_f32,
     _vectors_subtract,
@@ -193,6 +194,22 @@ def _prefetch_worker(
             t_normalization = _tf.get("normalization", normalization)
             t_rotation = _tf.get("rotation", rotation)
 
+            # Giants (vocab-width head/embed class) can't hold multiple full fp32
+            # copies on a consumer GPU - the producer's normalize / source_flat /
+            # vector prep each materialize the whole tensor. Prep them CPU-resident
+            # (same row gate as the tiled assign, see _LARGE_ASSIGN_ROWS). Scale/max
+            # ops are IEEE-identical across devices (salient argmax tie-breaks on
+            # exact fp ties are the only divergence). A chunked-GPU pass measures a
+            # wash (2.8s vs 3.2s per 1B tensor - PCIe-bound at ~2 flops/byte), so
+            # CPU-resident wins on simplicity; downstream already handles it
+            # (tiled assign, CPU decode+residual).
+            prep_device = resolved_device
+            if backend == "torch":
+                from orka.codebook._kmeans_torch import _LARGE_ASSIGN_ROWS
+
+                if _tensor_numel(tensor) // max(group_size, 1) > _LARGE_ASSIGN_ROWS:
+                    prep_device = "cpu"
+
             row_scales = None
             source_flat = None
             awq_col_scales = None
@@ -210,7 +227,7 @@ def _prefetch_worker(
                     salient_weights, salient_indices
                 ) = _apply_normalization(
                     tensor, name, t_normalization, awq_activations, awq_alpha,
-                    block_scale_size, backend, resolved_device, awq_fallbacks,
+                    block_scale_size, backend, prep_device, awq_fallbacks,
                     slrq_salient=slrq_salient,
                 )
 
@@ -219,7 +236,7 @@ def _prefetch_worker(
             # This is mandatory for quality metrics verification.
             if source_flat is None:
                 if backend == "torch":
-                    _, _arr = _torch_f32(tensor, resolved_device)
+                    _, _arr = _torch_f32(tensor, prep_device)
                     source_flat = _arr.reshape(-1).detach().cpu()
                 else:
                     source_flat = _numpy_float32_array(tensor).reshape(-1)
@@ -228,7 +245,7 @@ def _prefetch_worker(
             tensor_rotation = "none"
             if t_rotation in {"orthogonal", "hadamard"}:
                 tensor, tensor_seed = _rotate_tensor_to_2d(
-                    tensor, name, t_rotation, rotation_seed, backend, resolved_device
+                    tensor, name, t_rotation, rotation_seed, backend, prep_device
                 )
                 tensor_rotation = t_rotation
 
@@ -257,7 +274,7 @@ def _prefetch_worker(
 
             if backend == "torch":
                 packed_values, padded_values, vectors = _torch_vectors_from_tensor(
-                    tensor, resolved_group_size, max_values_per_tensor, resolved_device
+                    tensor, resolved_group_size, max_values_per_tensor, prep_device
                 )
             else:
                 packed_values, padded_values, vectors = _numpy_vectors_from_tensor(
@@ -278,9 +295,10 @@ def _prefetch_worker(
             col_importance = None
             if (awq_activations is not None and name in awq_activations and shape[-1] % resolved_group_size == 0):
                 import torch
-                # compute E[x^2] on the pack device (GPU under torch) instead of CPU
+                # compute E[x^2] on the pack device (GPU under torch) instead of CPU;
+                # giants use prep_device so the tiled per-vector weights stay CPU-side.
                 H_diag = torch.as_tensor(
-                    awq_activations[name], dtype=torch.float32, device=resolved_device
+                    awq_activations[name], dtype=torch.float32, device=prep_device
                 ).pow(2).mean(dim=0)
                 cols = int(shape[-1])
                 # Column importance is in ORIGINAL column space; rotation
