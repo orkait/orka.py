@@ -135,6 +135,20 @@ import os as _os  # noqa: E402
 
 _LARGE_ASSIGN_ROWS = int(_os.environ.get("ORKA_LARGE_ASSIGN_ROWS", 20_000_000))
 
+# _LARGE_ASSIGN_ROWS is calibrated in vectors of width 8 (the 1B vocab head at
+# group_size 8 = ~127M rows x 8). Giant-ness is really about the element count
+# (rows x width = bytes/4), so every gate compares against rows*8: a scalar-stage
+# view [numel, 1] of a 45M-element tensor is NOT a giant (the old row-count gate
+# said it was and misrouted it to the CPU-resident tiled path), while the same
+# 1B-element head is a giant in both its [127M, 8] and [1B, 1] layouts.
+_GIANT_WIDTH_REF = 8
+
+
+def _is_giant_matrix(n_rows: int, width: int) -> bool:
+    """True when a [n_rows, width] f32 matrix is too big to hold multiple full
+    copies on a consumer GPU. Element-based, layout-independent."""
+    return int(n_rows) * int(width) > _LARGE_ASSIGN_ROWS * _GIANT_WIDTH_REF
+
 
 def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_norm_sq=None, vector_weights=None, keep_device=False, compute_mse=True):
     try:
@@ -160,7 +174,7 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_nor
     # argmin is per-row independent, so the returned indices are byte-identical to the full
     # path; only mse sums in chunk order (and the quantize caller discards mse). Gated on a
     # large row count so nothing normal changes.
-    if n_rows > _LARGE_ASSIGN_ROWS:
+    if _is_giant_matrix(n_rows, width):
         # Chunk by BYTE budget, not a fixed row count: 65536 rows is 2MB at d=8, which
         # made the giant assign PCIe-latency-bound (~1940 copies + a host sync each on
         # the 1B head). Per-row argmin is independent of chunking, so indices are

@@ -205,9 +205,9 @@ def _prefetch_worker(
             # (tiled assign, CPU decode+residual).
             prep_device = resolved_device
             if backend == "torch":
-                from orka.codebook._kmeans_torch import _LARGE_ASSIGN_ROWS
+                from orka.codebook._kmeans_torch import _is_giant_matrix
 
-                if _tensor_numel(tensor) // max(group_size, 1) > _LARGE_ASSIGN_ROWS:
+                if _is_giant_matrix(_tensor_numel(tensor), 1):
                     prep_device = "cpu"
 
             row_scales = None

@@ -286,12 +286,16 @@ def _quantize_and_record_stage(
 
     is_giant = False
     if backend == "torch":
-        # Giant tensors (vocab head/embed: >20M vectors, ~3x4GB) can't hold three full
+        # Giant tensors (vocab head/embed: ~1B elements, ~3x4GB) can't hold three full
         # copies on GPU. Keep them CPU-resident: the tiled assign (_torch_assign) moves
         # only chunks to the device, and decode (cb[idx] gather) + residual subtract run
-        # on CPU - both elementwise, so bytes are identical. Normal tensors onload as before.
-        from orka.codebook._kmeans_torch import _LARGE_ASSIGN_ROWS
-        is_giant = int(v_res.shape[0]) > _LARGE_ASSIGN_ROWS
+        # on CPU - both elementwise, so bytes are identical. Normal tensors onload as
+        # before. Element-based and judged on the CANDIDATE layout (vectors_orig), so a
+        # scalar stage's [numel, 1] view of a normal tensor no longer flips it to giant.
+        from orka.codebook._kmeans_torch import _is_giant_matrix
+        is_giant = _is_giant_matrix(
+            int(c["vectors_orig"].shape[0]), int(c["vectors_orig"].shape[1])
+        )
         if not is_giant:
             c["vectors_orig"] = _onload(c["vectors_orig"], resolved_device)
             v_res = _onload(v_res, resolved_device)
