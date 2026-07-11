@@ -142,7 +142,10 @@ All of these resolve through [`orka/config.py`](orka/config.py).
 | `ORKA_PREFLIGHT_MIN_AVAIL_GB` | `5.0` | Refuse to start if `MemAvailable` is below `workload_budget + this`. |
 | `ORKA_PREFLIGHT_MAX_SWAP_GB` | `4.0` | Refuse to start if swap in use exceeds this (the system is already thrashing-prone). |
 | `ORKA_KMEANS_ITERS` | caller's value | Override the Lloyd iteration count, for quick validation runs. |
-| `ORKA_ZLIB_LEVEL` | `6` | zlib level for index/sidecar streams (clamped 0-9). Decode is level-agnostic, so `=1` trades a few percent of artifact size for ~4x faster compression on big packs. |
+| `ORKA_ZLIB_LEVEL` | `6` | zlib level for index/sidecar streams (clamped 0-9). Decode is level-agnostic, so `=1` trades a few percent of artifact size for ~4x faster compression on big packs. Recommended for giant-tensor (9B-class) packs. |
+| `ORKA_PREFETCH_BUDGET_GB` | `4.0` | Byte budget for producer read-ahead in streamed per-tensor packs. Caps the RAM the prefetched candidates retain; a candidate bigger than the budget is admitted alone, so vocab-width giants serialize instead of stacking. `<=0` disables. |
+| `ORKA_ASSIGN_CHUNK_MB` | `128` | H2D transfer size per chunk in the tiled giant-tensor assign. Indices are identical for any chunk size; this only trades transfer count against per-chunk VRAM. |
+| `ORKA_LARGE_ASSIGN_ROWS` | `20000000` | Giant-tensor threshold, in vectors of width 8 (compared as elements, `rows*8`). Lower it only to exercise the giant code path on small models in tests. |
 
 ## 🧪 Development
 
