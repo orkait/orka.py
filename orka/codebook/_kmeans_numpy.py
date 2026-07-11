@@ -96,7 +96,7 @@ def _kmeans_parallel_init_numpy(rows, k: int, seed: int | None = None, oversampl
     return centroids[:k].astype(np.float32).copy()
 
 
-def _numpy_assign(vectors, codebook, chunk_size: int = 65536, r_norm_sq=None, vector_weights=None):
+def _numpy_assign(vectors, codebook, chunk_size: int = 65536, r_norm_sq=None, vector_weights=None, compute_mse=True):
     import numpy as np
 
     rows = np.asarray(vectors, dtype=np.float32)
@@ -138,9 +138,10 @@ def _numpy_assign(vectors, codebook, chunk_size: int = 65536, r_norm_sq=None, ve
         )
         chosen = np.argmin(dists, axis=1)
         indices[start:end] = chosen
-        total += float(dists[np.arange(chosen.shape[0]), chosen].sum())
+        if compute_mse:
+            total += float(dists[np.arange(chosen.shape[0]), chosen].sum())
 
-    return indices, total / (rows.shape[0] * width)
+    return indices, (total / (rows.shape[0] * width) if compute_mse else 0.0)
 
 
 

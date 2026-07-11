@@ -109,7 +109,7 @@ def _probe_spec_distortion(
             v_res, min(k, len(v_res)), iterations, backend, device,
             seed=seed + stage_i, sample_weights=sw,
         )
-        indices, _ = quantize_vectors_auto(v_res, cb, backend, device)
+        indices, _ = quantize_vectors_auto(v_res, cb, backend, device, compute_mse=False)
         dec = _decode_to_vectors_format(v_res, cb, indices, backend, device)
         dec = dec.reshape(residual.shape) if dec.shape != residual.shape else dec
         decoded_sum = dec if decoded_sum is None else decoded_sum + dec

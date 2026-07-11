@@ -130,7 +130,10 @@ def _run_em_aq_refinement(
                         cb, dtype=stage_meta.get("codebook_dtype", "float32")
                     )
                     stage_meta["codebook_dtype"] = _cb_dtype
-                    indices, _ = quantize_vectors_auto(target_train, cb, backend, resolved_device, vector_weights=vw)
+                    indices, _ = quantize_vectors_auto(
+                        target_train, cb, backend, resolved_device,
+                        vector_weights=vw, compute_mse=False,
+                    )
 
                     new_dec_raw = _decode_to_vectors_format(
                         target_train, cb, indices, backend, resolved_device
@@ -175,9 +178,6 @@ def _run_em_aq_refinement(
             c["vectors_orig"] = None
         if "vectors" in c:
             c["vectors"] = None
-
-        import gc
-        gc.collect()
 
 
 def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_dir, device: str = "cpu") -> None:

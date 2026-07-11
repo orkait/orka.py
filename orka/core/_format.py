@@ -11,6 +11,7 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
+from orka import config
 from orka.core._tensor import _is_torch_tensor
 
 # v2: fp16 codebooks/scales (with f32 overflow fallback) + optional zlib
@@ -175,11 +176,11 @@ def _write_indices(
         bit_packed = False
 
     if encoding is None:
-        compressed = zlib.compress(raw, 6)
+        compressed = zlib.compress(raw, config.zlib_level())
         encoding = "zlib" if len(compressed) < len(raw) else "raw"
         payload = compressed if encoding == "zlib" else raw
     elif encoding == "zlib":
-        payload = zlib.compress(raw, 6)
+        payload = zlib.compress(raw, config.zlib_level())
     elif encoding == "raw":
         payload = raw
     else:
@@ -310,7 +311,7 @@ def _write_blob(path: Path, raw: bytes) -> None:
     import zlib
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    comp = zlib.compress(raw, 6)
+    comp = zlib.compress(raw, config.zlib_level())
     if len(comp) < len(raw):
         path.write_bytes(b"\x01" + comp)
     else:
