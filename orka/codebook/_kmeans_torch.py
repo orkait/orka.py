@@ -86,25 +86,35 @@ def _kmeans_pp_init_torch(
     centroids = torch.cat(candidate_chunks, dim=0)
     if centroids.shape[0] > k:
         # Reduce oversampled candidates to exactly k via classic K-Means++ on the subset.
+        # The subset is tiny (<= 5k+1 candidates x group_size), but the sequential loop is
+        # k iterations long and every torch op in it is a kernel launch, with a host sync
+        # per pick - measured 107K searchsorted/cumsum launches and 36% of pack wall.
+        # Run the whole reduction on CPU numpy instead: the k-1 uniforms are pre-drawn
+        # from the same seeded device generator in one call, so the pick stream stays
+        # deterministic per seed (fp32 numpy vs torch sums can rarely flip a pick; the
+        # init is a heuristic and Lloyd converges to equal-quality codebooks either way).
+        import numpy as np
+
         subset = centroids
         sub_n = int(subset.shape[0])
-        final_idx = torch.empty(k, dtype=torch.long, device=rows.device)
+        sub = subset.detach().float().cpu().numpy()
+        rands = torch.rand(k - 1, generator=gen, device=rows.device).cpu().numpy()
+        final_idx = np.empty(k, dtype=np.int64)
         final_idx[0] = 0
-        sub_d2 = torch.sum((subset - subset[0]) ** 2, dim=1)
+        sub_d2 = ((sub - sub[0]) ** 2).sum(axis=1)
         for j in range(1, k):
-            sum_d2 = sub_d2.sum().item()
+            sum_d2 = float(sub_d2.sum())
             if sum_d2 == 0:
                 final_idx[j] = j % sub_n
                 continue
-            probs = sub_d2 / sum_d2
-            cumprobs = torch.cumsum(probs, dim=0)
-            r = torch.rand(1, generator=gen, device=rows.device).item()
-            chosen_idx = int(torch.searchsorted(cumprobs, r).item())
-            chosen_idx = min(chosen_idx, sub_n - 1)
+            cumprobs = np.cumsum(sub_d2 / sum_d2)
+            chosen_idx = min(int(np.searchsorted(cumprobs, rands[j - 1])), sub_n - 1)
             final_idx[j] = chosen_idx
-            d2 = torch.sum((subset - subset[chosen_idx]) ** 2, dim=1)
-            sub_d2 = torch.minimum(sub_d2, d2)
-        centroids = subset.index_select(0, final_idx)
+            d2 = ((sub - sub[chosen_idx]) ** 2).sum(axis=1)
+            sub_d2 = np.minimum(sub_d2, d2)
+        centroids = subset.index_select(
+            0, torch.from_numpy(final_idx).to(rows.device)
+        )
 
     # Pad if undersampled (possible when sum_d2 hit zero early).
     if centroids.shape[0] < k:
@@ -194,17 +204,24 @@ def _det_segment_sum(keys, values, k):
     byte non-determinism in the pack. torch.segment_reduce does the per-cluster sum
     in one fused kernel (56x faster here than a manual cumsum-boundary-diff, whose
     cumsum along dim 0 was a strided, memory-bound scan); bincount gives integer-
-    exact, order-independent segment lengths."""
+    exact, order-independent segment lengths.
+
+    Returns (sums [k, *tail], lengths [k]) so the Lloyd loop reuses the bincount it
+    already paid for as its cluster counts."""
     import torch
 
     tail = tuple(values.shape[1:])
     if keys.numel() == 0:
-        return torch.zeros((k,) + tail, device=values.device, dtype=values.dtype)
+        return (
+            torch.zeros((k,) + tail, device=values.device, dtype=values.dtype),
+            torch.zeros(k, device=values.device, dtype=torch.long),
+        )
     order = torch.argsort(keys, stable=True)
     lengths = torch.bincount(keys, minlength=k)
-    return torch.segment_reduce(
+    sums = torch.segment_reduce(
         values.index_select(0, order), "sum", lengths=lengths, axis=0, unsafe=True
     )
+    return sums, lengths
 
 
 def _faiss_kmeans_enabled() -> bool:
@@ -339,9 +356,11 @@ def _learn_codebook_torch(
             # a fixed order -> reproducible codebooks. Unweighted counts are an exact
             # integer bincount (no segment-sum needed).
             k_cb = codebook.shape[0]
-            sums = _det_segment_sum(chosen, rows if sw_t is None else rows * sw_t[:, None], k_cb)
-            counts = (torch.bincount(chosen, minlength=k_cb).to(rows.dtype)
-                      if sw_t is None else _det_segment_sum(chosen, sw_t, k_cb))
+            sums, lengths = _det_segment_sum(
+                chosen, rows if sw_t is None else rows * sw_t[:, None], k_cb
+            )
+            counts = (lengths.to(rows.dtype)
+                      if sw_t is None else _det_segment_sum(chosen, sw_t, k_cb)[0])
 
             nonzero = counts > 0
             codebook[nonzero] = sums[nonzero] / counts[nonzero, None]
