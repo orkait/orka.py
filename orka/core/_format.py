@@ -189,6 +189,16 @@ def _write_indices(
     return bit_packed, encoding
 
 
+def _write_stage_indices(path: Path, indices, index_bits: int, stage_meta: dict) -> None:
+    """BackgroundWriter task: write one stage's index stream and record the encoding on
+    its ``stage_meta``. The greedy write runs with ``encoding`` unset (auto-pick) and
+    records the choice; strategy rewrites (EM-AQ, error-comp) are queued later on the
+    same single writer thread, so they see the recorded value and are forced to it -
+    the ordering that used to require a synchronous first write."""
+    _, encoding = _write_indices(path, indices, index_bits, stage_meta.get("encoding"))
+    stage_meta["encoding"] = encoding
+
+
 def _fp16_storage_roundtrip(values):
     """Round values to the fp16 grid IN MEMORY when they fit (else unchanged).
 

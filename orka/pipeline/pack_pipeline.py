@@ -9,6 +9,8 @@ so pack_checkpoint is the orchestrator and this module is the worker.
 
 from __future__ import annotations
 
+import queue
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,7 +22,12 @@ from orka.codebook import (
     learn_codebook_auto,
     quantize_vectors_auto,
 )
-from orka.core._format import _cast_codebook_storage, _write_codebook, _write_indices
+from orka.core._format import (
+    _cast_codebook_storage,
+    _write_codebook,
+    _write_indices,
+    _write_stage_indices,
+)
 from orka.core._tensor import (
     _concat_vector_parts,
     _decode_to_vectors_format,
@@ -35,7 +42,11 @@ from orka.core._util import (
     _safe_tensor_name,
 )
 from orka.pipeline.pack_helpers import _sample_vectors_and_weights, _weights_digest
-from orka.pipeline.pack_manifest import _finalize_tensor_manifest_entry, _persist_manifest
+from orka.pipeline.pack_manifest import (
+    _finalize_tensor_manifest_entry,
+    _persist_manifest,
+    _release_candidate_payload,
+)
 from orka.pipeline.strategies import POST_ASSIGNMENT_STRATEGIES, _run_em_aq_refinement
 
 
@@ -86,6 +97,69 @@ class PackCtx:
     # pack_checkpoint from the checkpoint shapes; structural-primary with name fallback.
     arch_profile: object | None = None
     total_index_bytes: int = 0
+    # Streamed-mode finalize worker (built by pack_checkpoint for per-tensor packs).
+    # None -> finalize runs inline, the pre-overlap behaviour.
+    finalize_worker: object | None = None
+
+
+class _FinalizeWorker:
+    """Single ordered worker that finalizes candidates off the GPU thread.
+
+    The GPU thread hands each candidate over right after its stage loop + strategies;
+    the worker waits for that tensor's BackgroundWriter tasks (per-tensor Event barrier,
+    not a global queue join), then runs the CPU tail - index-size refresh, sidecar
+    writes, quality metrics, manifest append - while the GPU thread packs the next
+    tensor. One worker + FIFO queue keeps manifest order identical to inline execution.
+    ``maxsize=1`` bounds RAM: at most one candidate queued + one finalizing + one on
+    the GPU thread."""
+
+    def __init__(self, ctx: "PackCtx"):
+        self.ctx = ctx
+        self.queue: queue.Queue = queue.Queue(maxsize=1)
+        self.errors: list[BaseException] = []
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        while True:
+            item = self.queue.get()
+            if item is None:
+                self.queue.task_done()
+                break
+            c, barrier = item
+            try:
+                barrier.wait()
+                ctx = self.ctx
+                ctx.manifest["tensors"].append(
+                    _finalize_tensor_manifest_entry(
+                        c,
+                        n_stages=ctx.n_stages,
+                        group_size=ctx.group_size,
+                        block_scale_size=ctx.block_scale_size,
+                        rotation=ctx.rotation,
+                        backend=ctx.backend,
+                        out_dir=ctx.out_dir,
+                        tensor_dir=ctx.tensor_dir,
+                    )
+                )
+                _release_candidate_payload(c)
+            except BaseException as exc:
+                self.errors.append(exc)
+            finally:
+                self.queue.task_done()
+
+    def submit(self, c: dict) -> None:
+        barrier = threading.Event()
+        _BG_WRITER.submit(barrier.set)
+        self.queue.put((c, barrier))
+
+    def wait_and_stop(self) -> None:
+        self.queue.put(None)
+        self.queue.join()
+        if self.thread.is_alive():
+            self.thread.join()
+        if self.errors:
+            raise RuntimeError(f"finalize worker failed: {self.errors[0]}") from self.errors[0]
 
 
 def _offload(t):
@@ -132,6 +206,7 @@ def _quantize_and_record_stage(
     short_names: bool,
     em_aq_cleanup: bool,
     shared_cb=None,
+    async_io: bool = False,
 ) -> int:
     """Quantize one (candidate, stage) and record it; returns this stage's index-bytes.
 
@@ -247,7 +322,10 @@ def _quantize_and_record_stage(
             if (short_names and n_stages == 1)
             else f"{safe}.s{stage_i}.codebook.f32"
         )
-        _write_codebook(cb_path, cb, dtype=cb_dtype)
+        if async_io:
+            _BG_WRITER.submit(_write_codebook, cb_path, cb, cb_dtype)
+        else:
+            _write_codebook(cb_path, cb, dtype=cb_dtype)
 
     indices, _ = quantize_vectors_auto(
         v_res, cb, backend, resolved_device, vector_weights=vw, compute_mse=False
@@ -263,8 +341,16 @@ def _quantize_and_record_stage(
         if (short_names and n_stages == 1)
         else f"{safe}.s{stage_i}.indices"
     )
-    _, idx_encoding = _write_indices(idx_path, indices, index_bits)
-    stage_bytes = idx_path.stat().st_size
+    # Async mode defers the write (and the zlib decision) to the BackgroundWriter,
+    # which fills stage_meta["encoding"] before the finalize worker's barrier; the
+    # placeholder keeps the manifest key order identical. index_bytes is refreshed
+    # from disk at finalize either way.
+    if async_io:
+        idx_encoding = None
+        stage_bytes = 0
+    else:
+        _, idx_encoding = _write_indices(idx_path, indices, index_bits)
+        stage_bytes = idx_path.stat().st_size
 
     decoded_raw = _decode_to_vectors_format(
         v_res, cb, indices, backend, resolved_device
@@ -298,22 +384,29 @@ def _quantize_and_record_stage(
         c.pop("vectors_residual", None)
         c.pop("decoded_sum", None)
 
-    c["stages_meta"].append(
-        {
-            "stage": stage_i,
-            "codebook": str(cb_path.relative_to(out_dir)),
-            "codebook_size": len(cb),
-            "codebook_dtype": cb_dtype,
-            "index_bits": index_bits,
-            "packed": index_bits % 8 != 0,
-            "encoding": idx_encoding,
-            "indices": str(idx_path.relative_to(out_dir)),
-            "index_bytes": stage_bytes,
-            "training_vector_count": training_count,
-            "codebook_family": c["family"],
-            "group_size": c_group_size,
-        }
-    )
+    stage_meta = {
+        "stage": stage_i,
+        "codebook": str(cb_path.relative_to(out_dir)),
+        "codebook_size": len(cb),
+        "codebook_dtype": cb_dtype,
+        "index_bits": index_bits,
+        "packed": index_bits % 8 != 0,
+        "encoding": idx_encoding,
+        "indices": str(idx_path.relative_to(out_dir)),
+        "index_bytes": stage_bytes,
+        "training_vector_count": training_count,
+        "codebook_family": c["family"],
+        "group_size": c_group_size,
+    }
+    c["stages_meta"].append(stage_meta)
+    if async_io:
+        _BG_WRITER.submit(
+            _write_stage_indices,
+            idx_path,
+            indices.cpu() if hasattr(indices, "cpu") else indices,
+            index_bits,
+            stage_meta,
+        )
     return stage_bytes
 
 
@@ -360,6 +453,7 @@ def process_streamed_per_tensor_candidate(ctx: PackCtx, c: dict, stream_index: i
             codebook_path_dir=tensor_dir,
             short_names=True,
             em_aq_cleanup=True,
+            async_io=ctx.finalize_worker is not None,
         )
 
     # Post-assignment strategies, applied in registry order (error_compensation ->
@@ -370,19 +464,24 @@ def process_streamed_per_tensor_candidate(ctx: PackCtx, c: dict, stream_index: i
         if strategy.applies(ctx, c):
             strategy.apply(ctx, c)
 
-    _BG_WRITER.wait()
-    manifest["tensors"].append(
-        _finalize_tensor_manifest_entry(
-            c,
-            n_stages=n_stages,
-            group_size=group_size,
-            block_scale_size=block_scale_size,
-            rotation=rotation,
-            backend=backend,
-            out_dir=out_dir,
-            tensor_dir=tensor_dir,
+    if ctx.finalize_worker is not None:
+        # CPU tail (write barrier, sidecars, metrics, manifest append) runs on the
+        # finalize worker while this thread starts the next tensor's GPU work.
+        ctx.finalize_worker.submit(c)
+    else:
+        _BG_WRITER.wait()
+        manifest["tensors"].append(
+            _finalize_tensor_manifest_entry(
+                c,
+                n_stages=n_stages,
+                group_size=group_size,
+                block_scale_size=block_scale_size,
+                rotation=rotation,
+                backend=backend,
+                out_dir=out_dir,
+                tensor_dir=tensor_dir,
+            )
         )
-    )
     ctx.total_index_bytes = total_index_bytes
 
 

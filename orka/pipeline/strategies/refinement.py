@@ -17,7 +17,11 @@ from pathlib import Path
 
 from orka._runtime import _BG_WRITER, _check_ram_cap
 from orka.codebook import learn_codebook_auto, quantize_vectors_auto
-from orka.core._format import _cast_codebook_storage, _write_codebook, _write_indices
+from orka.core._format import (
+    _cast_codebook_storage,
+    _write_codebook,
+    _write_stage_indices,
+)
 from orka.core._tensor import _decode_to_vectors_format, _is_torch_tensor, _vectors_subtract
 from orka.core._util import _report_progress, _safe_tensor_name
 from orka.eval.metrics import _stage_quality_metrics
@@ -154,12 +158,14 @@ def _run_em_aq_refinement(
                     cb_path = tensor_dir / f"{safe}.s{stage_i}.codebook.f32"
                     _BG_WRITER.submit(_write_codebook, cb_path, cb, _cb_dtype)
                     idx_path = tensor_dir / f"{safe}.s{stage_i}.indices"
+                    # _write_stage_indices resolves the pinned encoding on the writer
+                    # thread itself - ordered after the greedy write that recorded it.
                     _BG_WRITER.submit(
-                        _write_indices,
+                        _write_stage_indices,
                         idx_path,
                         indices.cpu() if hasattr(indices, "cpu") else indices,
                         stage_meta["index_bits"],
-                        stage_meta.get("encoding", "raw"),
+                        stage_meta,
                     )
 
                     del old_dec_raw, old_dec, target, target_train, training, cb, indices, new_dec_raw, new_dec

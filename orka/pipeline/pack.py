@@ -71,6 +71,7 @@ from orka.pipeline.pack_manifest import (
 )
 from orka.pipeline.pack_pipeline import (
     PackCtx,
+    _FinalizeWorker,
     _offload,
     _onload,
     process_batched_candidates,
@@ -580,6 +581,8 @@ def pack_checkpoint(
         arch_profile=arch_profile,
         manifest=manifest,
     )
+    if codebook_mode == "per-tensor":
+        ctx.finalize_worker = _FinalizeWorker(ctx)
 
     prefetch_thread = threading.Thread(
         target=_prefetch_worker,
@@ -741,6 +744,7 @@ def pack_checkpoint(
         manifest["passthrough_count"] = len(_passthrough)
 
     if codebook_mode == "per-tensor":
+        ctx.finalize_worker.wait_and_stop()
         _BG_WRITER.wait()
         manifest["total_index_bytes"] = sum(
             int(t.get("index_bytes", 0)) for t in manifest["tensors"]
