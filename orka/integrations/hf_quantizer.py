@@ -53,6 +53,18 @@ def _is_embedding(name: str) -> bool:
     return "embed" in low or "lm_head" in low
 
 
+def _needs_dense(name: str, tm: dict) -> bool:
+    # Scalar ('s') stages use a per-weight layout the VQ kernel doesn't back; the
+    # allocator only picks planar on small tensors (and the fp16-safe head), so
+    # storing them dense costs little and keeps the artifact loadable as-is.
+    if _is_embedding(name):
+        return True
+    return any(
+        int(s.get("group_size", KERNEL_GROUP_SIZE)) == 1
+        for s in tm.get("stages", [])
+    )
+
+
 def export_orka_hf_repo(artifact_dir, config_dir, out_dir) -> dict:
     """Serialize an .orka artifact into a transformers-loadable repo.
 
@@ -92,14 +104,14 @@ def export_orka_hf_repo(artifact_dir, config_dir, out_dir) -> dict:
                 state[k] = f.get_tensor(k).to(torch.float16)
 
     modules_meta: dict = {}
-    dense_embeddings = 0
+    dense_tensors = 0
     for tm in manifest["tensors"]:
         name = tm["name"]
         shape = [int(x) for x in tm["shape"]]
-        if _is_embedding(name):
+        if _needs_dense(name, tm):
             arr = np.asarray(_decode_tensor(artifact_dir, tm), dtype=np.float32).reshape(shape)
             state[name] = torch.from_numpy(arr).to(torch.float16)
-            dense_embeddings += 1
+            dense_tensors += 1
             continue
 
         gs = int(tm.get("group_size", 8))
@@ -115,14 +127,14 @@ def export_orka_hf_repo(artifact_dir, config_dir, out_dir) -> dict:
         bias = state.pop(module_path + ".bias", None)
         vq = build_vq_linear(artifact_dir, tm, bias.float() if bias is not None else None, device="cpu")
 
-        if vq.corr_col.numel() != 0:
-            raise ValueError(
-                f"{name}: sparse correction (outliers/salient) is not supported on the native "
-                "quantizer path yet. Pack without them, or use orka.integrations.hf.load_orka_model."
-            )
-
+        # CSR correction (outlier/salient deltas) ships as plain buffers; the
+        # skeleton pre-sizes corr_col/corr_val from corr_nnz so the standard
+        # weight loader can fill them.
+        corr_nnz = int(vq.corr_col.numel())
         for bname, buf in vq.named_buffers():
-            if buf is None or bname.startswith("corr_"):
+            if buf is None:
+                continue
+            if bname.startswith("corr_") and corr_nnz == 0:
                 continue  # empty CSR correction stays out of the checkpoint
             state[f"{module_path}.{bname}"] = buf.contiguous()
 
@@ -135,6 +147,7 @@ def export_orka_hf_repo(artifact_dir, config_dir, out_dir) -> dict:
             "cb_sizes": vq.cb_sizes,
             "has_bias": bias is not None,
             "group_major": bool(getattr(vq, "_group_major", False)),
+            "corr_nnz": corr_nnz,
         }
 
     save_file(state, str(out_dir / "model.safetensors"), metadata={"format": "pt"})
@@ -146,7 +159,7 @@ def export_orka_hf_repo(artifact_dir, config_dir, out_dir) -> dict:
     return {
         "out": str(out_dir),
         "vq_linear_modules": len(modules_meta),
-        "dense_embeddings": dense_embeddings,
+        "dense_tensors": dense_tensors,
         "state_tensors": len(state),
     }
 
@@ -208,9 +221,15 @@ def register_orka_quantizer() -> None:
                 )
                 if m.get("group_major"):
                     vq._group_major = True
-                # empty correction buffers are not in the checkpoint
-                for nb in ("corr_rowptr", "corr_col", "corr_val"):
-                    vq._non_persistent_buffers_set.add(nb)
+                corr_nnz = int(m.get("corr_nnz", 0))
+                if corr_nnz > 0:
+                    # pre-size so the standard loader fills the CSR correction
+                    vq.corr_col.resize_(corr_nnz)
+                    vq.corr_val.resize_(corr_nnz)
+                else:
+                    # empty correction buffers are not in the checkpoint
+                    for nb in ("corr_rowptr", "corr_col", "corr_val"):
+                        vq._non_persistent_buffers_set.add(nb)
                 _set_submodule(model, path, vq)
 
         def _process_model_after_weight_loading(self, model, **kwargs):

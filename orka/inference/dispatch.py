@@ -58,8 +58,8 @@ def vq_linear_forward(layer, x: torch.Tensor) -> torch.Tensor:
             except Exception:
                 pass
         y = _vq_decode_n1(layer, x_2d)
-        if layer.corr_col.numel() > 0:
-            sp = layer._correction_sparse()
+        sp = layer._correction_sparse()
+        if sp is not None:
             y = y + torch.sparse.mm(sp, x_2d.float().T.contiguous()).T.to(torch.float16)
         if layer.bias is not None:
             y = y + layer.bias
@@ -104,8 +104,8 @@ def vq_linear_forward(layer, x: torch.Tensor) -> torch.Tensor:
     # Sparse correction: W_correction [M, K] -> y += x @ W_correction.T
     # The coalesced sparse tensor is built once and cached on the layer; only
     # the sparse.mm runs per forward.
-    if layer.corr_col.numel() > 0:
-        sp = layer._correction_sparse()
+    sp = layer._correction_sparse()
+    if sp is not None:
         correction = torch.sparse.mm(sp, x_2d.float().T.contiguous()).T.to(torch.float16)
         y = y + correction
 

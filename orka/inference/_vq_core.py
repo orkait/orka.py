@@ -107,13 +107,17 @@ class VQLinear(nn.Module):
     # ------------------------------------------------------------------
 
     def _correction_sparse(self) -> torch.Tensor | None:
+        cached = getattr(self, "_corr_sp_cache", None)
+        if cached is not None:
+            return cached
         if self.corr_col.numel() == 0:
             return None
         # Wrap the stored CSR buffers as a torch CSR sparse tensor for cuSPARSE
-        # CSR x dense (N>1 path). Built once and cached; rebuilt only on device change.
-        cached = getattr(self, "_corr_sp_cache", None)
-        if cached is not None and cached.device == self.corr_col.device:
-            return cached
+        # CSR x dense (N>1 path). Built once and cached. The raw int32/fp16 buffers
+        # are then FREED: the int64/fp32 sparse copy would otherwise sit alongside
+        # them (~2.5x the correction footprint - at 9B scale that alone OOMs a 12GB
+        # card). Inference needs one copy; state_dict round-trips must happen
+        # before the first forward.
         sp = torch.sparse_csr_tensor(
             self.corr_rowptr.long(),
             self.corr_col.long(),
@@ -122,6 +126,10 @@ class VQLinear(nn.Module):
             device=self.corr_col.device,
         )
         self._corr_sp_cache = sp
+        # resize_(0) would keep the storage alive; reassigning the buffers drops it.
+        self.corr_col = torch.empty(0, dtype=torch.int32, device=sp.device)
+        self.corr_val = torch.empty(0, dtype=torch.float16, device=sp.device)
+        self.corr_rowptr = torch.empty(0, dtype=torch.int32, device=sp.device)
         return sp
 
     # ------------------------------------------------------------------
