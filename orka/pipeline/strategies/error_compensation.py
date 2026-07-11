@@ -55,7 +55,8 @@ def maybe_compensate_candidate(
     Block-OBS minimises the LINEAR output error E[(Wx - What x)^2], valid only when the
     layer feeds a locally-linear path - invalid for the softmax head and SSM/recurrent
     scans (verified on FalconH1-0.5B: 4bpw 1.10 -> 1.50 with error-comp on those)."""
-    from orka.core._format import _write_indices
+    from orka._runtime import _BG_WRITER
+    from orka.core._format import _write_stage_indices
     from orka.core._tensor import _is_torch_tensor
     from orka.core._util import _report_progress
     from orka.quant import ArchProfile
@@ -134,11 +135,15 @@ def maybe_compensate_candidate(
     idxs, decoded = compensated_assign(W, cbs, group, X)
     for s_key, idx in zip(stage_keys, idxs):
         stage_meta = c["stages_meta"][s_key]
-        _write_indices(
+        # Queued on the single writer thread, so it lands after the greedy write and
+        # reuses the encoding that write recorded (_write_stage_indices resolves it
+        # at execution time).
+        _BG_WRITER.submit(
+            _write_stage_indices,
             out_dir / stage_meta["indices"],
             idx.cpu(),
             stage_meta["index_bits"],
-            stage_meta.get("encoding", "raw"),
+            stage_meta,
         )
         c["stages_data"][s_key]["indices"] = idx
     c["decoded_sum"] = decoded.reshape(-1, group)
