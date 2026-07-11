@@ -15,6 +15,11 @@ DEFAULT_HARD_CEILING_GB = 25.0
 DEFAULT_LLM_LITE_MODEL = "claude-sonnet-4-6"
 DEFAULT_LLM_STRONG_MODEL = "claude-opus-4-8"
 
+#: H2D transfer budget per chunk for the tiled (giant-tensor) assign, in MB.
+#: 65536-row chunks were 2MB at group_size 8 - PCIe-latency-bound (~1940 copies
+#: + syncs on the 1B vocab head). 128MB keeps the loop bandwidth-bound.
+DEFAULT_ASSIGN_CHUNK_MB = 128
+
 #: zlib level for index/sidecar streams. Decode is level-agnostic (zlib.decompress),
 #: so lowering it trades a few percent of artifact size for ~4x compression speed
 #: (measured: level 1 = 80 MB/s vs level 6 = 19 MB/s on compressible index streams).
@@ -60,6 +65,16 @@ def kmeans_iters(default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def assign_chunk_mb() -> int:
+    raw = os.environ.get("ORKA_ASSIGN_CHUNK_MB")
+    if raw is None:
+        return DEFAULT_ASSIGN_CHUNK_MB
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_ASSIGN_CHUNK_MB
 
 
 def zlib_level() -> int:

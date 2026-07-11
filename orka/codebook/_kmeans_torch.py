@@ -161,11 +161,17 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_nor
     # path; only mse sums in chunk order (and the quantize caller discards mse). Gated on a
     # large row count so nothing normal changes.
     if n_rows > _LARGE_ASSIGN_ROWS:
+        # Chunk by BYTE budget, not a fixed row count: 65536 rows is 2MB at d=8, which
+        # made the giant assign PCIe-latency-bound (~1940 copies + a host sync each on
+        # the 1B head). Per-row argmin is independent of chunking, so indices are
+        # identical for any chunk size; chunk_size acts as the floor.
+        from orka import config
+        rows_per_chunk = max(chunk_size, (config.assign_chunk_mb() << 20) // max(4 * width, 1))
         idx_out = torch.empty(n_rows, dtype=torch.int64, device=(resolved if keep_device else "cpu"))
         sse = 0.0
         with torch.no_grad():
-            for i in range(0, n_rows, chunk_size):
-                ch = _torch_float32_matrix(vectors[i:i + chunk_size], device).float()
+            for i in range(0, n_rows, rows_per_chunk):
+                ch = _torch_float32_matrix(vectors[i:i + rows_per_chunk], device).float()
                 if sqrt_W is not None:
                     ch = ch * sqrt_W
                 cidx = _fused_assign(ch, centroids)
