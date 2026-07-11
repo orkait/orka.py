@@ -131,7 +131,7 @@ def _kmeans_pp_init_torch(
 # normal tensor and every Lloyd-on-sample assign stays on the exact original full path, so
 # their bytes are unchanged (oracle-safe). ORKA_LARGE_ASSIGN_ROWS overrides (validation:
 # exercise the giant path on small models under a RAM fence).
-import os as _os
+import os as _os  # noqa: E402
 
 _LARGE_ASSIGN_ROWS = int(_os.environ.get("ORKA_LARGE_ASSIGN_ROWS", 20_000_000))
 
