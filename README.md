@@ -142,6 +142,7 @@ All of these resolve through [`orka/config.py`](orka/config.py).
 | `ORKA_PREFLIGHT_MIN_AVAIL_GB` | `5.0` | Refuse to start if `MemAvailable` is below `workload_budget + this`. |
 | `ORKA_PREFLIGHT_MAX_SWAP_GB` | `4.0` | Refuse to start if swap in use exceeds this (the system is already thrashing-prone). |
 | `ORKA_KMEANS_ITERS` | caller's value | Override the Lloyd iteration count, for quick validation runs. |
+| `ORKA_ZLIB_LEVEL` | `6` | zlib level for index/sidecar streams (clamped 0-9). Decode is level-agnostic, so `=1` trades a few percent of artifact size for ~4x faster compression on big packs. |
 
 ## 🧪 Development
 

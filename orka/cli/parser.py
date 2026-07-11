@@ -275,7 +275,7 @@ def _add_reconstruct_parser(sub):
     reconstruct.add_argument("artifact")
     reconstruct.add_argument("--out", required=True)
     reconstruct.add_argument(
-        "--format", choices=["json", "safetensors"], default="json"
+        "--format", choices=["json", "safetensors"], default="safetensors"
     )
     reconstruct.add_argument(
         "--device", default=None, help="device for decoding (cpu/cuda)"

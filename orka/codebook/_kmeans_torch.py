@@ -123,7 +123,7 @@ def _kmeans_pp_init_torch(
 _LARGE_ASSIGN_ROWS = 20_000_000
 
 
-def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_norm_sq=None, vector_weights=None, keep_device=False):
+def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_norm_sq=None, vector_weights=None, keep_device=False, compute_mse=True):
     try:
         import torch
     except Exception as exc:
@@ -156,11 +156,15 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_nor
                 if sqrt_W is not None:
                     ch = ch * sqrt_W
                 cidx = _fused_assign(ch, centroids)
-                sel = centroids.index_select(0, cidx)
-                sse += float(((ch - sel) ** 2).sum().item())
+                # MSE needs a full [chunk, d] gather + reduce + a host sync per chunk
+                # (~2000 syncs on a 127M-row head); skip it when the caller discards it.
+                if compute_mse:
+                    sel = centroids.index_select(0, cidx)
+                    sse += float(((ch - sel) ** 2).sum().item())
+                    del sel
                 idx_out[i:i + ch.shape[0]] = cidx if keep_device else cidx.cpu()
-                del ch, sel, cidx
-        return idx_out, (sse / (n_rows * width) if n_rows else 0.0)
+                del ch, cidx
+        return idx_out, (sse / (n_rows * width) if n_rows and compute_mse else 0.0)
 
     rows = _torch_float32_matrix(vectors, device).float()
     if sqrt_W is not None:
@@ -172,12 +176,15 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_nor
         # CPU. fp32 throughout, so the nearest centroid is exact rather than fp16-ranked
         # (the ||v||^2 term is constant across centroids and drops out of the argmin).
         idx = _fused_assign(rows, centroids)                       # int64 [N]
-        sel = centroids.index_select(0, idx)                       # [N, d]
-        mse = ((rows - sel) ** 2).sum() / (rows.shape[0] * width)
+        if compute_mse:
+            sel = centroids.index_select(0, idx)                   # [N, d]
+            mse = float((((rows - sel) ** 2).sum() / (rows.shape[0] * width)).item())
+        else:
+            mse = 0.0
     idx = idx.to(torch.int64)
     # Lloyd iterations consume idx on-device; only the final/external call needs the
     # host copy. Skipping the per-iter .cpu() drops a GPU<->host roundtrip each loop.
-    return (idx if keep_device else idx.cpu()), float(mse.item())
+    return (idx if keep_device else idx.cpu()), mse
 
 
 def _det_segment_sum(keys, values, k):
@@ -321,6 +328,7 @@ def _learn_codebook_torch(
                 r_norm_sq=r_norm_sq if vector_weights is None else None,
                 vector_weights=vector_weights,
                 keep_device=True,
+                compute_mse=False,
             )
 
             chosen = indices.to(dtype=torch.long)

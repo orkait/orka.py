@@ -59,12 +59,18 @@ def learn_codebook_auto(
 
 
 def quantize_vectors_auto(
-    vectors, codebook, backend: str, device: str = "cpu", vector_weights=None
+    vectors, codebook, backend: str, device: str = "cpu", vector_weights=None,
+    compute_mse: bool = True,
 ):
     if backend not in {"auto", "numpy", "torch"}:
         raise ValueError("backend must be 'auto', 'numpy', or 'torch'")
     if backend == "torch":
-        return _torch_assign(vectors, codebook, device, vector_weights=vector_weights)
+        return _torch_assign(
+            vectors, codebook, device, vector_weights=vector_weights,
+            compute_mse=compute_mse,
+        )
     if not _is_numpy_array(vectors):
         raise RuntimeError("NumPy backend requires NumPy array tensors")
-    return _numpy_assign(vectors, codebook, vector_weights=vector_weights)
+    return _numpy_assign(
+        vectors, codebook, vector_weights=vector_weights, compute_mse=compute_mse
+    )

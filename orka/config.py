@@ -15,6 +15,11 @@ DEFAULT_HARD_CEILING_GB = 25.0
 DEFAULT_LLM_LITE_MODEL = "claude-sonnet-4-6"
 DEFAULT_LLM_STRONG_MODEL = "claude-opus-4-8"
 
+#: zlib level for index/sidecar streams. Decode is level-agnostic (zlib.decompress),
+#: so lowering it trades a few percent of artifact size for ~4x compression speed
+#: (measured: level 1 = 80 MB/s vs level 6 = 19 MB/s on compressible index streams).
+DEFAULT_ZLIB_LEVEL = 6
+
 #: Values of ORKA_ENABLE_AWQ that turn the legacy AWQ path on. Anything else, "0"
 #: and "false" included, leaves it off.
 _TRUTHY_AWQ = frozenset({"1", "true", "yes", "on"})
@@ -55,6 +60,16 @@ def kmeans_iters(default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def zlib_level() -> int:
+    raw = os.environ.get("ORKA_ZLIB_LEVEL")
+    if not raw:
+        return DEFAULT_ZLIB_LEVEL
+    try:
+        return min(9, max(0, int(raw)))
+    except ValueError:
+        return DEFAULT_ZLIB_LEVEL
 
 
 def awq_enabled() -> bool:

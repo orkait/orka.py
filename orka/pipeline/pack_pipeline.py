@@ -169,13 +169,15 @@ def _quantize_and_record_stage(
         v_res = c["vectors_residual"]
         c_group_size = c["group_size"]
 
+    is_giant = False
     if backend == "torch":
         # Giant tensors (vocab head/embed: >20M vectors, ~3x4GB) can't hold three full
         # copies on GPU. Keep them CPU-resident: the tiled assign (_torch_assign) moves
         # only chunks to the device, and decode (cb[idx] gather) + residual subtract run
         # on CPU - both elementwise, so bytes are identical. Normal tensors onload as before.
         from orka.codebook._kmeans_torch import _LARGE_ASSIGN_ROWS
-        if int(v_res.shape[0]) <= _LARGE_ASSIGN_ROWS:
+        is_giant = int(v_res.shape[0]) > _LARGE_ASSIGN_ROWS
+        if not is_giant:
             c["vectors_orig"] = _onload(c["vectors_orig"], resolved_device)
             v_res = _onload(v_res, resolved_device)
             if c["decoded_sum"] is not None:
@@ -248,7 +250,7 @@ def _quantize_and_record_stage(
         _write_codebook(cb_path, cb, dtype=cb_dtype)
 
     indices, _ = quantize_vectors_auto(
-        v_res, cb, backend, resolved_device, vector_weights=vw
+        v_res, cb, backend, resolved_device, vector_weights=vw, compute_mse=False
     )
     c["stages_data"][stage_i] = {
         "cb": cb,
@@ -282,17 +284,19 @@ def _quantize_and_record_stage(
         c["vectors_residual"] = _offload(c["vectors_residual"])
         c["decoded_sum"] = _offload(c["decoded_sum"])
         c["vectors_orig"] = _offload(c["vectors_orig"])
-        try:
-            import torch as _t
-            _t.cuda.empty_cache()
-        except Exception:
-            pass
+        # Only giants release cached blocks back to the driver: per-stage empty_cache on
+        # normal tensors just forces cudaFree/cudaMalloc churn the caching allocator
+        # would otherwise avoid (measured 420 calls -> 1.1s pure overhead on a 135M pack).
+        if is_giant:
+            try:
+                import torch as _t
+                _t.cuda.empty_cache()
+            except Exception:
+                pass
 
     if em_aq_cleanup and n_stages > 1 and em_aq_passes > 0 and stage_i == n_stages - 1:
         c.pop("vectors_residual", None)
         c.pop("decoded_sum", None)
-        import gc
-        gc.collect()
 
     c["stages_meta"].append(
         {

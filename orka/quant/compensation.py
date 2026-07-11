@@ -73,7 +73,9 @@ def compensated_assign(
         dec = torch.zeros_like(target)
         residual = target
         for s, cb_dev in enumerate(codebooks_dev):
-            idx, _ = quantize_vectors_auto(residual, cb_dev, "torch", str(device))
+            idx, _ = quantize_vectors_auto(
+                residual, cb_dev, "torch", str(device), compute_mse=False
+            )
             idx = idx.to(device)
             stage_indices[s][:, g] = idx
             dec = dec + cb_dev[idx]
