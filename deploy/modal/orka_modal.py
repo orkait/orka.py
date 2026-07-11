@@ -67,8 +67,35 @@ def _last_json(text: str) -> dict:
     return json.loads(text[i:]) if i >= 0 else {}
 
 
-@app.function(image=image, gpu="A10G", volumes=VOLUMES, timeout=3 * 3600,
-              env=ENV, retries=0)
+def _resolve_alloc(run: Path, src, target_bpw: float, allocation_json: str) -> Path:
+    """Use a pre-computed allocation JSON from the volume when given (a richer local
+    probe - size-aware / planar candidates / big samples); else probe inline."""
+    if allocation_json:
+        p = Path(allocation_json)
+        if not p.exists():
+            raise FileNotFoundError(f"allocation_json not found in volume: {p}")
+        print(f"=== using pre-computed allocation: {p} ===", flush=True)
+        return p
+    alloc = run / "alloc.json"
+    cands = ["vq-12", "rvq-12-8", "rvq-12-12", "rvq-12-12-8", "rvq-12-12-12"] \
+        if target_bpw >= 3 else ["vq-8", "vq-12", "rvq-12-4", "rvq-8-8", "rvq-12-8"]
+    _orka("allocate", str(src), "--out", str(alloc), "--target-bpw", target_bpw,
+          "--candidates", *cands, "--group-size", 8, "--sample-vectors", 8192,
+          "--iterations", 4, "--backend", "torch", "--device", "cuda")
+    return alloc
+
+
+def _src_path(model_dir: str) -> Path:
+    """Checkpoint source for orka: sharded checkpoints (index.json present) must be
+    loaded as a DIRECTORY - a single-shard glob would silently pack 1/N of the model."""
+    d = Path(model_dir)
+    if (d / "model.safetensors.index.json").exists():
+        return d
+    return next(d.glob("*.safetensors"))
+
+
+@app.function(image=image, gpu="A10G", volumes=VOLUMES, timeout=8 * 3600,
+              memory=65536, env=ENV, retries=0)
 def compress(
     repo: str,
     target_bpw: float = 4.0,
@@ -81,6 +108,11 @@ def compress(
     iterations: int = 8,
     calib_samples: int = 8192,
     hf_token: str = "",
+    # Pre-computed allocation JSON (path inside /data, upload via `modal volume
+    # put orka-data <local> <remote>`). Skips the inline allocate - use when a
+    # richer local probe (size-aware / planar candidates / big samples) exists.
+    allocation_json: str = "",
+    awq: int = 1,
 ) -> dict:
     """Full recipe: download -> allocate -> pack -> distill -> correct -> report
     -> export. Returns the report; artifact + HF export land in the volume.
@@ -106,7 +138,7 @@ def compress(
     model_dir = snapshot_download(
         repo, allow_patterns=["*.safetensors", "*.json", "*.model", "tokenizer*", "merges*", "vocab*"]
     )
-    src = next(Path(model_dir).glob("*.safetensors"))
+    src = _src_path(model_dir)
     slug = repo.split("/")[-1]
     run = Path("/data") / slug
     run.mkdir(parents=True, exist_ok=True)
@@ -127,24 +159,28 @@ def compress(
         calib.write_text("\n".join(fb))
         eval_p.write_text("\n".join(fb[:11]))
 
-    alloc = run / "alloc.json"
-    cands = ["vq-12", "rvq-12-8", "rvq-12-12", "rvq-12-12-8", "rvq-12-12-12"] \
-        if target_bpw >= 3 else ["vq-8", "vq-12", "rvq-12-4", "rvq-8-8", "rvq-12-8"]
-    _orka("allocate", str(src), "--out", str(alloc), "--target-bpw", target_bpw,
-          "--candidates", *cands, "--group-size", 8, "--sample-vectors", 8192,
-          "--iterations", 4, "--backend", "torch", "--device", "cuda")
+    alloc = _resolve_alloc(run, src, target_bpw, allocation_json)
 
     if art.exists():
         import shutil
         shutil.rmtree(art)
+    # awq=0 skips activation calibration entirely. Required for large multimodal
+    # checkpoints: _collect_activations_hf loads the FULL model fp32 via
+    # AutoModelForCausalLM (37GB for a 9B model, and ConditionalGeneration archs
+    # don't map) - it would kill the pack inline. Hessian weighting off; slrq-block
+    # scales + magnitude outliers remain active.
+    # --no-hessian is required when skipping: pack otherwise AUTO-collects
+    # activations from the bundled calibration (loads the full model).
+    awq_args = ["--no-hessian"] if not awq else [
+        "--awq-calibration", str(calib), "--awq-model-dir", model_dir,
+        "--calibration-max-prompts", 32, "--calibration-max-length", 256,
+        "--calibration-max-samples", calib_samples,
+    ]
     _orka("pack", str(src), "--out", str(art), "--allocation-map", str(alloc),
           "--codebook-mode", "per-tensor", "--normalization", "slrq-block",
-          "--outlier-frac", outlier_frac, "--awq-calibration", str(calib),
-          "--awq-model-dir", model_dir, "--calibration-max-prompts", 32,
-          "--calibration-max-length", 256, "--backend", "torch",
+          "--outlier-frac", outlier_frac, *awq_args, "--backend", "torch",
           "--device", "cuda", "--sample-vectors", sample_vectors,
           "--iterations", iterations, "--em-aq-passes", 1,
-          "--calibration-max-samples", calib_samples,
           "--group-size", 8, "--codebook-dtype", codebook_dtype)
     data_vol.commit()  # the expensive pack survives even if a later step fails
 
@@ -158,10 +194,11 @@ def compress(
             print(f"=== {label} FAILED (non-fatal) ===\n{traceback.format_exc()}", flush=True)
             return {}
 
-    _best_effort("distill", lambda: _orka(
-        "distill", str(art), "--steps", distill_steps, "--lr", 1e-3, "--device", "cuda",
-        "--model-dir", model_dir, "--prompts", str(calib),
-        "--calibration-max-prompts", 32, "--calibration-max-length", 256))
+    if distill_steps > 0:
+        _best_effort("distill", lambda: _orka(
+            "distill", str(art), "--steps", distill_steps, "--lr", 1e-3, "--device", "cuda",
+            "--model-dir", model_dir, "--prompts", str(calib),
+            "--calibration-max-prompts", 32, "--calibration-max-length", 256))
     _best_effort("correct", lambda: _orka("correct", str(art), "--rank", correct_rank, "--device", "cuda"))
 
     report = _best_effort("report", lambda: _last_json(_orka("report", str(art))))
@@ -190,7 +227,8 @@ def compress(
     return result
 
 
-@app.function(image=image, gpu="A10G", volumes=VOLUMES, timeout=3 * 3600, env=ENV, retries=0)
+@app.function(image=image, gpu="A10G", volumes=VOLUMES, timeout=8 * 3600,
+              memory=65536, env=ENV, retries=0)
 def raw(args: str) -> str:
     """Run any orka subcommand. `args` is the full arg string after `orka`."""
     out = _orka(*args.split())
@@ -198,8 +236,8 @@ def raw(args: str) -> str:
     return out
 
 
-@app.function(image=image, gpu="A10G", volumes=VOLUMES, timeout=3 * 3600,
-              env=ENV, retries=0)
+@app.function(image=image, gpu="A10G", volumes=VOLUMES, timeout=8 * 3600,
+              memory=65536, env=ENV, retries=0)
 def pack_ptq(
     repo: str,
     target_bpw: float = 4.0,
@@ -210,6 +248,8 @@ def pack_ptq(
     iterations: int = 8,
     calib_samples: int = 8192,
     hf_token: str = "",
+    allocation_json: str = "",
+    awq: int = 1,
 ) -> dict:
     """Pure PTQ: download -> allocate -> pack -> report -> pulse-check.
 
@@ -231,7 +271,7 @@ def pack_ptq(
     model_dir = snapshot_download(
         repo, allow_patterns=["*.safetensors", "*.json", "*.model", "tokenizer*", "merges*", "vocab*"]
     )
-    src = next(Path(model_dir).glob("*.safetensors"))
+    src = _src_path(model_dir)
     slug = repo.split("/")[-1]
     run = Path("/data") / slug
     run.mkdir(parents=True, exist_ok=True)
@@ -251,24 +291,28 @@ def pack_ptq(
         calib.write_text("\n".join(fb))
         eval_p.write_text("\n".join(fb[:11]))
 
-    alloc = run / "alloc.json"
-    cands = ["vq-12", "rvq-12-8", "rvq-12-12", "rvq-12-12-8", "rvq-12-12-12"] \
-        if target_bpw >= 3 else ["vq-8", "vq-12", "rvq-12-4", "rvq-8-8", "rvq-12-8"]
-    _orka("allocate", str(src), "--out", str(alloc), "--target-bpw", target_bpw,
-          "--candidates", *cands, "--group-size", 8, "--sample-vectors", 8192,
-          "--iterations", 4, "--backend", "torch", "--device", "cuda")
+    alloc = _resolve_alloc(run, src, target_bpw, allocation_json)
 
     if art.exists():
         import shutil
         shutil.rmtree(art)
+    # awq=0 skips activation calibration entirely. Required for large multimodal
+    # checkpoints: _collect_activations_hf loads the FULL model fp32 via
+    # AutoModelForCausalLM (37GB for a 9B model, and ConditionalGeneration archs
+    # don't map) - it would kill the pack inline. Hessian weighting off; slrq-block
+    # scales + magnitude outliers remain active.
+    # --no-hessian is required when skipping: pack otherwise AUTO-collects
+    # activations from the bundled calibration (loads the full model).
+    awq_args = ["--no-hessian"] if not awq else [
+        "--awq-calibration", str(calib), "--awq-model-dir", model_dir,
+        "--calibration-max-prompts", 32, "--calibration-max-length", 256,
+        "--calibration-max-samples", calib_samples,
+    ]
     _orka("pack", str(src), "--out", str(art), "--allocation-map", str(alloc),
           "--codebook-mode", "per-tensor", "--normalization", "slrq-block",
-          "--outlier-frac", outlier_frac, "--awq-calibration", str(calib),
-          "--awq-model-dir", model_dir, "--calibration-max-prompts", 32,
-          "--calibration-max-length", 256, "--backend", "torch",
+          "--outlier-frac", outlier_frac, *awq_args, "--backend", "torch",
           "--device", "cuda", "--sample-vectors", sample_vectors,
           "--iterations", iterations, "--em-aq-passes", 1,
-          "--calibration-max-samples", calib_samples,
           "--group-size", 8, "--codebook-dtype", codebook_dtype)
     data_vol.commit()
 
@@ -334,7 +378,7 @@ def qat(
     model_dir = snapshot_download(
         repo, allow_patterns=["*.safetensors", "*.json", "*.model", "tokenizer*", "merges*", "vocab*"]
     )
-    src = next(Path(model_dir).glob("*.safetensors"))
+    src = _src_path(model_dir)
     slug = repo.split("/")[-1]
     run = Path("/data") / f"{slug}-qat"
     run.mkdir(parents=True, exist_ok=True)

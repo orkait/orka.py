@@ -129,8 +129,11 @@ def _kmeans_pp_init_torch(
 # Above this row count the full [N,d] rows + [N,d] sel can't sit on GPU (the 1B-param
 # vocab head is ~127M vectors -> 3x4GB). Only such giants take the tiled path below; every
 # normal tensor and every Lloyd-on-sample assign stays on the exact original full path, so
-# their bytes are unchanged (oracle-safe).
-_LARGE_ASSIGN_ROWS = 20_000_000
+# their bytes are unchanged (oracle-safe). ORKA_LARGE_ASSIGN_ROWS overrides (validation:
+# exercise the giant path on small models under a RAM fence).
+import os as _os
+
+_LARGE_ASSIGN_ROWS = int(_os.environ.get("ORKA_LARGE_ASSIGN_ROWS", 20_000_000))
 
 
 def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_norm_sq=None, vector_weights=None, keep_device=False, compute_mse=True):
