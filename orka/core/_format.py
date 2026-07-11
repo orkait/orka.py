@@ -85,32 +85,60 @@ def _index_bit_spec(index_bits: int) -> tuple[int, str, str]:
     raise ValueError(f"index_bits above 64 are not supported: got {index_bits}")
 
 
-def _pack_indices(indices, bits: int):
+# Indices per packing chunk. Must stay a multiple of 8 so every chunk boundary is
+# byte-aligned (chunk*bits % 8 == 0 for any bit width) and chunked output is
+# byte-identical to a single-shot pack. 4M indices bounds the [chunk, bits] bitmat
+# at ~64MB where the whole-stream bitmat on a 127M-index giant was 1.5GB (pack)
+# and its uint64 unpack counterpart ~12GB.
+_PACK_CHUNK_INDICES = 1 << 22
+
+
+def _pack_indices(indices, bits: int, chunk_rows: int = _PACK_CHUNK_INDICES):
     """Pack integer indices into a contiguous big-endian bitstream at exact bit width.
 
     Each index occupies exactly ``bits`` bits (MSB first); no padding to byte/int
     boundaries except the final byte. Lossless inverse of ``_unpack_indices``.
+    Processed in ``chunk_rows`` blocks (byte-aligned, see _PACK_CHUNK_INDICES) so the
+    [N, bits] bit matrix never materializes whole; output bytes are unchanged.
     """
     import numpy as np
 
     arr = np.asarray(indices, dtype=np.uint64).reshape(-1)
-    if arr.size == 0:
+    n = int(arr.size)
+    if n == 0:
         return np.zeros(0, dtype=np.uint8)
     shifts = np.arange(bits - 1, -1, -1, dtype=np.uint64)
-    bitmat = ((arr[:, None] >> shifts) & np.uint64(1)).astype(np.uint8)
-    return np.packbits(bitmat.reshape(-1))
+    out = np.empty((n * bits + 7) // 8, dtype=np.uint8)
+    pos = 0
+    for i in range(0, n, chunk_rows):
+        seg = arr[i : i + chunk_rows]
+        bitmat = ((seg[:, None] >> shifts) & np.uint64(1)).astype(np.uint8)
+        packed = np.packbits(bitmat.reshape(-1))
+        out[pos : pos + packed.size] = packed
+        pos += packed.size
+    return out
 
 
-def _unpack_indices(packed, bits: int, count: int):
-    """Inverse of ``_pack_indices``: recover ``count`` indices of ``bits`` width."""
+def _unpack_indices(packed, bits: int, count: int, chunk_rows: int = _PACK_CHUNK_INDICES):
+    """Inverse of ``_pack_indices``: recover ``count`` indices of ``bits`` width.
+
+    Chunked like the pack side; each chunk starts on a byte boundary
+    (chunk_rows % 8 == 0), so the recovered values are identical."""
     import numpy as np
 
     if count == 0:
         return np.zeros(0, dtype=np.int64)
-    allbits = np.unpackbits(np.asarray(packed, dtype=np.uint8))[: count * bits]
-    bitmat = allbits.reshape(count, bits).astype(np.uint64)
+    raw = np.asarray(packed, dtype=np.uint8)
     weights = np.uint64(1) << np.arange(bits - 1, -1, -1, dtype=np.uint64)
-    return (bitmat * weights).sum(axis=1).astype(np.int64)
+    out = np.empty(count, dtype=np.int64)
+    for i in range(0, count, chunk_rows):
+        j = min(i + chunk_rows, count)
+        byte_lo = (i * bits) // 8
+        byte_hi = (j * bits + 7) // 8
+        bits_chunk = np.unpackbits(raw[byte_lo:byte_hi])[: (j - i) * bits]
+        bitmat = bits_chunk.reshape(j - i, bits).astype(np.uint64)
+        out[i:j] = (bitmat * weights).sum(axis=1).astype(np.int64)
+    return out
 
 
 def _pack_index_planes(indices, width: int):

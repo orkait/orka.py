@@ -50,6 +50,75 @@ from orka.pipeline.pack_manifest import (
 from orka.pipeline.strategies import POST_ASSIGNMENT_STRATEGIES, _run_em_aq_refinement
 
 
+class PrefetchBudget:
+    """Byte-budget backpressure for the producer thread.
+
+    The prefetch queue caps candidate COUNT (PREFETCH_QUEUE_DEPTH) but not BYTES:
+    with two 1B-param giants adjacent in the checkpoint, the producer prepped the
+    second (~8GB retained + ~12GB of normalize transients) while the first was
+    still packing. ``reserve()`` blocks before the producer preps a candidate whose
+    retained bytes would push the outstanding total past the budget; ``release()``
+    runs at finalize, after the candidate's payload is freed. A candidate larger
+    than the whole budget is admitted alone (outstanding == 0), so giants
+    serialize instead of deadlocking. Pure scheduling - packed bytes unchanged."""
+
+    def __init__(self, budget_bytes: int):
+        self.budget = int(budget_bytes)
+        self.outstanding = 0
+        self._cond = threading.Condition()
+
+    def reserve(self, nbytes: int) -> None:
+        with self._cond:
+            while self.outstanding > 0 and self.outstanding + int(nbytes) > self.budget:
+                self._cond.wait(timeout=1.0)
+            self.outstanding += int(nbytes)
+
+    def release(self, nbytes: int) -> None:
+        with self._cond:
+            self.outstanding = max(0, self.outstanding - int(nbytes))
+            self._cond.notify_all()
+
+
+def _stage_decode_accumulate_blocked(c, cb, indices, is_scalar_stage, chunk_rows=2_000_000):
+    """Low-RAM RVQ stage close-out for giant tensors (torch, CPU-resident).
+
+    Decode this stage's indices, add them into decoded_sum, and recompute the
+    residual - all in row-blocks and in place, so the full [N,d] `decoded` and a
+    second full [N,d] residual are never materialized. On the 1B-param vocab head
+    that drops the per-stage peak from ~5 full copies to ~3.
+
+    Byte-identical to the full path: decode is a per-vector codebook gather,
+    accumulate is a per-element add (each element added exactly once, so block
+    order is irrelevant), and the residual is a per-element subtract. Gated on
+    is_giant so normal tensors keep the exact original path (oracle-safe).
+    """
+    import torch
+
+    vo = c["vectors_orig"]
+    n_rows, d = int(vo.shape[0]), int(vo.shape[1])
+    ds = c.get("decoded_sum")
+    if ds is None:
+        ds = torch.zeros_like(vo)
+        c["decoded_sum"] = ds
+    res = c.get("vectors_residual")
+    if not (
+        torch.is_tensor(res) and res.shape == vo.shape and res.dtype == vo.dtype
+        and res is not vo and res is not ds
+    ):
+        res = torch.empty_like(vo)
+    cbt = (cb if torch.is_tensor(cb) else torch.as_tensor(cb)).to(vo.dtype).cpu().contiguous()
+    idx = (indices if torch.is_tensor(indices) else torch.as_tensor(indices)).to(torch.long).cpu().reshape(-1)
+    for i in range(0, n_rows, chunk_rows):
+        j = min(i + chunk_rows, n_rows)
+        if is_scalar_stage:
+            dblk = cbt.index_select(0, idx[i * d:j * d]).reshape(j - i, d)
+        else:
+            dblk = cbt.index_select(0, idx[i:j])
+        ds[i:j] += dblk
+        res[i:j] = vo[i:j] - ds[i:j]
+    c["vectors_residual"] = res
+
+
 @dataclass
 class PackCtx:
     """Resolved pack configuration + run accumulators, threaded through the per-tensor
@@ -113,7 +182,7 @@ class _FinalizeWorker:
     ``maxsize=1`` bounds RAM: at most one candidate queued + one finalizing + one on
     the GPU thread."""
 
-    def __init__(self, ctx: "PackCtx"):
+    def __init__(self, ctx: PackCtx):
         self.ctx = ctx
         self.queue: queue.Queue = queue.Queue(maxsize=1)
         self.errors: list[BaseException] = []
@@ -246,12 +315,16 @@ def _quantize_and_record_stage(
 
     is_giant = False
     if backend == "torch":
-        # Giant tensors (vocab head/embed: >20M vectors, ~3x4GB) can't hold three full
+        # Giant tensors (vocab head/embed: ~1B elements, ~3x4GB) can't hold three full
         # copies on GPU. Keep them CPU-resident: the tiled assign (_torch_assign) moves
         # only chunks to the device, and decode (cb[idx] gather) + residual subtract run
-        # on CPU - both elementwise, so bytes are identical. Normal tensors onload as before.
-        from orka.codebook._kmeans_torch import _LARGE_ASSIGN_ROWS
-        is_giant = int(v_res.shape[0]) > _LARGE_ASSIGN_ROWS
+        # on CPU - both elementwise, so bytes are identical. Normal tensors onload as
+        # before. Element-based and judged on the CANDIDATE layout (vectors_orig), so a
+        # scalar stage's [numel, 1] view of a normal tensor no longer flips it to giant.
+        from orka.codebook._kmeans_torch import _is_giant_matrix
+        is_giant = _is_giant_matrix(
+            int(c["vectors_orig"].shape[0]), int(c["vectors_orig"].shape[1])
+        )
         if not is_giant:
             c["vectors_orig"] = _onload(c["vectors_orig"], resolved_device)
             v_res = _onload(v_res, resolved_device)
@@ -352,19 +425,24 @@ def _quantize_and_record_stage(
         _, idx_encoding = _write_indices(idx_path, indices, index_bits)
         stage_bytes = idx_path.stat().st_size
 
-    decoded_raw = _decode_to_vectors_format(
-        v_res, cb, indices, backend, resolved_device
-    )
-    decoded = (
-        decoded_raw.reshape(c["vectors_residual"].shape)
-        if is_scalar_stage
-        else decoded_raw
-    )
-    if c["decoded_sum"] is None:
-        c["decoded_sum"] = decoded
+    if is_giant:
+        # Giants close the stage in row-blocks, never materializing the full decoded
+        # tensor or a second full residual. Byte-identical to the branch below.
+        _stage_decode_accumulate_blocked(c, cb, indices, is_scalar_stage)
     else:
-        c["decoded_sum"] = c["decoded_sum"] + decoded
-    c["vectors_residual"] = _vectors_subtract(c["vectors_orig"], c["decoded_sum"])
+        decoded_raw = _decode_to_vectors_format(
+            v_res, cb, indices, backend, resolved_device
+        )
+        decoded = (
+            decoded_raw.reshape(c["vectors_residual"].shape)
+            if is_scalar_stage
+            else decoded_raw
+        )
+        if c["decoded_sum"] is None:
+            c["decoded_sum"] = decoded
+        else:
+            c["decoded_sum"] = c["decoded_sum"] + decoded
+        c["vectors_residual"] = _vectors_subtract(c["vectors_orig"], c["decoded_sum"])
 
     if backend == "torch":
         c["vectors_residual"] = _offload(c["vectors_residual"])
@@ -382,7 +460,10 @@ def _quantize_and_record_stage(
 
     if em_aq_cleanup and n_stages > 1 and em_aq_passes > 0 and stage_i == n_stages - 1:
         c.pop("vectors_residual", None)
-        c.pop("decoded_sum", None)
+        # Giants keep decoded_sum: EM-AQ skips them (_run_em_aq_refinement), so the
+        # finalize metrics read the greedy stage-loop sum instead of a rebuilt one.
+        if not is_giant:
+            c.pop("decoded_sum", None)
 
     stage_meta = {
         "stage": stage_i,

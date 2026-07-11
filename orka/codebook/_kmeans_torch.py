@@ -131,9 +131,23 @@ def _kmeans_pp_init_torch(
 # normal tensor and every Lloyd-on-sample assign stays on the exact original full path, so
 # their bytes are unchanged (oracle-safe). ORKA_LARGE_ASSIGN_ROWS overrides (validation:
 # exercise the giant path on small models under a RAM fence).
-import os as _os
+import os as _os  # noqa: E402
 
 _LARGE_ASSIGN_ROWS = int(_os.environ.get("ORKA_LARGE_ASSIGN_ROWS", 20_000_000))
+
+# _LARGE_ASSIGN_ROWS is calibrated in vectors of width 8 (the 1B vocab head at
+# group_size 8 = ~127M rows x 8). Giant-ness is really about the element count
+# (rows x width = bytes/4), so every gate compares against rows*8: a scalar-stage
+# view [numel, 1] of a 45M-element tensor is NOT a giant (the old row-count gate
+# said it was and misrouted it to the CPU-resident tiled path), while the same
+# 1B-element head is a giant in both its [127M, 8] and [1B, 1] layouts.
+_GIANT_WIDTH_REF = 8
+
+
+def _is_giant_matrix(n_rows: int, width: int) -> bool:
+    """True when a [n_rows, width] f32 matrix is too big to hold multiple full
+    copies on a consumer GPU. Element-based, layout-independent."""
+    return int(n_rows) * int(width) > _LARGE_ASSIGN_ROWS * _GIANT_WIDTH_REF
 
 
 def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_norm_sq=None, vector_weights=None, keep_device=False, compute_mse=True):
@@ -160,12 +174,18 @@ def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_nor
     # argmin is per-row independent, so the returned indices are byte-identical to the full
     # path; only mse sums in chunk order (and the quantize caller discards mse). Gated on a
     # large row count so nothing normal changes.
-    if n_rows > _LARGE_ASSIGN_ROWS:
+    if _is_giant_matrix(n_rows, width):
+        # Chunk by BYTE budget, not a fixed row count: 65536 rows is 2MB at d=8, which
+        # made the giant assign PCIe-latency-bound (~1940 copies + a host sync each on
+        # the 1B head). Per-row argmin is independent of chunking, so indices are
+        # identical for any chunk size; chunk_size acts as the floor.
+        from orka import config
+        rows_per_chunk = max(chunk_size, (config.assign_chunk_mb() << 20) // max(4 * width, 1))
         idx_out = torch.empty(n_rows, dtype=torch.int64, device=(resolved if keep_device else "cpu"))
         sse = 0.0
         with torch.no_grad():
-            for i in range(0, n_rows, chunk_size):
-                ch = _torch_float32_matrix(vectors[i:i + chunk_size], device).float()
+            for i in range(0, n_rows, rows_per_chunk):
+                ch = _torch_float32_matrix(vectors[i:i + rows_per_chunk], device).float()
                 if sqrt_W is not None:
                     ch = ch * sqrt_W
                 cidx = _fused_assign(ch, centroids)
