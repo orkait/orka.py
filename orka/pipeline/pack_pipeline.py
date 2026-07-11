@@ -431,7 +431,10 @@ def _quantize_and_record_stage(
 
     if em_aq_cleanup and n_stages > 1 and em_aq_passes > 0 and stage_i == n_stages - 1:
         c.pop("vectors_residual", None)
-        c.pop("decoded_sum", None)
+        # Giants keep decoded_sum: EM-AQ skips them (_run_em_aq_refinement), so the
+        # finalize metrics read the greedy stage-loop sum instead of a rebuilt one.
+        if not is_giant:
+            c.pop("decoded_sum", None)
 
     stage_meta = {
         "stage": stage_i,

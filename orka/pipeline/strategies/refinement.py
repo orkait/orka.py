@@ -17,6 +17,7 @@ from pathlib import Path
 
 from orka._runtime import _BG_WRITER, _check_ram_cap
 from orka.codebook import learn_codebook_auto, quantize_vectors_auto
+from orka.codebook._kmeans_torch import _is_giant_matrix
 from orka.core._format import (
     _cast_codebook_storage,
     _write_codebook,
@@ -64,6 +65,23 @@ def _run_em_aq_refinement(
         _check_ram_cap()
         if _is_skipped(c):
             continue
+
+        # Giants keep the greedy stage-loop result: step 1 below re-materializes the
+        # full decoded sum (+4GB per stage on a 1B-param head) and every EM pass
+        # re-assigns the whole tensor. Their decoded_sum survives the stage-loop
+        # cleanup (see em_aq_cleanup in _quantize_and_record_stage), so the finalize
+        # metrics measure the greedy sum directly.
+        if backend == "torch":
+            vo = c.get("vectors_orig")
+            if (
+                vo is not None and hasattr(vo, "shape") and len(vo.shape) == 2
+                and _is_giant_matrix(int(vo.shape[0]), int(vo.shape[1]))
+            ):
+                _report_progress(
+                    progress_file,
+                    f"  EM-AQ skipped {c['name']}: giant tensor (greedy stage result kept)",
+                )
+                continue
 
         c_n_stages = len(c["stages_data"])
 
