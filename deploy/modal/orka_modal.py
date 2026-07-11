@@ -536,3 +536,89 @@ def main(repo: str = "", target_bpw: float = 4.0, codebook_dtype: str = "int8"):
         print("       modal run orka_modal.py::ls")
         return
     print(json.dumps(compress.remote(repo, target_bpw, codebook_dtype), indent=2))
+
+
+@app.function(image=image, gpu="A10G", volumes=VOLUMES, timeout=3600,
+              memory=65536, env=ENV, retries=0)
+def smoke(artifact: str, model_repo: str, prompts: str = "") -> dict:
+    """Generation smoke test for a packed artifact: reconstruct to dense bf16 on the
+    volume (64GB RAM - local boxes can't hold the 9B-class state dict), load fully in
+    A10G VRAM, greedy-generate on a few prompts. The output tokens are computed from
+    the QUANTIZED weights - coherent text = the artifact works end to end."""
+    import torch
+    from huggingface_hub import snapshot_download
+    from pathlib import Path as P
+
+    art = P(artifact)
+    dense = art.parent / (art.stem + "-dense-hf")
+    model_dir = snapshot_download(
+        model_repo, allow_patterns=["*.json", "*.model", "tokenizer*", "merges*", "vocab*", "*.jinja"]
+    )
+    # reconstruct --out is a FILE path (the safetensors itself), not a directory.
+    st = dense / "model.safetensors"
+    if not st.exists():
+        if dense.exists() and not dense.is_dir():
+            dense.unlink()
+        dense.mkdir(parents=True, exist_ok=True)
+        _orka("reconstruct", str(art), "--out", str(st), "--format", "safetensors")
+        import shutil
+        for f in P(model_dir).glob("*"):
+            if f.is_file() and not f.name.startswith("model.safetensors"):
+                shutil.copy(f, dense / f.name)
+        data_vol.commit()
+
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(str(dense), local_files_only=True, trust_remote_code=True)
+    model = None
+    for cls_name in ("AutoModelForImageTextToText", "AutoModelForVision2Seq", "AutoModelForCausalLM"):
+        try:
+            import transformers
+            cls = getattr(transformers, cls_name)
+            model = cls.from_pretrained(str(dense), local_files_only=True,
+                                        trust_remote_code=True, dtype=torch.bfloat16).cuda().eval()
+            print(f"=== loaded via {cls_name} ===", flush=True)
+            break
+        except Exception as exc:
+            print(f"{cls_name} failed: {str(exc)[:140]}", flush=True)
+    if model is None:
+        raise RuntimeError("no auto class could load the reconstructed model")
+
+    gp = [p for p in prompts.split("|") if p] or [
+        "The capital of France is",
+        "def fibonacci(n):",
+        "Q: What is 2+2?\nA:",
+        "Photosynthesis is the process by which",
+    ]
+    outs = {}
+    with torch.no_grad():
+        for p in gp:
+            ids = tok(p, return_tensors="pt").to("cuda")
+            o = model.generate(**ids, max_new_tokens=48, do_sample=False,
+                               pad_token_id=tok.eos_token_id)
+            outs[p] = tok.decode(o[0], skip_special_tokens=True)
+            print(f"\n>>> {p}\n{outs[p]}", flush=True)
+    return {"generations": outs}
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=3600, memory=65536, env=ENV, retries=0)
+def vq_export(artifact: str, model_repo: str) -> dict:
+    """Serialize an artifact into the VQLinear-packed HF repo (runs where the RAM is:
+    the export holds dense-decoded giants + the packed state dict simultaneously)."""
+    import shutil
+    from pathlib import Path as P
+    from huggingface_hub import snapshot_download
+
+    from orka.integrations.hf_quantizer import export_orka_hf_repo
+
+    art = P(artifact)
+    repo = art.parent / (art.stem + "-vq-repo")
+    model_dir = P(snapshot_download(
+        model_repo, allow_patterns=["*.json", "*.model", "tokenizer*", "merges*", "vocab*", "*.jinja"]
+    ))
+    s = export_orka_hf_repo(art, model_dir, repo)
+    for f in model_dir.glob("*"):
+        if f.is_file() and f.suffix in (".json", ".jinja") and not (repo / f.name).exists():
+            shutil.copy(f, repo / f.name)
+    data_vol.commit()
+    print("export:", s, flush=True)
+    return s
