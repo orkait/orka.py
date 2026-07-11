@@ -72,6 +72,7 @@ from orka.pipeline.pack_manifest import (
 )
 from orka.pipeline.pack_pipeline import (
     PackCtx,
+    PrefetchBudget,
     _FinalizeWorker,
     _offload,
     _onload,
@@ -109,6 +110,7 @@ def _prefetch_worker(
     _prefetch_state: dict,
     _passthrough: dict,
     awq_fallbacks: list,
+    prefetch_budget=None,
 ) -> None:
     """Producer thread body for pack_checkpoint: iterate _load_tensors(source),
     do shape/candidate detection -> normalization -> rotation -> outlier/salient
@@ -181,6 +183,15 @@ def _prefetch_worker(
                     continue
             else:
                 _prefetch_state["candidate_count"] += 1
+
+            # Reserve the candidate's retained bytes (source_flat + vectors, both f32
+            # = ~8x numel) BEFORE the prep transients materialize, so a second giant
+            # is never normalized while the first still packs. Released at finalize
+            # (_release_candidate_payload). Scheduling only - bytes unchanged.
+            est_bytes = 0
+            if prefetch_budget is not None:
+                est_bytes = _tensor_numel(tensor) * 8
+                prefetch_budget.reserve(est_bytes)
 
             # Per-tensor transform overrides (allocation map). Shared codebooks need one
             # normalization/rotation across the tensors they cover, so overrides apply in
@@ -334,6 +345,9 @@ def _prefetch_worker(
                 "group_size": resolved_group_size,
                 "vector_weights": vw, "sample_weights": sw,
                 "col_importance": col_importance, "stages_data": {},
+                "_prefetch_budget": (
+                    (prefetch_budget, est_bytes) if prefetch_budget is not None else None
+                ),
             })
             tensors_emitted += 1
 
@@ -602,6 +616,16 @@ def pack_checkpoint(
     if codebook_mode == "per-tensor":
         ctx.finalize_worker = _FinalizeWorker(ctx)
 
+    # Byte backpressure on producer read-ahead (streamed mode only: batched modes
+    # keep every candidate resident until the end, so a budget would deadlock).
+    prefetch_budget = None
+    if codebook_mode == "per-tensor":
+        from orka import config
+
+        budget_gb = config.prefetch_budget_gb()
+        if budget_gb > 0:
+            prefetch_budget = PrefetchBudget(int(budget_gb * (1 << 30)))
+
     prefetch_thread = threading.Thread(
         target=_prefetch_worker,
         kwargs=dict(
@@ -620,6 +644,7 @@ def pack_checkpoint(
             _prefetch_state=_prefetch_state,
             _passthrough=_passthrough,
             awq_fallbacks=awq_fallbacks,
+            prefetch_budget=prefetch_budget,
         ),
         daemon=True,
     )

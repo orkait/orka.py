@@ -50,6 +50,35 @@ from orka.pipeline.pack_manifest import (
 from orka.pipeline.strategies import POST_ASSIGNMENT_STRATEGIES, _run_em_aq_refinement
 
 
+class PrefetchBudget:
+    """Byte-budget backpressure for the producer thread.
+
+    The prefetch queue caps candidate COUNT (PREFETCH_QUEUE_DEPTH) but not BYTES:
+    with two 1B-param giants adjacent in the checkpoint, the producer prepped the
+    second (~8GB retained + ~12GB of normalize transients) while the first was
+    still packing. ``reserve()`` blocks before the producer preps a candidate whose
+    retained bytes would push the outstanding total past the budget; ``release()``
+    runs at finalize, after the candidate's payload is freed. A candidate larger
+    than the whole budget is admitted alone (outstanding == 0), so giants
+    serialize instead of deadlocking. Pure scheduling - packed bytes unchanged."""
+
+    def __init__(self, budget_bytes: int):
+        self.budget = int(budget_bytes)
+        self.outstanding = 0
+        self._cond = threading.Condition()
+
+    def reserve(self, nbytes: int) -> None:
+        with self._cond:
+            while self.outstanding > 0 and self.outstanding + int(nbytes) > self.budget:
+                self._cond.wait(timeout=1.0)
+            self.outstanding += int(nbytes)
+
+    def release(self, nbytes: int) -> None:
+        with self._cond:
+            self.outstanding = max(0, self.outstanding - int(nbytes))
+            self._cond.notify_all()
+
+
 def _stage_decode_accumulate_blocked(c, cb, indices, is_scalar_stage, chunk_rows=2_000_000):
     """Low-RAM RVQ stage close-out for giant tensors (torch, CPU-resident).
 

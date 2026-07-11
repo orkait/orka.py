@@ -207,6 +207,12 @@ def _release_candidate_payload(c: dict) -> None:
         for stage_data in stages_data.values():
             if isinstance(stage_data, dict) and "indices" in stage_data:
                 stage_data["indices"] = None
+    # Return the candidate's reserved bytes to the producer budget LAST, after the
+    # payload above is actually dropped, so backpressure tracks real RAM.
+    reserved = c.pop("_prefetch_budget", None)
+    if reserved:
+        budget, nbytes = reserved
+        budget.release(nbytes)
 
 
 def _finalize_tensor_manifest_entry(

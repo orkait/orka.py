@@ -15,6 +15,11 @@ DEFAULT_HARD_CEILING_GB = 25.0
 DEFAULT_LLM_LITE_MODEL = "claude-sonnet-4-6"
 DEFAULT_LLM_STRONG_MODEL = "claude-opus-4-8"
 
+#: Byte budget for producer read-ahead (streamed per-tensor packs), in GB. The
+#: prefetch queue caps candidate count; this caps the bytes those candidates
+#: retain (source_flat + vectors, ~8x numel). <= 0 disables the budget.
+DEFAULT_PREFETCH_BUDGET_GB = 4.0
+
 #: H2D transfer budget per chunk for the tiled (giant-tensor) assign, in MB.
 #: 65536-row chunks were 2MB at group_size 8 - PCIe-latency-bound (~1940 copies
 #: + syncs on the 1B vocab head). 128MB keeps the loop bandwidth-bound.
@@ -65,6 +70,10 @@ def kmeans_iters(default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def prefetch_budget_gb() -> float:
+    return _float("ORKA_PREFETCH_BUDGET_GB", DEFAULT_PREFETCH_BUDGET_GB)
 
 
 def assign_chunk_mb() -> int:
