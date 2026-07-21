@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Sequence
 from pathlib import Path
 
+from orka._runtime import _resolve_torch_device
 from orka.core._features import ensure_awq_feature_enabled
 from orka.eval.prompts import _read_prompt_file
 
@@ -22,6 +23,9 @@ def _collect_activations_hf(
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except Exception as exc:
         raise RuntimeError("activation calibration requires torch and transformers") from exc
+    # Callers pass the CLI --device verbatim, which defaults to "auto"; torch only
+    # accepts concrete device strings.
+    device = str(_resolve_torch_device(device))
     tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(str(model_dir), local_files_only=True, trust_remote_code=True)
     model.to(device)
