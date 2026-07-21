@@ -115,10 +115,13 @@ def pack_checkpoint_sequential(
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    from orka._runtime import _resolve_torch_device
     from orka.artifact.merge import merge_orka_artifacts
     from orka.eval.prompts import _read_prompt_file
     from orka.pipeline.decode import _decode_tensor
     from orka.pipeline.pack import pack_checkpoint
+
+    model_device = str(_resolve_torch_device(model_device))
 
     if pack_kwargs.get("codebook_mode", "per-tensor") != "per-tensor":
         raise ValueError(
