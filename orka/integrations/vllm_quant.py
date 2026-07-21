@@ -109,12 +109,9 @@ def register_orka_vllm() -> None:
 
         def apply(self, layer, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
             vq = layer.orka_vq
-            # sync any vLLM-loaded parameter data back onto the VQLinear buffers.
-            # Shape-guarded: the first forward folds the CSR correction into
-            # VQLinear's sparse cache and frees the raw corr_* buffers, so from the
-            # second call on those are empty(0) while the vLLM parameter still holds
-            # nnz entries - an unguarded copy_ raises. Skipping is lossless; the data
-            # already lives in the cache.
+            # Sync vLLM-loaded parameters onto the VQLinear buffers. Shape-guarded:
+            # the first forward frees the corr_* buffers into the sparse cache, so an
+            # unguarded copy_ raises from the second call on. Skipping is lossless.
             for name, p in layer.named_parameters(recurse=False):
                 buf = getattr(vq, name, None)
                 if buf is not None and buf.shape == p.data.shape:

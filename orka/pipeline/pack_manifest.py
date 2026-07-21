@@ -136,7 +136,7 @@ def _build_tensor_manifest_entry(
     )
     index_bytes_total = sum(s["index_bytes"] for s in c["stages_meta"])
     vector_count = c.get("vector_count") or (c["packed_values"] // c["group_size"])
-    return {
+    entry = {
         "name": c["name"],
         "shape": c["shape"],
         "packed_values": c["packed_values"],
@@ -179,6 +179,9 @@ def _build_tensor_manifest_entry(
         "rotation_seed": c.get("rotation_seed"),
         "rotation": c.get("rotation", "none"),
     }
+    if c.get("mse_scale_applied") is not None:
+        entry["mse_scale_applied"] = bool(c["mse_scale_applied"])
+    return entry
 
 
 def _release_candidate_payload(c: dict) -> None:

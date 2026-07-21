@@ -343,8 +343,15 @@ def _learn_codebook_torch(
     ):
         try:
             return _learn_codebook_faiss(rows, k, effective_iters, device, seed)
-        except Exception:
-            pass  # fall back to the torch path below
+        except Exception as exc:
+            from orka.core._util import _warn_once
+
+            _warn_once(
+                "kmeans.faiss",
+                f"orka: ORKA_KMEANS_FAISS is set but the faiss k-means failed; using "
+                f"the torch path (~2x slower). Reason: "
+                f"{type(exc).__name__}: {str(exc)[:120]}",
+            )
 
     use_half = resolved.type == "cuda"
     dtype = torch.float16 if use_half else torch.float32

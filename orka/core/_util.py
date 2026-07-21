@@ -25,6 +25,23 @@ def _report_progress(path: Path | None, message: str):
     print(message)
 
 
+_WARNED_ONCE: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """RuntimeWarning on the first sighting of ``key``, silent after.
+
+    Accelerator fallbacks fire per layer and per token, so warning unconditionally
+    floods the log and warning never hides multi-x slowdowns.
+    """
+    if key in _WARNED_ONCE:
+        return
+    _WARNED_ONCE.add(key)
+    import warnings
+
+    warnings.warn(message, RuntimeWarning, stacklevel=3)
+
+
 def _source_signature(source: Path) -> str:
     try:
         st = Path(source).resolve().stat()

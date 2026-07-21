@@ -204,7 +204,7 @@ def _run_em_aq_refinement(
             c["vectors"] = None
 
 
-def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_dir, device: str = "cpu") -> None:
+def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_dir, device: str = "cpu") -> bool:
     """MSE-optimal block scales (post-assignment refinement).
 
     orka stores scale = block max, so the codebook fit per block is dominated by
@@ -216,21 +216,22 @@ def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_di
     Excludes salient/outlier override positions from the fit, and leaves outlier-
     containing blocks at block-max (outlier sidecar values are stored scale-relative).
     Gated to rotation=none + block-max-family normalization, where the scale acts
-    directly on the stored weights.
+    directly on the stored weights. Returns True only when refined scales were
+    written, so the manifest can report the outcome rather than the request.
     """
     if not mse_scale:
-        return
+        return False
     if (c.get("rotation") or "none") != "none":
         c.pop("_mse_v", None)
-        return
+        return False
     if not stores_block_scales(c.get("normalization")):
         c.pop("_mse_v", None)
-        return
+        return False
     scales = c.get("row_scales")
     v = c.pop("_mse_v", None)  # clean normalized weights stashed pre-stages
     meta = c.get("stages_meta")
     if scales is None or v is None or not meta:
-        return
+        return False
     import numpy as np
     import torch
 
@@ -251,11 +252,11 @@ def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_di
     v = _num(v, np.float32, torch.float32)
     sc = _num(scales, np.float32, torch.float32)
     if v is None or sc is None:
-        return
+        return False
     total = int(v.numel())
     bs = int(c.get("block_scale_size") or block_scale_size)
     if bs <= 0 or total % bs != 0 or int(sc.numel()) != total // bs:
-        return
+        return False
     nb = total // bs
     # Final normalized VQ reconstruction r = sum_s codebook_s[indices_s]. The
     # in-memory indices are freed by EM-AQ, so read the final stored codebook +
@@ -265,7 +266,7 @@ def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_di
         for sm in meta:
             g = int(sm.get("group_size", 8))
             if g <= 0 or total % g != 0:
-                return
+                return False
             cb_np = _read_codebook(
                 out_dir / sm["codebook"], g, sm.get("codebook_dtype", "float16")
             )
@@ -278,10 +279,10 @@ def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_di
             idx = torch.as_tensor(np.asarray(idx_np, dtype=np.int64), device=device).reshape(-1)
             rr = cb[idx].reshape(-1)
             if int(rr.numel()) != total:
-                return
+                return False
             r += rr
     except Exception:
-        return
+        return False
     mask = torch.ones(total, dtype=torch.float32, device=device)
     sal = _num(c.get("salient_indices"), np.int64, torch.long)
     if sal is not None and int(sal.numel()) == nb:
@@ -304,6 +305,7 @@ def _refine_scales_ls(c: dict, *, mse_scale: bool, block_scale_size: int, out_di
     s_new = torch.where(skip_block, sc, s_new)  # outlier blocks keep block-max
     s_new = torch.where(torch.isfinite(s_new) & (s_new.abs() > LS_SCALE_MIN_MAGNITUDE), s_new, sc)
     c["row_scales"] = _fp16_storage_roundtrip(s_new.detach().cpu().numpy().astype(np.float32))
+    return True
 
 
 class EMAQStrategy(PostAssignmentStrategy):
@@ -335,10 +337,11 @@ class MSEScaleStrategy(PostAssignmentStrategy):
 
     def apply(self, ctx, c: dict) -> None:
         try:
-            _refine_scales_ls(
+            c["mse_scale_applied"] = bool(_refine_scales_ls(
                 c, mse_scale=ctx.mse_scale, block_scale_size=ctx.block_scale_size,
                 out_dir=ctx.out_dir, device=getattr(ctx, "resolved_device", "cpu"),
-            )
+            ))
         except Exception as exc:  # refinement is optional; never fail the pack
             c.pop("_mse_v", None)
+            c["mse_scale_applied"] = False
             _report_progress(ctx.progress_file, f"  mse_scale refinement skipped: {exc}")
