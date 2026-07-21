@@ -13,6 +13,11 @@ from orka.core._format import _fp16_storage_roundtrip
 from orka.core._tensor import _numpy_float32_array, _torch_f32
 from orka.core._util import _product
 
+#: fp16's smallest positive subnormal. A block scale below this survives the
+#: ``scales == 0`` guard but flushes to 0.0 in the fp16 sidecar, so the normalize
+#: divide emits inf/nan. Real trigger: dead vocab rows in an embedding.
+_MIN_STORABLE_SCALE = 2.0 ** -24
+
 
 def _normalize_tensor_awq_block_max_torch(tensor, X, alpha, block_size, device):
     import torch
@@ -39,7 +44,7 @@ def _normalize_tensor_awq_block_max_torch(tensor, X, alpha, block_size, device):
     blocks = flat.reshape(-1, block_size)
     scales = blocks.abs().amax(dim=1)
     safe = _fp16_storage_roundtrip(
-        torch.where(scales == 0, torch.ones_like(scales), scales)
+        torch.where(scales == 0, torch.ones_like(scales), scales).clamp(min=_MIN_STORABLE_SCALE)
     )
     normalized = (blocks / safe[:, None]).reshape(-1)
     if pad:
@@ -47,7 +52,7 @@ def _normalize_tensor_awq_block_max_torch(tensor, X, alpha, block_size, device):
 
     return (
         normalized.reshape(arr.shape),
-        scales.detach().cpu(),
+        safe.detach().cpu(),
         arr.reshape(-1).detach().cpu(),
         awq_scales.detach().cpu(),
     )
@@ -65,7 +70,7 @@ def _normalize_tensor_block_max_torch(tensor, block_size: int, device):
     blocks = flat.reshape(-1, block_size)
     scales = blocks.abs().amax(dim=1)
     safe = _fp16_storage_roundtrip(
-        torch.where(scales == 0, torch.ones_like(scales), scales)
+        torch.where(scales == 0, torch.ones_like(scales), scales).clamp(min=_MIN_STORABLE_SCALE)
     )
     normalized = (blocks / safe[:, None]).reshape(-1)
     if pad:
@@ -88,7 +93,9 @@ def _normalize_tensor_block_max_numpy(tensor, block_size: int):
         flat = np.pad(flat, (0, pad), mode="constant")
     blocks = flat.reshape(-1, block_size)
     scales = np.abs(blocks).max(axis=1).astype(np.float32)
-    safe = _fp16_storage_roundtrip(np.where(scales == 0, 1.0, scales).astype(np.float32))
+    safe = _fp16_storage_roundtrip(
+        np.maximum(np.where(scales == 0, 1.0, scales), _MIN_STORABLE_SCALE).astype(np.float32)
+    )
     normalized = (blocks / safe[:, None]).reshape(-1)
     if pad:
         normalized = normalized[:n]
@@ -122,7 +129,7 @@ def _normalize_tensor_channel_block_max_torch(tensor, block_size: int, device):
     blocked = mat.reshape(rows, blocks_per_row, block_size)
     scales = blocked.abs().amax(dim=2)  # [rows, blocks_per_row]
     safe = _fp16_storage_roundtrip(
-        torch.where(scales == 0, torch.ones_like(scales), scales)
+        torch.where(scales == 0, torch.ones_like(scales), scales).clamp(min=_MIN_STORABLE_SCALE)
     )
     normalized = (blocked / safe.unsqueeze(2)).reshape(rows, cols)
 
@@ -157,7 +164,9 @@ def _normalize_tensor_channel_block_max_numpy(tensor, block_size: int):
     blocks_per_row = cols // block_size
     blocked = mat.reshape(rows, blocks_per_row, block_size)
     scales = np.abs(blocked).max(axis=2).astype(np.float32)  # [rows, blocks_per_row]
-    safe = _fp16_storage_roundtrip(np.where(scales == 0, 1.0, scales).astype(np.float32))
+    safe = _fp16_storage_roundtrip(
+        np.maximum(np.where(scales == 0, 1.0, scales), _MIN_STORABLE_SCALE).astype(np.float32)
+    )
     normalized = (blocked / safe[:, :, None]).reshape(rows, cols)
 
     scales_flat = safe.reshape(-1)
