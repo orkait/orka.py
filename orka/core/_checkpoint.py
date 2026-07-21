@@ -6,7 +6,18 @@ import json
 from collections.abc import Iterable
 from pathlib import Path
 
+from orka.core._constants import NON_CANDIDATE_MARKERS
 from orka.core._tensor import _tensor_numel, _tensor_shape
+
+
+def is_quant_candidate(name: str, shape) -> bool:
+    """Whether a tensor is a dense weight the quantizers may pack.
+
+    Shared by inspect_checkpoint, the pack producer, and the allocation probe: a
+    drift between the allocator's set and the packer's yields an allocation map
+    keyed on tensors the pack never visits.
+    """
+    return len(shape) >= 2 and not any(m in name.lower() for m in NON_CANDIDATE_MARKERS)
 
 
 def _tensor_shapes(path: Path) -> dict:
@@ -128,14 +139,7 @@ def inspect_checkpoint(path: Path) -> dict:
             continue
         total_params += numel
 
-        # Dense weights only: biases, norms and architectural sidecars are excluded below.
-        is_candidate = len(shape) >= 2
-        name_lower = name.lower()
-        if any(
-            x in name_lower
-            for x in (".bias", ".norm", ".layernorm", "rotary_emb", "attention.bias")
-        ):
-            is_candidate = False
+        is_candidate = is_quant_candidate(name, shape)
 
         tensors.append(
             {

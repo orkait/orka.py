@@ -15,6 +15,7 @@ from __future__ import annotations
 import torch
 import triton
 
+from orka.core._util import _warn_once
 from orka.inference.triton_kernels import _vq_decode_n1, _vq_gemm_kernel
 
 
@@ -25,7 +26,12 @@ def vq_linear_forward(layer, x: torch.Tensor) -> torch.Tensor:
     """
     try:
         from orka.inference import cuda_decode
-    except Exception:
+    except Exception as exc:
+        _warn_once(
+            "dispatch.cuda_decode.import",
+            f"orka: CUDA decode backend unavailable, using the Triton path "
+            f"(~6x slower at N=1). Reason: {type(exc).__name__}: {str(exc)[:120]}",
+        )
         cuda_decode = None
     G = layer.group_size
     B = layer.block_size
@@ -55,8 +61,12 @@ def vq_linear_forward(layer, x: torch.Tensor) -> torch.Tensor:
                     out = cuda_decode.forward_n1(layer, x)
                     if out is not None:
                         return out
-            except Exception:
-                pass
+            except Exception as exc:
+                _warn_once(
+                    "dispatch.cuda_decode.n1",
+                    f"orka: CUDA N=1 decode failed, falling back to Triton "
+                    f"(~6x slower). Reason: {type(exc).__name__}: {str(exc)[:120]}",
+                )
         y = _vq_decode_n1(layer, x_2d)
         sp = layer._correction_sparse()
         if sp is not None:
@@ -74,8 +84,12 @@ def vq_linear_forward(layer, x: torch.Tensor) -> torch.Tensor:
                 out = cuda_decode.forward_prefill(layer, x)
                 if out is not None:
                     return out
-        except Exception:
-            pass
+        except Exception as exc:
+            _warn_once(
+                "dispatch.cuda_decode.prefill",
+                f"orka: CUDA prefill failed, falling back to the Triton gather-GEMM "
+                f"(~2x slower). Reason: {type(exc).__name__}: {str(exc)[:120]}",
+            )
 
     y = torch.empty((N, M), dtype=torch.float16, device=x_2d.device)
 

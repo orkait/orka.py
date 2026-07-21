@@ -20,7 +20,7 @@ from pathlib import Path
 
 from orka._runtime import _resolve_auto_backend
 from orka.codebook import learn_codebook_auto, quantize_vectors_auto
-from orka.core._checkpoint import _load_tensors
+from orka.core._checkpoint import _load_tensors, is_quant_candidate
 from orka.core._tensor import (
     _decode_to_vectors_format,
     _numpy_float32_array,
@@ -199,11 +199,7 @@ def build_allocation(
     seen = 0
     for name, tensor in _load_tensors(source):
         shape = _tensor_shape(tensor)
-        lowered = name.lower()
-        if len(shape) < 2 or any(
-            x in lowered
-            for x in (".bias", ".norm", ".layernorm", "rotary_emb", "attention.bias")
-        ):
+        if not is_quant_candidate(name, shape):
             continue
         if max_tensors is not None and seen >= max_tensors:
             break

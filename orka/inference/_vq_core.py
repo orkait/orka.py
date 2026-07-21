@@ -9,6 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from orka.core._util import _warn_once
+
 
 class VQLinear(nn.Module):
     """Linear layer backed by VQ codebooks.
@@ -109,9 +111,7 @@ class VQLinear(nn.Module):
     def _correction_sparse(self) -> torch.Tensor | None:
         cached = getattr(self, "_corr_sp_cache", None)
         if cached is not None:
-            # The cache is a plain attribute, not a registered buffer, so
-            # nn.Module._apply (.to() / .cuda()) does not migrate it with the rest
-            # of the layer. Follow the layer instead of failing on a device mismatch.
+            # Plain attribute, so nn.Module._apply (.to()) does not migrate it.
             if cached.device != self.scales.device:
                 cached = cached.to(self.scales.device)
                 self._corr_sp_cache = cached
@@ -139,13 +139,10 @@ class VQLinear(nn.Module):
         return sp
 
     def _correction_csr(self):
-        """Live CSR correction as ``(rowptr, col, val)``, or None when there is none.
+        """Live CSR correction as ``(rowptr, col, val)``, or None.
 
-        ``_correction_sparse`` frees the raw buffers once it has cached the sparse
-        tensor, so no reader may assume ``corr_col`` still holds the data - after any
-        correction-carrying forward it lives in ``_corr_sp_cache`` instead. This is the
-        one accessor that knows which storage is currently live; read the correction
-        through it rather than off the buffers.
+        ``_correction_sparse`` frees the raw buffers into the sparse cache, so read
+        the correction through here rather than off ``corr_col`` directly.
         """
         if self.corr_col.numel() > 0:
             return self.corr_rowptr, self.corr_col, self.corr_val
@@ -156,10 +153,8 @@ class VQLinear(nn.Module):
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         super()._save_to_state_dict(destination, prefix, keep_vars)
-        # After a forward the raw buffers are empty, so the default buffer save emits
-        # a zero-nnz correction and the checkpoint silently loses it. Re-emit from the
-        # cache in the registered buffer dtypes, so serialization no longer depends on
-        # whether the layer has been run.
+        # Post-forward the buffers are empty; re-emit from the cache in their
+        # registered dtypes so a checkpoint never silently loses the correction.
         if self.corr_col.numel() > 0:
             return
         csr = self._correction_csr()
@@ -222,10 +217,6 @@ class VQLinear(nn.Module):
             decoded = F.pad(decoded, (0, pad_b))
         decoded = (decoded.reshape(n_blocks, B) * sc[:n_blocks, None].float()).reshape(-1)[:total]
 
-        # Apply the correction from whichever storage is live: the raw CSR buffers
-        # before the first forward, the cached sparse tensor after (the forward path
-        # frees the buffers into it). Reading the buffers directly here dropped the
-        # correction entirely once a forward had run - a silent numeric error.
         csr = self._correction_csr()
         if csr is not None:
             rowptr, col, val = (t.to(dev) for t in csr)
@@ -285,8 +276,13 @@ class VQLinear(nn.Module):
                         if self.bias is not None:
                             y = y + self.bias
                         return y.reshape(*x.shape[:-1], M).to(x.dtype)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _warn_once(
+                        "vq_core.cuda_planes.n1",
+                        f"orka: CUDA plane GEMV failed at N=1, falling back to the "
+                        f"custom op / Triton path. Reason: "
+                        f"{type(exc).__name__}: {str(exc)[:120]}",
+                    )
         # Compile-traceable path: a single custom op (no graph break) for the uniform
         # 2-stage, correction-free case. torch.compile/CUDA-graphs can capture this.
         from orka.inference.plane_ops import plane_op_supported, vq_plane_linear
@@ -312,7 +308,13 @@ class VQLinear(nn.Module):
             try:
                 from orka.inference.triton_kernels import _vq_decode_planes_n1, _vq_gemm_planes
                 y = _vq_decode_planes_n1(self, xf) if xf.shape[0] == 1 else _vq_gemm_planes(self, xf)
-            except Exception:
+            except Exception as exc:
+                _warn_once(
+                    "vq_core.triton_planes",
+                    f"orka: Triton plane kernel failed, falling back to dense "
+                    f"reconstruct+matmul (much slower, and it materializes the weight). "
+                    f"Reason: {type(exc).__name__}: {str(exc)[:120]}",
+                )
                 y = None
             if y is not None:
                 if self.corr_col.numel() > 0:

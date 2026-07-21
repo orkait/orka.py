@@ -25,7 +25,7 @@ from orka.codebook import (
     learn_codebook_auto,
     quantize_vectors_auto,
 )
-from orka.core._checkpoint import _load_tensors
+from orka.core._checkpoint import _load_tensors, is_quant_candidate
 from orka.core._format import (
     ORKA_VERSION,
     _cast_codebook_storage,
@@ -142,15 +142,7 @@ def _prefetch_worker(
             _check_ram_cap()
 
             shape = _tensor_shape(tensor)
-            name_lower = name.lower()
-            is_candidate = len(shape) >= 2
-
-            # Exclude biases, norms, and architectural sidecars.
-            if any(
-                x in name_lower
-                for x in (".bias", ".norm", ".layernorm", "rotary_emb", "attention.bias")
-            ):
-                is_candidate = False
+            is_candidate = is_quant_candidate(name, shape)
 
             # Non-candidates (norms, biases) always pass through so any
             # partial artifact stays completable.
@@ -440,6 +432,19 @@ def pack_checkpoint(
             file=_sys.stderr,
         )
         error_compensation = False
+
+    # Downgrade upfront (as above) so the manifest never records mse_scale=true for a
+    # run where every tensor no-ops. Per-tensor overrides are resolved later, so skip.
+    if mse_scale and not tensor_transforms_map:
+        if rotation != "none" or not stores_block_scales(normalization):
+            import sys as _sys
+
+            print(
+                "WARNING: --mse-scale needs --rotation none and a block-max-family "
+                "--normalization; one is missing, so it will NOT be applied.",
+                file=_sys.stderr,
+            )
+            mse_scale = False
 
     if tensor_partition_count == 1:
         tensor_partition_count = 1
