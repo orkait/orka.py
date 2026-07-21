@@ -109,6 +109,12 @@ class VQLinear(nn.Module):
     def _correction_sparse(self) -> torch.Tensor | None:
         cached = getattr(self, "_corr_sp_cache", None)
         if cached is not None:
+            # The cache is a plain attribute, not a registered buffer, so
+            # nn.Module._apply (.to() / .cuda()) does not migrate it with the rest
+            # of the layer. Follow the layer instead of failing on a device mismatch.
+            if cached.device != self.scales.device:
+                cached = cached.to(self.scales.device)
+                self._corr_sp_cache = cached
             return cached
         if self.corr_col.numel() == 0:
             return None
@@ -131,6 +137,38 @@ class VQLinear(nn.Module):
         self.corr_val = torch.empty(0, dtype=torch.float16, device=sp.device)
         self.corr_rowptr = torch.empty(0, dtype=torch.int32, device=sp.device)
         return sp
+
+    def _correction_csr(self):
+        """Live CSR correction as ``(rowptr, col, val)``, or None when there is none.
+
+        ``_correction_sparse`` frees the raw buffers once it has cached the sparse
+        tensor, so no reader may assume ``corr_col`` still holds the data - after any
+        correction-carrying forward it lives in ``_corr_sp_cache`` instead. This is the
+        one accessor that knows which storage is currently live; read the correction
+        through it rather than off the buffers.
+        """
+        if self.corr_col.numel() > 0:
+            return self.corr_rowptr, self.corr_col, self.corr_val
+        sp = getattr(self, "_corr_sp_cache", None)
+        if sp is None:
+            return None
+        return sp.crow_indices(), sp.col_indices(), sp.values()
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        # After a forward the raw buffers are empty, so the default buffer save emits
+        # a zero-nnz correction and the checkpoint silently loses it. Re-emit from the
+        # cache in the registered buffer dtypes, so serialization no longer depends on
+        # whether the layer has been run.
+        if self.corr_col.numel() > 0:
+            return
+        csr = self._correction_csr()
+        if csr is None:
+            return
+        rowptr, col, val = csr
+        destination[prefix + "corr_rowptr"] = rowptr.detach().to(torch.int32)
+        destination[prefix + "corr_col"] = col.detach().to(torch.int32)
+        destination[prefix + "corr_val"] = val.detach().to(torch.float16)
 
     # ------------------------------------------------------------------
     # Weight reconstruction (for testing / fallback)
@@ -184,16 +222,20 @@ class VQLinear(nn.Module):
             decoded = F.pad(decoded, (0, pad_b))
         decoded = (decoded.reshape(n_blocks, B) * sc[:n_blocks, None].float()).reshape(-1)[:total]
 
-        # Apply correction directly from the stored CSR buffers - independent of the
-        # forward path's cached sparse tensor.
-        if self.corr_col.numel() > 0:
-            counts = (self.corr_rowptr[1:] - self.corr_rowptr[:-1]).long()
+        # Apply the correction from whichever storage is live: the raw CSR buffers
+        # before the first forward, the cached sparse tensor after (the forward path
+        # frees the buffers into it). Reading the buffers directly here dropped the
+        # correction entirely once a forward had run - a silent numeric error.
+        csr = self._correction_csr()
+        if csr is not None:
+            rowptr, col, val = (t.to(dev) for t in csr)
+            counts = (rowptr[1:] - rowptr[:-1]).long()
             rows = torch.repeat_interleave(
-                torch.arange(self.out_features, device=counts.device), counts
+                torch.arange(self.out_features, device=dev), counts
             )
-            flat = rows * self.in_features + self.corr_col.long()
+            flat = rows * self.in_features + col.long()
             mask = flat < total
-            decoded[flat[mask]] += self.corr_val.float()[mask]
+            decoded[flat[mask]] += val.float()[mask]
 
         return decoded.reshape(self.out_features, self.in_features)
 
