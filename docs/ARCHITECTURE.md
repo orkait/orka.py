@@ -27,14 +27,20 @@ The `orka/` package is organized by **domain**, so each concern lives in one pla
 ```
 cli ─┐
      ├─▶ pipeline ─▶ transforms ─▶ codebook ─┐
-qat ─┤            ─▶ quant ───────────────────┼─▶ core
+qat ─┤            ─▶ quant ───────────────────┼─▶ core ─▶ _runtime ─▶ config
      ├─▶ artifact ─▶ inference ───────────────┤
 eval ┘            integrations ───────────────┘
 ```
 
-- `core` is the leaf - it depends on nothing else in `orka` and everything depends on it.
+- `config` is the true leaf (env knobs, stdlib only), then `_runtime` (device/memory/IO).
+- `core` is the leaf of the *domain* layers: it depends only on `_runtime` + `config`
+  (`core/_tensor` needs device resolution, `core/_format` + `core/_features` need env
+  knobs), and every domain subpackage depends on it.
 - `pipeline` is the pack orchestrator; `inference` is the decode/serve side.
 - `integrations` and `cli` are the outer edges (entry points), depended on by nothing internal.
+- `pipeline` and `eval` import each other at module level. That cycle is deliberate and
+  frozen by `tests/test_import_hygiene.py`; see the note at the top of `orka/eval/hf.py`
+  for the deadlock it caused when a lazy import there was made eager.
 
 ## 🩹 Compat shims
 
@@ -43,5 +49,6 @@ The historical flat paths (`orka.hf`, `orka.reconstruct`, `orka.qat_train`, `ork
 ## ✅ Invariants
 
 - **Tests are the structural gate.** `pytest` must stay green across any move. The pack is not byte-reproducible (codebook bytes shift under threaded BLAS), so the contract is `tests/test_golden_oracle.py`: it packs a seeded model through 12 configurations and hashes a manifest-derived fingerprint. A change that moves the combined hash changed pack behaviour.
-- **`core` stays dependency-free** within `orka` - if a `core` module needs another subpackage, the boundary is wrong.
+- **`core` depends on nothing above `_runtime`/`config`** - if a `core` module needs a *domain* subpackage (`quant`, `pipeline`, `eval`, ...), the boundary is wrong.
+- **No domain subpackage imports `deploy` or `cli`** - those are entry points. (A dead `quant.semantic -> deploy.kaggle` import violated this and was removed.)
 - **One concern per subpackage** - a file that mixes pack + eval + integration logic should be split along these lines.

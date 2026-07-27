@@ -445,6 +445,12 @@ def _quantize_and_record_stage(
         c["vectors_residual"] = _vectors_subtract(c["vectors_orig"], c["decoded_sum"])
 
     if backend == "torch":
+        # Candidates go back to host memory between stages. Keeping non-giant tensors
+        # GPU-resident instead looks like an obvious win but MEASURES AS A WASH: on a full
+        # SmolLM2-135M pack (210 tensors, rvq-12-12, 3 reps, medians) resident vs offloaded
+        # was +0.4% at em_aq_passes=0 and -0.2% at em_aq_passes=3, with identical peak VRAM
+        # and byte-identical output. A promising -22% on a 12-tensor --max-tensors run did
+        # not survive at full scale. Do not re-litigate without a full-model A/B.
         c["vectors_residual"] = _offload(c["vectors_residual"])
         c["decoded_sum"] = _offload(c["decoded_sum"])
         c["vectors_orig"] = _offload(c["vectors_orig"])

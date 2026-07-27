@@ -19,6 +19,8 @@ def _kmeans_pp_init_torch(
     """
     import torch
 
+    from orka import config
+
     n = int(rows.shape[0])
     if k >= n:
         return rows.clone()
@@ -26,7 +28,7 @@ def _kmeans_pp_init_torch(
     if seed is not None:
         gen.manual_seed(int(seed) & ((1 << 63) - 1))
 
-    if k > 2048:
+    if k > config.kmeans_pp_max_k():
         perm = torch.randperm(n, generator=gen, device=rows.device)
         return rows[perm[:k]].clone()
 
@@ -150,7 +152,10 @@ def _is_giant_matrix(n_rows: int, width: int) -> bool:
     return int(n_rows) * int(width) > _LARGE_ASSIGN_ROWS * _GIANT_WIDTH_REF
 
 
-def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, r_norm_sq=None, vector_weights=None, keep_device=False, compute_mse=True):
+def _torch_assign(vectors, codebook, device: str, chunk_size: int = 65536, vector_weights=None, keep_device=False, compute_mse=True):
+    """Nearest-centroid assignment. No precomputed row-norm argument: the fused kernel
+    scores with ``||c||^2 - 2 v.c`` (the ``||v||^2`` term is constant across centroids and
+    drops out of the argmin), so a caller-supplied ``r_norm_sq`` was never read."""
     try:
         import torch
     except Exception as exc:
@@ -357,7 +362,6 @@ def _learn_codebook_torch(
     dtype = torch.float16 if use_half else torch.float32
 
     rows_dtype = rows.to(dtype)
-    r_norm_sq = torch.sum(rows.to(torch.float32) * rows.to(torch.float32), dim=1, keepdim=True).to(dtype)
     sw_t = None
     if sample_weights is not None:
         sw_t = torch.as_tensor(sample_weights, dtype=torch.float32, device=rows.device).reshape(-1)
@@ -386,7 +390,6 @@ def _learn_codebook_torch(
                 rows_dtype,
                 codebook,
                 str(rows.device),
-                r_norm_sq=r_norm_sq if vector_weights is None else None,
                 vector_weights=vector_weights,
                 keep_device=True,
                 compute_mse=False,
@@ -420,7 +423,6 @@ def _learn_codebook_torch(
             rows_dtype,
             codebook,
             str(rows.device),
-            r_norm_sq=r_norm_sq if vector_weights is None else None,
             vector_weights=vector_weights,
         )
     return codebook.detach().cpu(), indices, float(mse)

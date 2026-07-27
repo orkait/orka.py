@@ -46,44 +46,62 @@ def build_morphological_trie(token_strings: list[tuple[str, int]]):
 
 
 def find_semantic_hubs(embeddings: np.ndarray, threshold: float = 0.999):
-    """Phase 3: Finding semantic neighborhoods (Concept Merging hubs)."""
+    """Phase 3: Finding semantic neighborhoods (Concept Merging hubs).
+
+    The scan stays sequential - a hub claims its members via ``processed``, so a later
+    index that was already claimed is skipped - but the similarities are computed in
+    CHUNKED matmuls instead of one [1, vocab] matmul per index. The per-index form issued
+    ~5000 tiny GEMMs and materialized a [vocab] row each time (measured 0.48s on an
+    8000-row slice vs 0.01s batched, and it grows linearly with vocab). Chunking bounds
+    the [chunk, vocab] tile; ``ORKA_SEMANTIC_HUB_CHUNK`` sizes it.
+    """
     import torch
-    
+
+    from orka import config
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"  Clustering {embeddings.shape[0]} vectors on {device}...", flush=True)
-    
+
     t_emb = torch.from_numpy(embeddings).to(device)
     # Normalize for cosine similarity
     t_emb = torch.nn.functional.normalize(t_emb, p=2, dim=1)
-    
+
+    n = t_emb.shape[0]
     hubs = []
-    processed = torch.zeros(t_emb.shape[0], dtype=torch.bool, device=device)
-    
+    processed = torch.zeros(n, dtype=torch.bool, device=device)
+
     # Scan ranges where redundancy is common
     # 1. First 2500 tokens (structural/linguistic)
     # 2. Last 2500 tokens (often padding/unused/special)
     scan_ranges = [
-        range(min(2500, t_emb.shape[0])),
-        range(max(0, t_emb.shape[0] - 2500), t_emb.shape[0])
+        range(min(2500, n)),
+        range(max(0, n - 2500), n),
     ]
-    
+
+    chunk = config.semantic_hub_chunk()
     for r in scan_ranges:
-        for i in r:
-            if processed[i]: continue
-            
-            query = t_emb[i:i+1]
-            sims = torch.mm(query, t_emb.T).squeeze(0)
-            
-            matches = torch.where(sims > threshold)[0]
-            if len(matches) > 1:
-                hubs.append({
-                    "master_tid": int(i),
-                    "member_count": int(len(matches)),
-                    "member_tids": matches.cpu().tolist(),
-                    "avg_similarity": float(sims[matches].mean().item())
-                })
-                processed[matches] = True
-            
+        idx = list(r)
+        for start in range(0, len(idx), chunk):
+            block = idx[start:start + chunk]
+            # One [len(block), n] tile instead of len(block) separate [1, n] matmuls.
+            # Rows are consumed in the original order below, so a hub still claims its
+            # members before any later index in the same block is considered.
+            sims_block = t_emb[block] @ t_emb.T
+            for row, i in enumerate(block):
+                if processed[i]:
+                    continue
+                sims = sims_block[row]
+                matches = torch.where(sims > threshold)[0]
+                if len(matches) > 1:
+                    hubs.append({
+                        "master_tid": int(i),
+                        "member_count": int(len(matches)),
+                        "member_tids": matches.cpu().tolist(),
+                        "avg_similarity": float(sims[matches].mean().item()),
+                    })
+                    processed[matches] = True
+            del sims_block
+
     return sorted(hubs, key=lambda x: x["member_count"], reverse=True)
 
 
@@ -118,8 +136,6 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    from orka.deploy.kaggle import _hf_snapshot_with_retry
-    
     model_input = args.model_dir
     model_dir = Path(model_input)
     

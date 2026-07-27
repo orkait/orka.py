@@ -62,7 +62,15 @@ def estimate_payload(
     )
 
 QUANT_SPEC_MAX_PER_STAGE_BITS = 64
+#: Ceiling on the summed PER-STAGE bit widths. For a VQ stage that width is an index cost
+#: per group_size-weight vector; for a scalar ('s') stage it is a cost per WEIGHT. The two
+#: units are not comparable, so scalar stages carry their own ceiling below.
 QUANT_SPEC_MAX_TOTAL_BITS = 64
+#: Ceiling on the summed scalar-stage bits, which ARE bits per weight. Without it the
+#: per-vector ceiling above let a planar spec through at any rate: 'rvq-' + 8 x 's8'
+#: counted as 64 (accepted) while actually costing 8 x 8 = 64 bits per weight, i.e. twice
+#: fp32. Set above the shipped planar candidates (rvq-s8-s8-s8 = 24) so those still parse.
+QUANT_SPEC_MAX_SCALAR_BITS_PER_WEIGHT = 32
 
 # Default mixed precision for MoE and Dense architectures
 RVQ_MIXED_FAMILY_BITS = {
@@ -111,6 +119,7 @@ def parse_quant_spec(spec: str) -> list[int | str]:
     
     stages = []
     total_bits = 0
+    scalar_bits_per_weight = 0
     for p in parts:
         if p.startswith("s"):
             b_str = p[1:]
@@ -118,19 +127,28 @@ def parse_quant_spec(spec: str) -> list[int | str]:
                 raise ValueError(f"invalid scalar bits: {p!r}")
             b = int(b_str)
             stages.append(p) # Store as 's4'
+            scalar_bits_per_weight += b
         else:
             if not p.isdigit():
                 raise ValueError(f"non-integer bits: {p!r}")
             b = int(p)
             stages.append(1 << b)
-        
+
         if b < 1 or b > QUANT_SPEC_MAX_PER_STAGE_BITS:
              raise ValueError(f"bits must be 1..{QUANT_SPEC_MAX_PER_STAGE_BITS}")
         total_bits += b
 
     if total_bits > QUANT_SPEC_MAX_TOTAL_BITS:
         raise ValueError(f"total bits ≤ {QUANT_SPEC_MAX_TOTAL_BITS}")
-    
+    # Scalar stages cost their bits PER WEIGHT, so they need a ceiling in that unit -
+    # the per-vector total above cannot see a planar spec that stores more than fp32.
+    if scalar_bits_per_weight > QUANT_SPEC_MAX_SCALAR_BITS_PER_WEIGHT:
+        raise ValueError(
+            f"scalar stages cost {scalar_bits_per_weight} bits per weight in {spec!r}; "
+            f"the limit is {QUANT_SPEC_MAX_SCALAR_BITS_PER_WEIGHT} "
+            f"(a planar spec above that stores more than the fp32 source)"
+        )
+
     if prefix == "vq-" and len(stages) > 1:
         raise ValueError("vq- is single-stage")
     return stages

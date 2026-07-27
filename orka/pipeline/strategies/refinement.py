@@ -336,6 +336,14 @@ class MSEScaleStrategy(PostAssignmentStrategy):
         return ctx.mse_scale
 
     def apply(self, ctx, c: dict) -> None:
+        # READ-AFTER-WRITE: _refine_scales_ls rebuilds the VQ reconstruction by reading the
+        # final codebook + index streams back from disk (the in-memory indices are freed by
+        # EM-AQ). Those streams are written by the BackgroundWriter, so flush it first or
+        # the read can miss a file that is still queued and the refinement silently
+        # no-ops. This used to be masked by the per-stage device->host copies, which forced
+        # enough of a stall for the writer to keep up; keeping tensors GPU-resident removed
+        # that accidental sync and turned the race into a reproducible skip.
+        _BG_WRITER.wait()
         try:
             c["mse_scale_applied"] = bool(_refine_scales_ls(
                 c, mse_scale=ctx.mse_scale, block_scale_size=ctx.block_scale_size,
