@@ -21,7 +21,14 @@ def build_pipeline(arch: Architecture) -> list[Stage]:
 
 
 def build_tricks(arch: Architecture) -> list[Trick]:
+    """``applies`` is the honest per-architecture answer to "would toggling this change
+    anything for THIS model?", not a constant. It used to be hardcoded True on every
+    trick while the docstring claimed arch-gating, which left the real gate implicit in
+    the frontend. Only ``keep_head_fp16`` is genuinely arch-gated today: the estimator
+    credits the fp16 head only when the model ties word embeddings, so on an untied model
+    the toggle is a no-op."""
     f = arch.flags
+    tied = bool(f.get("tied_head"))
     tricks = [
         Trick(id="bpw", label="Bits per weight", kind="scalar", default=3.0, applies=True,
               why="uniform bpw is the <1.5B sweet spot"),
@@ -34,10 +41,12 @@ def build_tricks(arch: Architecture) -> list[Trick]:
         Trick(id="mse_scale", label="MSE-optimal scales", kind="toggle", default=False, applies=True,
               why="least-squares block scales, free quality"),
         Trick(id="keep_head_fp16", label="Keep head fp16", kind="toggle",
-              default=bool(f.get("tied_head")), applies=True, gated_by="tied_head",
-              why="tied head IS the logit projection; quantizing it explodes ppl"),
+              default=tied, applies=tied, gated_by="tied_head",
+              why="tied head IS the logit projection; quantizing it explodes ppl"
+                  if tied else "untied head: the head quantizes fine, so this is a no-op"),
         Trick(id="error_comp", label="Error compensation (LDLQ)", kind="toggle", default=False,
               applies=True,
+              warn="auto-skipped on this model's recurrent/SSM tensors" if f.get("has_ssm") else None,
               why="block-OBS; auto-skipped on output head + recurrent/SSM tensors"),
         Trick(id="lattice", label="E8 lattice", kind="toggle", default=False, applies=True,
               warn="Pareto-loses to VQ on hybrid archs" if f.get("has_ssm") else None,

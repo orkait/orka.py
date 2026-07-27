@@ -13,6 +13,29 @@ import numpy as np
 
 HF_BASE = "https://huggingface.co"
 
+# Config + shapes depend only on the model, never on the bpw/keep-head/lattice knobs the
+# UI sweeps, yet /analyze refetches them on every knob change - and shapes costs 2 range
+# GETs *per shard*. Memoize per (model, has_token) for the process lifetime; callers get a
+# copy so a mutation cannot poison the entry. Bounded so a long-lived server cannot grow
+# without limit.
+_MEMO_MAX = 32
+_config_memo: dict[tuple[str, bool], dict] = {}
+_shapes_memo: dict[tuple[str, bool], dict] = {}
+
+
+def _memo_get(memo: dict, key, build):
+    if key not in memo:
+        if len(memo) >= _MEMO_MAX:
+            memo.pop(next(iter(memo)))
+        memo[key] = build()
+    return dict(memo[key])
+
+
+def clear_caches() -> None:
+    """Drop the config/shape memos (a redeployed model, or a test that wants a cold path)."""
+    _config_memo.clear()
+    _shapes_memo.clear()
+
 # safetensors dtype -> (numpy decode code, bytes/elem). BF16 has no native numpy dtype:
 # it is the high 16 bits of fp32, so widen u16<<16 then view as f4.
 _DT = {"F64": ("<f8", 8), "F32": ("<f4", 4), "F16": ("<f2", 2), "BF16": ("<u2", 2)}
@@ -23,10 +46,13 @@ def _auth(token: str | None) -> dict:
 
 
 def fetch_config(model: str, token: str | None = None) -> dict:
-    url = f"{HF_BASE}/{model}/resolve/main/config.json"
-    r = httpx.get(url, headers=_auth(token), follow_redirects=True, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    def build():
+        url = f"{HF_BASE}/{model}/resolve/main/config.json"
+        r = httpx.get(url, headers=_auth(token), follow_redirects=True, timeout=30)
+        r.raise_for_status()
+        return r.json()
+
+    return _memo_get(_config_memo, (model, token is not None), build)
 
 
 def _st_header(url: str, token: str | None) -> dict:
@@ -45,18 +71,21 @@ def _st_header(url: str, token: str | None) -> dict:
 
 def fetch_shapes(model: str, token: str | None = None) -> dict:
     """All tensor shapes. Single-file model.safetensors, else the sharded index."""
-    base = f"{HF_BASE}/{model}/resolve/main"
-    try:
-        return _st_header(f"{base}/model.safetensors", token)
-    except httpx.HTTPStatusError:
-        pass
-    idx = httpx.get(f"{base}/model.safetensors.index.json",
-                    headers=_auth(token), follow_redirects=True, timeout=30)
-    idx.raise_for_status()
-    shapes: dict = {}
-    for shard in sorted(set(idx.json()["weight_map"].values())):
-        shapes.update(_st_header(f"{base}/{shard}", token))
-    return shapes
+    def build():
+        base = f"{HF_BASE}/{model}/resolve/main"
+        try:
+            return _st_header(f"{base}/model.safetensors", token)
+        except httpx.HTTPStatusError:
+            pass
+        idx = httpx.get(f"{base}/model.safetensors.index.json",
+                        headers=_auth(token), follow_redirects=True, timeout=30)
+        idx.raise_for_status()
+        shapes: dict = {}
+        for shard in sorted(set(idx.json()["weight_map"].values())):
+            shapes.update(_st_header(f"{base}/{shard}", token))
+        return shapes
+
+    return _memo_get(_shapes_memo, (model, token is not None), build)
 
 
 def _header_with_len(url: str, token: str | None) -> tuple[int, dict]:

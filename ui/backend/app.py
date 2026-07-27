@@ -75,7 +75,10 @@ class PackRequest(BaseModel):
 
 
 @app.post("/pack")
-def pack(req: PackRequest):
+async def pack(req: PackRequest):
+    # async on purpose: a sync endpoint runs in a threadpool, and submitting from off-loop
+    # means signalling the worker across threads. The body never blocks (run_live does its
+    # GPU work in asyncio.to_thread), so there is nothing to move off the loop.
     async def runner(job_id, emit, *, model):
         return await run_live(model, job_id, emit)
     job_id = _queue.submit(runner, model=req.model)
@@ -100,13 +103,19 @@ async def job_stream(job_id: str):
         raise HTTPException(404, "unknown job")
 
     async def gen():
-        while True:
-            ev = await job.events.get()
-            if ev.get("stage") == "_end":
-                final = (job.result.model_dump() if job.status == "done"
-                         else {"error": job.error})
-                yield {"event": "result", "data": json.dumps(final)}
-                break
-            yield {"event": "progress", "data": json.dumps(ev)}
+        # Own queue per client, pre-seeded with the events already emitted, so a second
+        # viewer sees the whole stream and a reconnect after the job settled terminates.
+        events = job.subscribe()
+        try:
+            while True:
+                ev = await events.get()
+                if ev.get("stage") == "_end":
+                    final = (job.result.model_dump() if job.status == "done"
+                             else {"error": job.error})
+                    yield {"event": "result", "data": json.dumps(final)}
+                    break
+                yield {"event": "progress", "data": json.dumps(ev)}
+        finally:
+            job.unsubscribe(events)
 
     return EventSourceResponse(gen())

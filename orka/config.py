@@ -30,6 +30,27 @@ DEFAULT_ASSIGN_CHUNK_MB = 128
 #: (measured: level 1 = 80 MB/s vs level 6 = 19 MB/s on compressible index streams).
 DEFAULT_ZLIB_LEVEL = 6
 
+#: Largest codebook that still gets the scalable k-means++ (k-means||) seeding; above it
+#: the init falls back to a uniform random sample of rows.
+#:
+#: The default deliberately excludes the flagship rvq-12-12 recipe (K=4096 per stage):
+#: k-means||'s final reduction is a k-step sequential loop, so at K=4096 it costs ~1.6s of
+#: init per codebook while the whole random-seeded fit takes ~0.02s, and it buys only
+#: 0.1-2.7% lower MSE (measured on SmolLM2-135M down_proj / q_proj / gate_proj, 8 Lloyd
+#: iterations, 3 seeds). That is ~80x the fit time for a sub-3% quality move, so raise
+#: this only when init time is free relative to the rest of the pack.
+DEFAULT_KMEANS_PP_MAX_K = 2048
+
+#: Rows per chunk when scanning an embedding matrix for semantic hubs. Bounds the
+#: [chunk, vocab] similarity tile; the scan itself stays sequential, so this only
+#: trades memory for matmul batching.
+DEFAULT_SEMANTIC_HUB_CHUNK = 512
+
+#: Token count at or above which the N>1 prefill path decodes the weight to dense and
+#: hands it to cuBLAS instead of running the Triton gather-GEMM. Below it the one-time
+#: decode is not amortized (measured ~2x in favour of dense at 256+ tokens).
+DEFAULT_PREFILL_MIN_TOKENS = 256
+
 #: Values of ORKA_ENABLE_AWQ that turn the legacy AWQ path on. Anything else, "0"
 #: and "false" included, leaves it off.
 _TRUTHY_AWQ = frozenset({"1", "true", "yes", "on"})
@@ -84,6 +105,28 @@ def assign_chunk_mb() -> int:
         return max(0, int(raw))
     except ValueError:
         return DEFAULT_ASSIGN_CHUNK_MB
+
+
+def _int(name: str, default: int, minimum: int = 0) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
+
+
+def kmeans_pp_max_k() -> int:
+    return _int("ORKA_KMEANS_PP_MAX_K", DEFAULT_KMEANS_PP_MAX_K, minimum=1)
+
+
+def semantic_hub_chunk() -> int:
+    return _int("ORKA_SEMANTIC_HUB_CHUNK", DEFAULT_SEMANTIC_HUB_CHUNK, minimum=1)
+
+
+def prefill_min_tokens() -> int:
+    return _int("ORKA_PREFILL_MIN_TOKENS", DEFAULT_PREFILL_MIN_TOKENS, minimum=1)
 
 
 def zlib_level() -> int:

@@ -242,12 +242,17 @@ def forward_n1(layer, x: torch.Tensor):
 
 # N>1 prefill: above this token count, fused decode-to-dense + cuBLAS beats the Triton
 # gather-GEMM (~2x). Below it the one-time decode cost is not amortized; use Triton.
-PREFILL_MIN_TOKENS = 256
+# Env-tunable (ORKA_PREFILL_MIN_TOKENS) like the other measured thresholds, since the
+# crossover moves with the GPU's gather bandwidth vs its cuBLAS throughput.
+def prefill_min_tokens() -> int:
+    from orka import config
+
+    return config.prefill_min_tokens()
 
 
 def supported_prefill(layer, n_tokens: int) -> bool:
     return (
-        n_tokens >= PREFILL_MIN_TOKENS
+        n_tokens >= prefill_min_tokens()
         and getattr(layer, "n_stages", 0) == 2
         and getattr(layer, "group_size", 0) == 8
         and getattr(layer, "block_size", 0) == 32

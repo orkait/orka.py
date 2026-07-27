@@ -27,7 +27,9 @@ def _kmeans_parallel_init_numpy(rows, k: int, seed: int | None = None, oversampl
         else np.random.default_rng()
     )
 
-    if k > 2048:
+    from orka import config
+
+    if k > config.kmeans_pp_max_k():
         idx = rng.choice(n, size=k, replace=False)
         return rows[idx].copy()
 
