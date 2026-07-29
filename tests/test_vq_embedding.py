@@ -108,3 +108,31 @@ def test_cuda_matches_cpu():
         gpu = VQEmbedding.from_artifact(art, meta, device="cuda")
         ids = torch.randint(0, VOCAB, (17,))
         assert np.array_equal(cpu(ids).numpy(), gpu(ids.cuda()).cpu().numpy())
+
+
+def test_repeated_ids_preserve_order_and_stay_bit_exact():
+    """Decoding is deduplicated to unique rows, so the scatter back to positions must
+    preserve ORDER, not merely membership - a wrong inverse map would silently permute
+    every batch that repeats a token, which real text does constantly."""
+    with tempfile.TemporaryDirectory() as tmp:
+        art, meta = _packed(Path(tmp))
+        emb = VQEmbedding.from_artifact(art, meta)
+        ref = np.asarray(_decode_tensor(art, meta), dtype=np.float32).reshape(VOCAB, DIM)
+
+        ids = torch.tensor([5, 5, 3, 5, 0, 3, VOCAB - 1, 0])
+        got = emb(ids).numpy()
+        assert np.array_equal(got, ref[ids.numpy()])
+
+        # unsorted ids must not come back sorted
+        pair = emb(torch.tensor([9, 2])).numpy()
+        assert np.array_equal(pair[0], ref[9])
+        assert np.array_equal(pair[1], ref[2])
+
+
+def test_dedup_holds_across_shapes_including_all_identical():
+    with tempfile.TemporaryDirectory() as tmp:
+        art, meta = _packed(Path(tmp))
+        emb = VQEmbedding.from_artifact(art, meta)
+        ref = np.asarray(_decode_tensor(art, meta), dtype=np.float32).reshape(VOCAB, DIM)
+        for ids in (torch.full((4, 6), 11), torch.randint(0, VOCAB, (3, 5, 2))):
+            assert np.array_equal(emb(ids).numpy(), ref[ids.numpy()])

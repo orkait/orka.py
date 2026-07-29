@@ -138,7 +138,12 @@ class VQEmbedding(nn.Module):
 
     # ------------------------------------------------------------------ forward
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
-        flat = ids.reshape(-1).long()
+        # Decode each DISTINCT row once, then scatter to positions. Real batches repeat
+        # tokens heavily (measured 6.6x on 32 wikitext passages), and decoding is per-row
+        # work: O(positions) -> O(unique rows). Output is unchanged - the same rows are
+        # decoded by the same code path, only fewer times.
+        flat_ids = ids.reshape(-1).long()
+        flat, inverse = torch.unique(flat_ids, return_inverse=True)
         n, gpr, g = flat.numel(), self.groups_per_row, self.group_size
 
         # Row r owns groups [r*gpr, (r+1)*gpr) because the packer flattens row-major.
@@ -163,7 +168,7 @@ class VQEmbedding(nn.Module):
             out = (out.reshape(n, bpr, self.block_size) * sc[:, :, None]).reshape(
                 n, self.embedding_dim)
 
-        return out.to(self.out_dtype).reshape(*ids.shape, self.embedding_dim)
+        return out.to(self.out_dtype)[inverse].reshape(*ids.shape, self.embedding_dim)
 
     # -------------------------------------------------------------- diagnostics
     def resident_bytes(self) -> dict:
