@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from orka._runtime import _resolve_torch_device
+from orka._runtime.limits import _check_ram_cap
 from orka.core._features import ensure_awq_feature_enabled
 from orka.eval.prompts import _read_prompt_file
 
@@ -66,6 +67,26 @@ def _collect_activations_hf(
                 activations.setdefault(_name, []).append(x.detach().cpu())
 
             handles.append(module.register_forward_hook(hook))
+
+    def _trim(name: str) -> None:
+        """Downsample a layer's buffer as soon as it exceeds twice the cap.
+
+        Subsampling only at the end meant peak RAM scaled with PROMPT COUNT, not with
+        max_samples_per_layer: every position of every prompt for every Linear stayed
+        resident until the final cat. On a 230M model that is ~7 GB for 64 prompts and
+        ~59 GB for 512 - enough to drive a 30 GB box into swap death. Trimming inline
+        bounds the buffer at 2 x cap per layer regardless of how many prompts are fed.
+        """
+        xs = activations.get(name)
+        if not xs or len(xs) == 1 and xs[0].shape[0] <= 2 * max_samples_per_layer:
+            return
+        rows = sum(t.shape[0] for t in xs)
+        if rows <= 2 * max_samples_per_layer:
+            return
+        full = torch.cat(xs, dim=0)
+        idx = torch.randperm(full.shape[0])[:max_samples_per_layer]
+        activations[name] = [full[idx]]
+
     with torch.no_grad():
         for prompt in prompts:
             enc = tokenizer(
@@ -77,17 +98,18 @@ def _collect_activations_hf(
                 attn = torch.ones_like(ids)
             attn = attn.to(device)
             model(input_ids=ids, attention_mask=attn)
+            for name in list(activations):
+                _trim(name)
+            _check_ram_cap()
     for h in handles:
         h.remove()
     out: dict[str, torch.Tensor] = {}
     for name, xs in activations.items():
-        full = xs[0] if len(xs) == 1 else __import__("torch").cat(xs, dim=0)
+        full = xs[0] if len(xs) == 1 else torch.cat(xs, dim=0)
         if full.shape[0] > max_samples_per_layer:
-            import torch as _t
-
-            idx = _t.randperm(full.shape[0])[:max_samples_per_layer]
+            idx = torch.randperm(full.shape[0])[:max_samples_per_layer]
             full = full[idx]
-        out[name + ".weight"] = full.to(dtype=__import__("torch").float32)
+        out[name + ".weight"] = full.to(dtype=torch.float32)
     return out
 
 
