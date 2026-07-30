@@ -20,14 +20,37 @@ def _collect_activations_hf(
 ) -> dict:
     try:
         import torch
+        import transformers
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except Exception as exc:
         raise RuntimeError("activation calibration requires torch and transformers") from exc
+    # Resolved rather than imported: callers (and tests) may supply a partial transformers
+    # module, and a missing fallback class should degrade to causal-only, not hard-fail.
+    _AutoModel = getattr(transformers, "AutoModel", None)
     # Callers pass the CLI --device verbatim, which defaults to "auto"; torch only
     # accepts concrete device strings.
     device = str(_resolve_torch_device(device))
     tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), local_files_only=True, trust_remote_code=True)
+    # AutoModelForCausalLM alone cannot load an encoder (masked-LM, embedding, reranker
+    # checkpoints), and the failure is not benign: with the wrong auto class the weights load
+    # as newly-initialized and calibration silently profiles a RANDOM model. Try the causal
+    # class first to preserve existing behaviour, then fall back to the architecture the
+    # config actually declares.
+    model = None
+    errors = []
+    for auto_cls in [c for c in (AutoModelForCausalLM, _AutoModel) if c is not None]:
+        try:
+            model = auto_cls.from_pretrained(
+                str(model_dir), local_files_only=True, trust_remote_code=True
+            )
+            break
+        except Exception as exc:  # noqa: PERF203 - the fallback is the point
+            errors.append(f"{auto_cls.__name__}: {type(exc).__name__}: {exc}")
+    if model is None:
+        raise RuntimeError(
+            "could not load the calibration model with any auto class:\n  "
+            + "\n  ".join(errors)
+        )
     model.to(device)
     model.eval()
     activations: dict[str, list] = {}
