@@ -150,3 +150,93 @@ def test_invalid_inputs_are_rejected():
         waterfill_stages(stats, target_bpw=3.0, spec_grid=[])
     with pytest.raises(ValueError, match="stats is empty"):
         waterfill_stages({}, target_bpw=3.0)
+
+
+from orka.autoquant.roles import classify_role  # noqa: E402
+from orka.quant.curvature import waterfill_with_roles  # noqa: E402
+
+SHAPES = {
+    "model.embed_tokens.weight": (4000, 1000),
+    "model.layers.0.self_attn.q_proj.weight": (1000, 1000),
+    "model.layers.0.mlp.down_proj.weight": (1000, 1000),
+    "model.layers.0.conv.in_proj.weight": (2000, 1000),
+    "model.layers.0.conv.conv.weight": (1000, 1, 3),
+    "lm_head.weight": (4000, 1000),
+    "model.norm.weight": (1024,),
+}
+
+
+def _mixed_stats():
+    return {
+        "model.embed_tokens.weight": {"fisher": 1e-7, "var": 1.0, "numel": 4_000_000},
+        "model.layers.0.self_attn.q_proj.weight": {"fisher": 1e-4, "var": 1.0, "numel": 1_000_000},
+        "model.layers.0.mlp.down_proj.weight": {"fisher": 1e-4, "var": 1.0, "numel": 1_000_000},
+        "model.layers.0.conv.in_proj.weight": {"fisher": 1e-5, "var": 1.0, "numel": 2_000_000},
+        "model.layers.0.conv.conv.weight": {"fisher": 1e-2, "var": 1.0, "numel": 3_000},
+        "lm_head.weight": {"fisher": 1e-3, "var": 1.0, "numel": 4_000_000},
+        "model.norm.weight": {"fisher": 1e-3, "var": 1.0, "numel": 1_024},
+    }
+
+
+def _role(n):
+    return classify_role(n, SHAPES.get(n, (8, 8)))[0]
+
+
+def test_conv_block_projections_are_no_longer_unknown():
+    assert classify_role("lfm2.layers.0.conv.in_proj.weight", (3072, 1024))[0] == "conv.in"
+    assert classify_role("lfm2.layers.0.conv.out_proj.weight", (1024, 1024))[0] == "conv.out"
+    assert classify_role("backbone.layers.3.mixer.in_proj.weight", (4096, 2048))[0] == "conv.in"
+
+
+def test_depthwise_kernels_match_on_shape_not_name():
+    for nm in ("lfm2.layers.0.conv.conv.weight", "backbone.layers.0.mixer.conv1d.weight"):
+        assert classify_role(nm, (1024, 1, 3))[0] == "conv.depthwise"
+
+
+def test_ordinary_roles_are_not_captured_by_the_conv_matcher():
+    assert classify_role("model.layers.0.self_attn.o_proj.weight", (1024, 1024))[0] == "attn.o"
+    assert classify_role("model.layers.0.mlp.down_proj.weight", (1024, 4096))[0] == "mlp.down"
+    assert classify_role("model.embed_tokens.weight", (32000, 1024))[0] == "in-embed"
+    assert classify_role("lm_head.weight", (32000, 1024))[0] == "out-head"
+
+
+def test_rails_keep_head_norm_and_depthwise_out_of_the_budget():
+    stages, dense = waterfill_with_roles(_mixed_stats(), 3.0, _role)
+    assert "lm_head.weight" in dense
+    assert "model.norm.weight" in dense
+    assert "model.layers.0.conv.conv.weight" in dense
+    assert set(stages) == {
+        "model.embed_tokens.weight",
+        "model.layers.0.self_attn.q_proj.weight",
+        "model.layers.0.mlp.down_proj.weight",
+        "model.layers.0.conv.in_proj.weight",
+    }
+
+
+def test_conv_projections_now_get_bits_instead_of_fp16():
+    stages, dense = waterfill_with_roles(_mixed_stats(), 3.0, _role)
+    assert "model.layers.0.conv.in_proj.weight" in stages
+    assert "model.layers.0.conv.in_proj.weight" not in dense
+
+
+def test_sensitive_roles_receive_an_extra_stage():
+    stages, _ = waterfill_with_roles(_mixed_stats(), 2.0, _role)
+    q = spec_bits_per_weight(stages["model.layers.0.self_attn.q_proj.weight"], 8)
+    d = spec_bits_per_weight(stages["model.layers.0.mlp.down_proj.weight"], 8)
+    assert d > q, f"sensitive mlp.down got {d} bpw vs q_proj {q}"
+
+
+def test_extra_stage_is_a_no_op_at_the_grid_ceiling():
+    stages, _ = waterfill_with_roles(_mixed_stats(), 4.5, _role)
+    top = max(spec_bits_per_weight(s, 8) for s in DEFAULT_SPEC_GRID)
+    d = stages["model.layers.0.mlp.down_proj.weight"]
+    assert spec_bits_per_weight(d, 8) <= top
+    assert tuple(d) in {tuple(x) for x in DEFAULT_SPEC_GRID}
+
+
+def test_budget_applies_to_quantizable_tensors_only():
+    stats = _mixed_stats()
+    stages, dense = waterfill_with_roles(stats, 2.5, _role)
+    got = achieved_bpw(stages, {k: stats[k] for k in stages})
+    assert 1.5 <= got <= 5.0
+    assert dense

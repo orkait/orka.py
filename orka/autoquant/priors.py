@@ -20,5 +20,9 @@ ROLE_PRIORS: dict[str, dict] = {
     "mlp.up":    {"method": "rvq",  "allow_rvq": True,  "confidence": 0.7},
     "mlp.gate":  {"method": "rvq",  "allow_rvq": True,  "confidence": 0.7},
     "mlp.down":  {"method": "rvq",  "allow_rvq": True,  "confidence": 0.6, "extra_stage": True},
+    # hybrid conv blocks (LFM2/Mamba/RWKV); depthwise kernel is ~0.01% of size, keep dense
+    "conv.in":   {"method": "rvq",  "allow_rvq": True,  "confidence": 0.7},
+    "conv.out":  {"method": "rvq",  "allow_rvq": True,  "confidence": 0.6, "extra_stage": True},
+    "conv.depthwise": {"method": "fp16", "allow_rvq": False, "confidence": 0.9},
     "unknown":   {"method": "fp16", "allow_rvq": False, "confidence": 0.0},  # safe default
 }

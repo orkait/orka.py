@@ -170,3 +170,47 @@ def achieved_bpw(
         for n, spec in stages_map.items()
         if n in stats
     ) / total_w
+
+
+def waterfill_with_roles(
+    stats: dict[str, dict],
+    target_bpw: float,
+    role_of,
+    *,
+    group_size: int = 8,
+    spec_grid: Iterable[Iterable[int]] = DEFAULT_SPEC_GRID,
+) -> tuple[dict[str, list[int]], dict[str, str]]:
+    """Curvature-driven rates behind autoquant\'s role rails.
+
+    Role priors decide WHETHER a tensor may be quantized (the output head is
+    catastrophic under RVQ, norms stay fp16); water-filling decides HOW MANY bits
+    the rest get. Returns (stages_map, dense_map).
+    """
+    from orka.autoquant.priors import ROLE_PRIORS
+
+    quantizable, dense = {}, {}
+    for name in stats:
+        role = role_of(name)
+        prior = ROLE_PRIORS.get(role, ROLE_PRIORS["unknown"])
+        if prior.get("allow_rvq"):
+            quantizable[name] = stats[name]
+        else:
+            dense[name] = f"{role}: {prior['method']} prior"
+    if not quantizable:
+        return {}, dense
+
+    stages = waterfill_stages(quantizable, target_bpw, group_size=group_size,
+                              spec_grid=spec_grid)
+
+    # sensitive roles get one rung richer; no-op at the grid ceiling
+    grid = sorted((tuple(int(k) for k in s) for s in spec_grid),
+                  key=lambda s: spec_bits_per_weight(s, group_size))
+    for name, spec in list(stages.items()):
+        prior = ROLE_PRIORS.get(role_of(name), {})
+        if not prior.get("extra_stage"):
+            continue
+        cur = spec_bits_per_weight(spec, group_size)
+        richer = [s for s in grid if spec_bits_per_weight(s, group_size) > cur]
+        if richer:
+            stages[name] = list(richer[0])
+    return stages, dense
