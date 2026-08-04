@@ -37,6 +37,15 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable
 
+#: Measured RVQ rate-distortion on LFM2.5-2.6B-Base: SQNR ~= 5.45*bpw - 0.5 dB across
+#: 1.5-4.5 bpw. Matches the ~5.5 dB/bpw slope seen on earlier models. Used only to turn an
+#: SQNR floor into a bits floor; pass explicit values if a model's curve differs.
+RD_SLOPE_DB_PER_BIT = 5.45
+RD_INTERCEPT_DB = -0.5
+
+#: Below this, orka's own priors call the result catastrophic at model scale.
+DEFAULT_MIN_SQNR_DB = 14.0
+
 #: Candidate RVQ specs -> bits per weight at a given group size. Stage k costs log2(K) bits
 #: per group, so bits-per-weight is sum(log2(K)) / group_size.
 DEFAULT_SPEC_GRID: tuple[tuple[int, ...], ...] = (
@@ -111,12 +120,27 @@ def waterfill_stages(
     group_size: int = 8,
     spec_grid: Iterable[Iterable[int]] = DEFAULT_SPEC_GRID,
     iterations: int = 64,
+    min_sqnr_db: float | None = DEFAULT_MIN_SQNR_DB,
+    rd_slope_db_per_bit: float = RD_SLOPE_DB_PER_BIT,
+    rd_intercept_db: float = RD_INTERCEPT_DB,
 ) -> dict[str, list[int]]:
-    """Reverse water-filling: curvature stats -> a ``tensor_stages_map`` at ``target_bpw``.
+    """Reverse water-filling with a distortion ceiling.
 
-    ``target_bpw`` is the parameter-weighted mean bits per weight over the tensors in
-    ``stats``; the achieved mean lands on the nearest reachable combination of grid specs,
-    since bit rates are discrete.
+    Pure water-filling minimises TOTAL distortion, which lets it starve an individual tensor
+    to buy accuracy elsewhere. On LFM2.5-2.6B that put 22M-parameter feed_forward tensors at
+    1.5 bpw / 7.7 dB SQNR while 1M-parameter attention v_projs got 4.5 bpw / 25 dB - 56.6% of
+    parameters ended up below 14 dB and perplexity went 16.3 -> 187.
+
+    The rate rule ``R_t = 0.5*log2(F_t*var_t) + c`` ranks by MEAN curvature per weight and
+    carries no tensor-size term, so a big tensor with moderate curvature loses to a small one
+    with high curvature no matter how much total distortion that costs. The Lagrangian this
+    came from assumes every tensor sits above the water level; tensors pinned to the grid
+    floor violate it.
+
+    ``min_sqnr_db`` restores the missing constraint as a per-tensor distortion ceiling
+    (D_i <= D_max), which is the standard form of reverse water-filling under a maximum
+    distortion bound. The floor is converted to bits through a linear RD model; only the
+    budget above the floor is water-filled.
     """
     if target_bpw <= 0:
         raise ValueError(f"target_bpw must be positive, got {target_bpw}")
@@ -131,7 +155,21 @@ def waterfill_stages(
         raise ValueError("stats is empty")
     total_w = sum(stats[n]["numel"] for n in names)
 
-    # log2 of curvature x variance, floored so an exactly-zero gradient cannot produce -inf
+    floor_bpw = 0.0
+    if min_sqnr_db is not None:
+        floor_bpw = (min_sqnr_db - rd_intercept_db) / rd_slope_db_per_bit
+        reachable = [g for g in grid if g[1] >= floor_bpw]
+        if not reachable:
+            raise ValueError(
+                f"min_sqnr_db={min_sqnr_db} needs {floor_bpw:.2f} bpw but the richest spec "
+                f"in the grid is {grid[-1][1]:.2f} bpw")
+        floor_bpw = reachable[0][1]
+        if floor_bpw > target_bpw:
+            raise ValueError(
+                f"target_bpw={target_bpw} is below the {floor_bpw:.2f} bpw floor implied by "
+                f"min_sqnr_db={min_sqnr_db}. Raise the target or lower the SQNR floor - a "
+                f"budget under the floor cannot be met without starving tensors.")
+
     score = {
         n: 0.5 * math.log2(max(stats[n]["fisher"] * stats[n]["var"], 1e-45))
         for n in names
@@ -139,7 +177,10 @@ def waterfill_stages(
 
     def pick(offset: float, name: str) -> tuple[tuple[int, ...], float]:
         want = score[name] + offset
-        return min(grid, key=lambda kv: abs(kv[1] - want))
+        best = min(grid, key=lambda kv: abs(kv[1] - want))
+        if best[1] < floor_bpw:
+            best = next(g for g in grid if g[1] >= floor_bpw)
+        return best
 
     def mean_bpw(offset: float) -> float:
         return sum(pick(offset, n)[1] * stats[n]["numel"] for n in names) / total_w
@@ -179,6 +220,7 @@ def waterfill_with_roles(
     *,
     group_size: int = 8,
     spec_grid: Iterable[Iterable[int]] = DEFAULT_SPEC_GRID,
+    min_sqnr_db: float | None = DEFAULT_MIN_SQNR_DB,
 ) -> tuple[dict[str, list[int]], dict[str, str]]:
     """Curvature-driven rates behind autoquant\'s role rails.
 
@@ -200,7 +242,7 @@ def waterfill_with_roles(
         return {}, dense
 
     stages = waterfill_stages(quantizable, target_bpw, group_size=group_size,
-                              spec_grid=spec_grid)
+                              spec_grid=spec_grid, min_sqnr_db=min_sqnr_db)
 
     # sensitive roles get one rung richer; no-op at the grid ceiling
     grid = sorted((tuple(int(k) for k in s) for s in spec_grid),

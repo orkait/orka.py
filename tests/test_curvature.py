@@ -101,7 +101,7 @@ def test_achieved_bpw_tracks_the_requested_budget():
     cheapest = min(spec_bits_per_weight(s, 8) for s in DEFAULT_SPEC_GRID)
     dearest = max(spec_bits_per_weight(s, 8) for s in DEFAULT_SPEC_GRID)
     for target in (2.0, 2.5, 3.0, 4.0):
-        smap = waterfill_stages(stats, target_bpw=target)
+        smap = waterfill_stages(stats, target_bpw=target, min_sqnr_db=None)
         got = achieved_bpw(smap, stats)
         assert cheapest <= got <= dearest
         assert abs(got - target) <= 0.75, f"target {target} -> {got}"
@@ -110,8 +110,8 @@ def test_achieved_bpw_tracks_the_requested_budget():
 def test_a_lower_budget_never_increases_any_tensor_rate():
     stats = {f"t{i}.weight": {"fisher": 10.0 ** (-i), "var": 1.0, "numel": 1000}
              for i in range(8)}
-    hi = waterfill_stages(stats, target_bpw=4.0)
-    lo = waterfill_stages(stats, target_bpw=2.0)
+    hi = waterfill_stages(stats, target_bpw=4.0, min_sqnr_db=None)
+    lo = waterfill_stages(stats, target_bpw=2.0, min_sqnr_db=None)
     for k in stats:
         assert spec_bits_per_weight(lo[k], 8) <= spec_bits_per_weight(hi[k], 8)
 
@@ -119,7 +119,7 @@ def test_a_lower_budget_never_increases_any_tensor_rate():
 def test_allocation_is_monotonic_in_curvature():
     stats = {f"t{i}.weight": {"fisher": 10.0 ** (-i), "var": 1.0, "numel": 1000}
              for i in range(8)}
-    smap = waterfill_stages(stats, target_bpw=2.5)
+    smap = waterfill_stages(stats, target_bpw=2.5, min_sqnr_db=None)
     bits = [spec_bits_per_weight(smap[f"t{i}.weight"], 8) for i in range(8)]
     assert bits == sorted(bits, reverse=True), bits
 
@@ -128,7 +128,7 @@ def test_zero_gradient_tensor_does_not_produce_a_nan_or_crash():
     """A frozen or dead tensor has fisher == 0; log2(0) would be -inf without the floor."""
     stats = {"dead.weight": {"fisher": 0.0, "var": 0.0, "numel": 100},
              "live.weight": {"fisher": 1e-3, "var": 1.0, "numel": 100}}
-    smap = waterfill_stages(stats, target_bpw=3.0)
+    smap = waterfill_stages(stats, target_bpw=3.0, min_sqnr_db=None)
     assert all(math.isfinite(spec_bits_per_weight(v, 8)) for v in smap.values())
     assert spec_bits_per_weight(smap["dead.weight"], 8) <= \
         spec_bits_per_weight(smap["live.weight"], 8)
@@ -136,8 +136,10 @@ def test_zero_gradient_tensor_does_not_produce_a_nan_or_crash():
 
 def test_group_size_changes_the_bit_accounting():
     stats = {"t.weight": {"fisher": 1e-3, "var": 1.0, "numel": 1000}}
-    a = achieved_bpw(waterfill_stages(stats, 3.0, group_size=8), stats, group_size=8)
-    b = achieved_bpw(waterfill_stages(stats, 3.0, group_size=16), stats, group_size=16)
+    a = achieved_bpw(waterfill_stages(stats, 3.0, group_size=8, min_sqnr_db=None),
+                     stats, group_size=8)
+    b = achieved_bpw(waterfill_stages(stats, 3.0, group_size=16, min_sqnr_db=None),
+                     stats, group_size=16)
     assert a == pytest.approx(3.0, abs=0.75)
     assert b == pytest.approx(3.0, abs=0.75)
 
@@ -145,11 +147,11 @@ def test_group_size_changes_the_bit_accounting():
 def test_invalid_inputs_are_rejected():
     stats = {"t.weight": {"fisher": 1e-3, "var": 1.0, "numel": 10}}
     with pytest.raises(ValueError, match="target_bpw"):
-        waterfill_stages(stats, target_bpw=0.0)
+        waterfill_stages(stats, target_bpw=0.0, min_sqnr_db=None)
     with pytest.raises(ValueError, match="spec_grid is empty"):
-        waterfill_stages(stats, target_bpw=3.0, spec_grid=[])
+        waterfill_stages(stats, target_bpw=3.0, spec_grid=[], min_sqnr_db=None)
     with pytest.raises(ValueError, match="stats is empty"):
-        waterfill_stages({}, target_bpw=3.0)
+        waterfill_stages({}, target_bpw=3.0, min_sqnr_db=None)
 
 
 from orka.autoquant.roles import classify_role  # noqa: E402
@@ -220,7 +222,7 @@ def test_conv_projections_now_get_bits_instead_of_fp16():
 
 
 def test_sensitive_roles_receive_an_extra_stage():
-    stages, _ = waterfill_with_roles(_mixed_stats(), 2.0, _role)
+    stages, _ = waterfill_with_roles(_mixed_stats(), 2.0, _role, min_sqnr_db=None)
     q = spec_bits_per_weight(stages["model.layers.0.self_attn.q_proj.weight"], 8)
     d = spec_bits_per_weight(stages["model.layers.0.mlp.down_proj.weight"], 8)
     assert d > q, f"sensitive mlp.down got {d} bpw vs q_proj {q}"
@@ -236,7 +238,58 @@ def test_extra_stage_is_a_no_op_at_the_grid_ceiling():
 
 def test_budget_applies_to_quantizable_tensors_only():
     stats = _mixed_stats()
-    stages, dense = waterfill_with_roles(stats, 2.5, _role)
+    stages, dense = waterfill_with_roles(stats, 2.5, _role, min_sqnr_db=None)
     got = achieved_bpw(stages, {k: stats[k] for k in stages})
     assert 1.5 <= got <= 5.0
     assert dense
+
+
+def test_floor_prevents_starving_a_large_tensor():
+    """Reproduces the LFM2.5-2.6B shape: a minority of very large, low-curvature tensors
+    alongside many higher-curvature ones. Water-filling starved the large ones to the grid
+    floor (1.5 bpw / 7.7 dB) because the rate rule carries no tensor-size term."""
+    stats = {}
+    for i in range(10):                       # the FFN band that got starved
+        stats[f"ffn{i}.weight"] = {"fisher": 1e-9, "var": 1.0, "numel": 22_000_000}
+    for i in range(20):                       # everything else, higher curvature
+        stats[f"other{i}.weight"] = {"fisher": 1e-4, "var": 1.0, "numel": 60_000_000}
+
+    unfloored = waterfill_stages(stats, 3.0, min_sqnr_db=None)
+    starved = [k for k, v in unfloored.items() if spec_bits_per_weight(v, 8) < 3.0]
+    assert starved, "expected water-filling to starve the low-curvature band"
+    assert any(k.startswith("ffn") for k in starved)
+
+    floored = waterfill_stages(stats, 3.5, min_sqnr_db=14.0)
+    assert all(spec_bits_per_weight(v, 8) >= 3.0 for v in floored.values())
+
+
+def test_floor_is_applied_to_every_tensor():
+    stats = {f"t{i}.weight": {"fisher": 10.0 ** (-i - 4), "var": 1.0, "numel": 1_000_000}
+             for i in range(8)}
+    smap = waterfill_stages(stats, 3.0, min_sqnr_db=14.0)
+    assert all(spec_bits_per_weight(v, 8) >= 3.0 for v in smap.values())
+
+
+def test_target_below_the_floor_is_refused_not_silently_starved():
+    stats = {"a.weight": {"fisher": 1e-5, "var": 1.0, "numel": 1_000_000}}
+    with pytest.raises(ValueError, match="below the .* floor"):
+        waterfill_stages(stats, 2.0, min_sqnr_db=14.0)
+
+
+def test_floor_can_be_disabled():
+    stats = {"a.weight": {"fisher": 1e-9, "var": 1.0, "numel": 9_000_000},
+             "b.weight": {"fisher": 1e-2, "var": 1.0, "numel": 1_000_000}}
+    smap = waterfill_stages(stats, 2.0, min_sqnr_db=None)
+    assert min(spec_bits_per_weight(v, 8) for v in smap.values()) < 2.5
+
+
+def test_unreachable_sqnr_floor_reports_the_grid_ceiling():
+    stats = {"a.weight": {"fisher": 1e-5, "var": 1.0, "numel": 1_000}}
+    with pytest.raises(ValueError, match="richest spec"):
+        waterfill_stages(stats, 4.5, min_sqnr_db=60.0)
+
+
+def test_roles_wrapper_applies_the_floor():
+    stats = _mixed_stats()
+    stages, _ = waterfill_with_roles(stats, 3.0, _role, min_sqnr_db=14.0)
+    assert all(spec_bits_per_weight(v, 8) >= 3.0 for v in stages.values())
