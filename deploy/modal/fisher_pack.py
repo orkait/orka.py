@@ -11,6 +11,7 @@ image/app/volumes are declared here rather than pulled from orka_modal.
 """
 
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -36,7 +37,7 @@ ENV = {"HF_HOME": "/hf", "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
 def fisher_pack(repo: str, target_bpw: float = 2.6, n_calib: int = 48,
                 max_len: int = 256, use_roles: bool = True, tag: str = "",
                 error_compensation: bool = False, use_awq: bool = True,
-                min_sqnr_db: float = 14.0):
+                min_sqnr_db: float = 14.0, block_scale_size: int = 32):
     import torch
     from huggingface_hub import snapshot_download
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -137,20 +138,55 @@ def fisher_pack(repo: str, target_bpw: float = 2.6, n_calib: int = 48,
     suffix = f"-{tag}" if tag else ""
     out = Path("/data/artifacts") / f"{repo.split('/')[-1]}-fisher{target_bpw}{suffix}.orka"
     out.parent.mkdir(parents=True, exist_ok=True)
+    # a killed run leaves truncated sidecars behind; packing over them keeps the stale bytes
+    shutil.rmtree(out, ignore_errors=True)
     pack_checkpoint(source=src, out_dir=out, group_size=8, normalization="block-max",
                     backend="torch", device="cuda", em_aq_passes=3,
                     tensor_stages_map=stages,
                     only_tensors=list(stages), only_tensors_passthrough=True,
                     awq_activations=acts or None, awq_alpha=0.5,
                     error_compensation=error_compensation,
-                    codebook_dtype="int8", block_scale_size=64)
+                    codebook_dtype="int8", block_scale_size=block_scale_size)
+    from orka.artifact.verify import format_problems, verify_artifact
+    check = verify_artifact(out)
+    print(format_problems(check), flush=True)
+    if not check["ok"]:
+        data_vol.commit()
+        raise SystemExit(f"pack produced {len(check['problems'])} unreadable sidecars")
+
     size = sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
     orig = sum(p.stat().st_size for p in src.glob("*.safetensors"))
     res = {"repo": repo, "tag": tag or "data-free", "artifact": str(out), "bytes": size, "orig_bytes": orig,
            "ratio_vs_bf16": orig / size, "achieved_bpw": bpw,
            "quantized": len(stages), "dense": len(dense), "awq_tensors": len(acts), "error_compensation": error_compensation,
-           "min_sqnr_db": min_sqnr_db,
+           "min_sqnr_db": min_sqnr_db, "block_scale_size": block_scale_size,
            "fisher_peak_gb": peak, "seconds": time.perf_counter() - t0}
+    print("\nRESULT " + json.dumps(res), flush=True)
+    data_vol.commit()
+    return res
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=3600, env=ENV)
+def to_container(artifact: str):
+    """Fold a packed artifact on the volume into one file for single-stream download."""
+    from orka.artifact.container import container_info, pack_container
+
+    src = Path(artifact)
+    if not src.is_absolute():
+        src = Path("/data/artifacts") / artifact
+    manifest = src / "manifest.json"
+    if not manifest.exists():
+        raise SystemExit(f"{src} has no manifest.json - the pack did not finish")
+
+    from orka.artifact.verify import format_problems, verify_artifact
+    check = verify_artifact(src)
+    print(format_problems(check), flush=True)
+    if not check["ok"]:
+        raise SystemExit("refusing to fold an artifact the decoder cannot read")
+
+    out = src.with_suffix(".container")
+    res = pack_container(src, out)
+    res["complete"] = container_info(out)["complete"]
     print("\nRESULT " + json.dumps(res), flush=True)
     data_vol.commit()
     return res

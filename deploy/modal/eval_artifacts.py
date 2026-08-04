@@ -77,11 +77,27 @@ def evaluate(repo: str, artifacts: str = "", n_calib: int = 48, n_eval: int = 96
         if not art.exists():
             print(f"  MISSING {art}", flush=True)
             continue
-        out = Path(f"/data/eval-{nm}.json")
-        subprocess.run([sys.executable, "-m", "orka", "eval", str(art),
-                        "--prompts", str(prompts), "--out", str(out),
-                        "--model-dir", str(src), "--device", "cuda",
-                        "--max-length", str(max_len)], cwd="/root", check=False)
+        # Reconstruct ONCE per artifact into the volume and reuse. orka eval otherwise
+        # rebuilds a 5.4 GB dense checkpoint into a container tmpdir that dies with the
+        # container - 7 rebuilds this session, 40-70 min of pure I/O, all avoidable.
+        rec = Path("/data/reconstructed") / nm
+        cmd = [sys.executable, "-m", "orka", "eval", str(art),
+               "--prompts", str(prompts), "--out", str(out := Path(f"/data/eval-{nm}.json")),
+               "--model-dir", str(src), "--device", "cuda", "--max-length", str(max_len)]
+        if (rec / "model.safetensors").exists():
+            print(f"  reusing cached reconstruction {rec}", flush=True)
+            cmd += ["--reconstructed-model-dir", str(rec)]
+        else:
+            rec.mkdir(parents=True, exist_ok=True)
+            subprocess.run([sys.executable, "-m", "orka", "reconstruct", str(art),
+                            "--out", str(rec / "model.safetensors"),
+                            "--format", "safetensors"], cwd="/root", check=True)
+            for f in src.iterdir():
+                if f.is_file() and not f.name.endswith((".safetensors", ".bin")):
+                    (rec / f.name).write_bytes(f.read_bytes())
+            data_vol.commit()
+            cmd += ["--reconstructed-model-dir", str(rec)]
+        subprocess.run(cmd, cwd="/root", check=False)
         q = json.loads(out.read_text()) if out.exists() else {}
         size = sum(p.stat().st_size for p in art.rglob("*") if p.is_file())
         rows.append({"name": nm, "bytes": size, "eval": q})
