@@ -36,3 +36,9 @@ kaggle.json
 credentials.json
 *.pem
 .env.*
+
+# cross-session handoff scratch (local only)
+docs/orka-handoff.md
+
+# build artifacts
+ui/frontend/tsconfig.tsbuildinfo
