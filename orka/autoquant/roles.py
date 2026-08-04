@@ -9,6 +9,20 @@ _OUT_HEAD = ("lm_head", "embed_out", "output.weight")
 _IN_EMBED = ("embed_in", "wte", "embed_tokens", "word_embeddings", "embedding")
 
 
+def _conv_role(n: str, shape: tuple[int, ...]) -> tuple[str, float] | None:
+    if len(shape) == 3 and shape[1] == 1:
+        return "conv.depthwise", 0.9
+    if len(shape) != 2:
+        return None
+    if not any(m in n for m in ("conv", "mixer", "ssm", "short_conv")):
+        return None
+    if "in_proj" in n or "up_proj" in n or "x_proj" in n:
+        return "conv.in", 0.85
+    if "out_proj" in n or "down_proj" in n:
+        return "conv.out", 0.85
+    return "conv.in", 0.5
+
+
 def classify_role(name: str, shape: tuple[int, ...], tied: bool = False) -> tuple[str, float]:
     n = name.lower()
     if n.endswith(".bias") or n.endswith("_bias"):
@@ -17,6 +31,11 @@ def classify_role(name: str, shape: tuple[int, ...], tied: bool = False) -> tupl
         return "norm", 1.0
 
     fam = classify_tensor_family(name)
+    # before the attention branch: LFM2's conv.out_proj would match attn.o
+    if fam in ("other", "attention"):
+        conv = _conv_role(n, shape)
+        if conv is not None:
+            return conv
     if fam == "embedding":
         if any(m in n for m in _OUT_HEAD):
             return "out-head", 1.0

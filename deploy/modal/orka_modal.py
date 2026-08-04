@@ -22,7 +22,6 @@ Override with `--gpu A100` on the function call where exposed.
 """
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -369,6 +368,7 @@ def qat(
     import json as _json
     import math
     import sys as _sys
+
     import torch
     from huggingface_hub import login, snapshot_download
 
@@ -413,9 +413,9 @@ def qat(
         alloc = _json.loads(alloc_path.read_text())
         print(f"  alloc reused from volume: {alloc['achieved_bpw']:.3f} bpw", flush=True)
 
-    from orka.quant.allocate import allocation_tensor_stages
-    from orka.pipeline.pack import pack_checkpoint
     from orka.artifact.export import export_vllm
+    from orka.pipeline.pack import pack_checkpoint
+    from orka.quant.allocate import allocation_tensor_stages
     ptq_art = run / "ptq.orka"
     ptq_hf = run / "ptq-hf"
     if not ptq_art.exists():
@@ -480,7 +480,6 @@ def qat(
     data_vol.commit()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    import torch.nn.functional as F
 
     def wikitext_ppl(d):
         tok = AutoTokenizer.from_pretrained(d, local_files_only=True)
@@ -545,9 +544,10 @@ def smoke(artifact: str, model_repo: str, prompts: str = "") -> dict:
     volume (64GB RAM - local boxes can't hold the 9B-class state dict), load fully in
     A10G VRAM, greedy-generate on a few prompts. The output tokens are computed from
     the QUANTIZED weights - coherent text = the artifact works end to end."""
+    from pathlib import Path as P
+
     import torch
     from huggingface_hub import snapshot_download
-    from pathlib import Path as P
 
     art = P(artifact)
     dense = art.parent / (art.stem + "-dense-hf")
@@ -606,6 +606,7 @@ def vq_export(artifact: str, model_repo: str) -> dict:
     the export holds dense-decoded giants + the packed state dict simultaneously)."""
     import shutil
     from pathlib import Path as P
+
     from huggingface_hub import snapshot_download
 
     from orka.integrations.hf_quantizer import export_orka_hf_repo
