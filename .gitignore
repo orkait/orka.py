@@ -42,3 +42,7 @@ docs/orka-handoff.md
 
 # build artifacts
 ui/frontend/tsconfig.tsbuildinfo
+
+# local serving helpers for other models/forks (bonsai.llama, zerocostllm), not orka
+scripts/local_stack.sh
+scripts/serve_local_model.sh
