@@ -24,8 +24,8 @@ stage, and not token_embd/output (those are consumed by get_rows, not mat-mul).
 
 Requires a llama.cpp checkout for its `conversion/` package, located via LLAMA_CPP_DIR
 (ORKA_LLAMA_DIR is still accepted). Upstream llama.cpp is sufficient - the fork is needed to
-SERVE the result, not to produce it. An installed `gguf` is preferred over the checkout's
-gguf-py.
+SERVE the result, not to produce it. The checkout's gguf-py takes precedence over an installed
+gguf: conversion/ references enum members that a PyPI release may not carry yet.
 
 Usage:
     LLAMA_CPP_DIR=~/llama.cpp \
@@ -71,10 +71,10 @@ if not (_FORK / "conversion").is_dir():
         f"  set LLAMA_CPP_DIR to a llama.cpp (or orka.llama) checkout containing conversion/\n"
         f"  e.g. LLAMA_CPP_DIR=~/llama.cpp {Path(__file__).name} ..."
     )
-# Prefer an installed gguf; fall back to the checkout's gguf-py only if it is absent.
-try:
-    import gguf  # noqa: F401
-except ImportError:
+# The checkout's conversion/ and its gguf-py are version-locked: conversion code references
+# gguf enum members that a PyPI release may not have yet (e.g. MODEL_ARCH.GEMMA4_ASSISTANT).
+# So the checkout's gguf-py wins when present; an installed gguf is only the fallback.
+if (_FORK / "gguf-py").is_dir():
     sys.path.insert(0, str(_FORK / "gguf-py"))
 sys.path.insert(0, str(_FORK))
 
@@ -98,6 +98,12 @@ def parse_args():
     p.add_argument("--set-hparam", action="append", default=[],
                    help="override an hparams key, e.g. mtp_num_hidden_layers=0")
     p.add_argument("--min-rvq-params", type=int, default=4_000_000)
+    p.add_argument("--token-embedding-type", default="f16",
+                   choices=["f16", "q8_0", "bf16"],
+                   help="dtype for token_embd/output. RVQ is catastrophic on the vocab "
+                        "tensor so it is kept dense, but dense need not mean 16-bit: on "
+                        "LFM2.5-2.6B the embedding is 524 MB at f16 and 279 MB at q8_0, "
+                        "30%% of the artifact. llama.cpp uses Q6_K here by default.")
     p.add_argument("--no-corrections", action="store_true",
                    help="drop salient/outlier CSR corrections (smaller + faster decode, "
                         "lower quality) - for isolating the per-token correction cost")
@@ -264,6 +270,17 @@ def main():
                 self.gguf_writer.add_tensor(f"{lc}.corr_col", col)
                 self.gguf_writer.add_tensor(f"{lc}.corr_val", val)
                 stats["nnz"] += int(col.size)
+
+        def tensor_force_quant(self, name, new_name, bid, n_dims):
+            # The vocab tensor is excluded from RVQ below because RVQ on it is
+            # catastrophic, but "not RVQ" does not have to mean 16-bit. llama.cpp stores
+            # it at Q6_K by default and unsloth's Q2_K_L preset pins it to q8_0; orka was
+            # paying f16 for 30% of the artifact.
+            if args.token_embedding_type != "f16" and new_name in (
+                "token_embd.weight", "output.weight"
+            ):
+                return getattr(gguf.GGMLQuantizationType, args.token_embedding_type.upper())
+            return super().tensor_force_quant(name, new_name, bid, n_dims)
 
         def modify_tensors(self, data_torch, name, bid):
             out = list(super().modify_tensors(data_torch, name, bid))
