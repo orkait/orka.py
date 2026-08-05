@@ -22,10 +22,20 @@ transformed decoded weight, which is always correct.
 Eligibility: 2D, >= --min-rvq-params, every stage a group-`orka.group_size` vector
 stage, and not token_embd/output (those are consumed by get_rows, not mat-mul).
 
+Requires a llama.cpp checkout for its `conversion/` package, located via LLAMA_CPP_DIR
+(ORKA_LLAMA_DIR is still accepted). Upstream llama.cpp is sufficient - the fork is needed to
+SERVE the result, not to produce it. An installed `gguf` is preferred over the checkout's
+gguf-py.
+
 Usage:
+    LLAMA_CPP_DIR=~/llama.cpp \
     python scripts/export_gguf_orka.py <artifact.orka> <hf_model_dir> <out.gguf>
         [--outtype q8_0|f16] [--skip-tensors REGEX] [--set-hparam key=value ...]
         [--min-rvq-params N]
+
+--min-rvq-params defaults to 4,000,000: the codebook tax (stages x K x group_size x dtype
+bytes) is charged per tensor regardless of its size, so RVQ does not pay on small tensors.
+Lower it to exercise the path on small models.
 
 Ornith-9B text-only example:
     python scripts/export_gguf_orka.py ornith.orka ornith-9b out.gguf \
@@ -45,11 +55,27 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-_FORK = Path(os.environ.get(
-    "ORKA_LLAMA_DIR",
-    Path(__file__).resolve().parent.parent.parent / "orka.llama",
-))
-sys.path.insert(0, str(_FORK / "gguf-py"))
+
+# This script is a bridge: it decodes an .orka artifact (orka.py internals, imported below)
+# and writes it through llama.cpp's own conversion classes. The llama.cpp side is a plain
+# upstream dependency - `conversion/` is upstream, and orka.llama's only change to it is a
+# tokenizer checksum that is itself upstream now. Any recent checkout works; the fork is not
+# required to EXPORT, only to SERVE the result.
+_LLAMA_ENV = ("LLAMA_CPP_DIR", "ORKA_LLAMA_DIR")
+_llama_dir = next((os.environ[k] for k in _LLAMA_ENV if os.environ.get(k)), None)
+_FORK = Path(_llama_dir) if _llama_dir else \
+    Path(__file__).resolve().parent.parent.parent / "orka.llama"
+if not (_FORK / "conversion").is_dir():
+    raise SystemExit(
+        f"llama.cpp checkout not found at {_FORK}\n"
+        f"  set LLAMA_CPP_DIR to a llama.cpp (or orka.llama) checkout containing conversion/\n"
+        f"  e.g. LLAMA_CPP_DIR=~/llama.cpp {Path(__file__).name} ..."
+    )
+# Prefer an installed gguf; fall back to the checkout's gguf-py only if it is absent.
+try:
+    import gguf  # noqa: F401
+except ImportError:
+    sys.path.insert(0, str(_FORK / "gguf-py"))
 sys.path.insert(0, str(_FORK))
 
 import gguf  # noqa: E402
