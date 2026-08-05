@@ -46,15 +46,21 @@ def pack_container(artifact_dir: Path, out_file: Path, *, chunk_bytes: int = _CH
         entries[rel] = {"dtype": "U8", "shape": [size], "data_offsets": [offset, offset + size]}
         offset += size
 
+    # `modal volume get` has been observed returning a byte-identical length with different
+    # content, so the payload digest travels inside the container. It is written as a
+    # fixed-width placeholder and backfilled after the payload, keeping this a single pass.
+    placeholder = "0" * 64
     header = dict(entries)
     header["__metadata__"] = {
         "orka_container": CONTAINER_VERSION,
         "artifact_name": artifact_dir.name,
         "file_count": str(len(entries) + len(empty)),
         "empty_files": json.dumps(empty),
+        "sha256": placeholder,
     }
     blob = json.dumps(header, separators=(",", ":")).encode("utf-8")
     blob += b" " * ((-len(blob)) % _HEADER_ALIGN)
+    digest_at = 8 + blob.index(placeholder.encode())
 
     digest = hashlib.sha256()
     out_file.parent.mkdir(parents=True, exist_ok=True)
@@ -67,6 +73,8 @@ def pack_container(artifact_dir: Path, out_file: Path, *, chunk_bytes: int = _CH
                 while chunk := src.read(chunk_bytes):
                     out.write(chunk)
                     digest.update(chunk)
+        out.seek(digest_at)
+        out.write(digest.hexdigest().encode())
     tmp.rename(out_file)
 
     return {
@@ -122,5 +130,26 @@ def container_info(container: Path) -> dict:
         "files": int(meta.get("file_count", len(header))),
         "payload_bytes": payload,
         "complete": actual >= payload,
+        "sha256": meta.get("sha256"),
         "names": sorted(header),
     }
+
+
+def verify_container(container: Path, *, chunk_bytes: int = _CHUNK) -> dict:
+    """Recompute the payload digest and compare it to the one the writer recorded.
+
+    Length alone does not prove a transfer: a corrupted download has been seen arriving at
+    exactly the right size.
+    """
+    container = Path(container)
+    _, meta, base = _header_of(container)
+    expected = meta.get("sha256")
+    digest = hashlib.sha256()
+    with open(container, "rb") as f:
+        f.seek(base)
+        while chunk := f.read(chunk_bytes):
+            digest.update(chunk)
+    actual = digest.hexdigest()
+    return {"ok": expected is not None and actual == expected,
+            "expected": expected, "actual": actual,
+            "has_digest": expected is not None}

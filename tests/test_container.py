@@ -96,3 +96,31 @@ def test_no_partial_file_left_on_success(tmp_path):
     path = tmp_path / "a.container"
     pack_container(src, path)
     assert not list(tmp_path.glob("*.partial"))
+
+
+def test_payload_digest_round_trips(tmp_path):
+    from orka.artifact.container import verify_container
+    src = tmp_path / "a.orka"
+    _artifact(src)
+    path = tmp_path / "a.container"
+    info = pack_container(src, path)
+    assert container_info(path)["sha256"] == info["sha256"]
+    assert verify_container(path)["ok"]
+
+
+def test_flipped_payload_byte_is_caught(tmp_path):
+    """A corrupted `modal volume get` arrived at exactly the right length; only the digest
+    distinguished it."""
+    from orka.artifact.container import verify_container
+    src = tmp_path / "a.orka"
+    _artifact(src)
+    path = tmp_path / "a.container"
+    pack_container(src, path)
+
+    data = bytearray(path.read_bytes())
+    data[-1] ^= 0xFF
+    path.write_bytes(bytes(data))
+
+    assert container_info(path)["complete"] is True   # length still looks right
+    r = verify_container(path)
+    assert not r["ok"] and r["expected"] != r["actual"]
