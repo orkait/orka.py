@@ -50,6 +50,16 @@ def _add_calc_parser(sub):
     aq.add_argument("--target", default=None, help="KL/bpw/MB target for min-bits/max-quality")
     aq.add_argument("--prompts", default=None, help="pulse-check prompts file")
     aq.add_argument("--no-llm", action="store_true", help="pure deterministic policy (no LLM)")
+    aq.add_argument("--autonomous", action="store_true",
+                    help="Gratis-only reasoning loop; pack, verify, and report")
+    aq.add_argument("--gratis-base-url", default=None,
+                    help="Gratis OpenAI-compatible base URL (or ORKA_GRATIS_BASE_URL)")
+    aq.add_argument("--gratis-model", default="gratis-auto",
+                    help="Gratis model alias (OpenRouter via Gratis)")
+    aq.add_argument("--max-usd", type=float, default=None,
+                    help="hard LLM spend ceiling; required with --autonomous")
+    aq.add_argument("--max-steps", type=int, default=16)
+    aq.add_argument("--timeout-seconds", type=int, default=1800)
     aq.set_defaults(func=cmd_autoquant)
 
 

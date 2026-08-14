@@ -391,6 +391,51 @@ def cmd_reconstruct(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_autoquant_autonomous(args: argparse.Namespace) -> int:
+    import os
+    from pathlib import Path
+
+    from orka.autoquant.gratis import GratisClient
+    from orka.autoquant.harness_schema import RunConfig
+    from orka.autoquant.runner import run_autoquant
+
+    if getattr(args, "no_llm", False):
+        print("autonomous mode requires Gratis; --no-llm is not allowed")
+        return 1
+    base = getattr(args, "gratis_base_url", None) or os.environ.get("ORKA_GRATIS_BASE_URL")
+    max_usd = getattr(args, "max_usd", None)
+    if not base or max_usd is None:
+        print("autonomous mode requires --gratis-base-url (or ORKA_GRATIS_BASE_URL) and --max-usd")
+        return 1
+    out = Path(args.out)
+    if out.suffix == ".orka":
+        artifact, output_dir = out, out.parent
+    elif out.suffix:
+        artifact, output_dir = out.with_suffix(".orka"), out.parent
+    else:
+        output_dir, artifact = out, out / "out.orka"
+    target = args.target
+    config = RunConfig(
+        gratis_base_url=base,
+        model=getattr(args, "gratis_model", None) or "gratis-auto",
+        max_usd=float(max_usd),
+        max_steps=int(getattr(args, "max_steps", 16) or 16),
+        timeout_seconds=int(getattr(args, "timeout_seconds", 1800) or 1800),
+        objective=args.objective,
+        target=float(target) if target is not None else 0.02,
+        output_dir=output_dir,
+        artifact_path=artifact,
+        prompts=Path(args.prompts) if getattr(args, "prompts", None) else None,
+        source=Path(args.model),
+    )
+    client = GratisClient(config.gratis_base_url, config.model, config.max_usd)
+    state = run_autoquant(config, client, Path(args.model))
+    print(f"autoquant autonomous: {state.status.value}"
+          + (f" ({state.failure_reason})" if state.failure_reason else ""))
+    print(f"report {output_dir / 'autoquant-report.json'}")
+    return 0 if state.status.value == "succeeded" else 1
+
+
 def cmd_autoquant(args: argparse.Namespace) -> int:
     import json as _json
     from pathlib import Path
@@ -400,6 +445,9 @@ def cmd_autoquant(args: argparse.Namespace) -> int:
 
     from orka.autoquant.orchestrator import derive_config
     from orka.autoquant.schema import to_allocation_map
+
+    if getattr(args, "autonomous", False):
+        return _cmd_autoquant_autonomous(args)
 
     model = Path(args.model)
     sfs = sorted(model.glob("*.safetensors"))

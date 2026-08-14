@@ -26,3 +26,15 @@ def test_unknown_low_confidence():
     role, conf = classify_role("mystery.tensor.foo", (123, 456))
     assert role == "unknown"
     assert conf < 0.5
+
+
+def test_structural_vocab_width_unknown_name_is_out_head():
+    from orka.quant.arch import ArchProfile
+
+    shapes = {
+        "mystery.weight": (50304, 768),
+        "model.layers.0.self_attn.q_proj.weight": (768, 768),
+    }
+    profile = ArchProfile.from_shapes(shapes, vocab_size=50304)
+    assert classify_role("mystery.weight", (50304, 768), profile=profile)[0] == "out-head"
+    assert classify_role("embed_tokens.weight", (50304, 768), profile=profile)[0] == "in-embed"
