@@ -163,6 +163,7 @@ The `orka` CLI (`orka.cli`) owns the research compiler prototype:
 - `verify`: decode a packed `.orka` artifact against its source checkpoint and recompute MSE from stored indices and codebooks.
 - `reconstruct`: decode a packed `.orka` artifact to JSON or safetensors tensors for inspection and downstream experiments.
 - `allocate`: measure per-tensor rate-distortion and solve a bit allocation for a target bpw budget.
+- `autoquant`: derive a per-tensor config. `--no-llm` writes a deterministic allocation JSON. `--autonomous` runs a Gratis-only reasoning loop that packs, verifies, and writes `autoquant-report.json`.
 - `distill`: post-pack codebook optimization with frozen indices (see Output-Aware Quantization).
 - `correct`: low-rank fp16 correction sidecars fitted to the post-pack residual.
 - `sweep`: run a matrix of pack/report experiments and write one JSON comparison file.
@@ -230,6 +231,14 @@ orka verify model.orka
 orka reconstruct model.orka --out reconstructed.json
 orka reconstruct model.orka --out reconstructed.safetensors --format safetensors
 ```
+
+Autonomous AutoQuant (Gratis is mandatory; API, budget, safety, quality, or verification failure ends the run without a successful artifact):
+
+```bash
+orka autoquant MODEL --autonomous --max-usd 0.05 --objective knee --target 0.02 --out OUTPUT
+```
+
+Set `ORKA_GRATIS_BASE_URL` or pass `--gratis-base-url`. There is no silent deterministic fallback. `--no-llm` remains the JSON-only policy path.
 
 Use `--max-values-per-tensor` during early experiments to test the compiler on tensor samples before packing full checkpoints.
 JSON reconstruction is dependency-free. Safetensors reconstruction requires optional `numpy` and `safetensors` packages.
