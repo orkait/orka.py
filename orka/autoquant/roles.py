@@ -3,7 +3,7 @@ output head from the input embedding (they need opposite treatment) and resolvin
 Returns (role, confidence). Unknown names fall to ('unknown', low) -> escalation."""
 from __future__ import annotations
 
-from orka.quant import classify_tensor_family
+from orka.quant.family import classify_tensor_family
 
 _OUT_HEAD = ("lm_head", "embed_out", "output.weight")
 _IN_EMBED = ("embed_in", "wte", "embed_tokens", "word_embeddings", "embedding")
@@ -23,7 +23,12 @@ def _conv_role(n: str, shape: tuple[int, ...]) -> tuple[str, float] | None:
     return "conv.in", 0.5
 
 
-def classify_role(name: str, shape: tuple[int, ...], tied: bool = False) -> tuple[str, float]:
+def classify_role(
+    name: str,
+    shape: tuple[int, ...],
+    tied: bool = False,
+    profile=None,
+) -> tuple[str, float]:
     n = name.lower()
     if n.endswith(".bias") or n.endswith("_bias"):
         return "bias", 1.0
@@ -41,6 +46,10 @@ def classify_role(name: str, shape: tuple[int, ...], tied: bool = False) -> tupl
             return "out-head", 1.0
         if any(m in n for m in _IN_EMBED):
             return "in-embed", 1.0
+        if profile is not None and profile.is_output_head(name, shape):
+            if tied:
+                return "in-embed", 0.8
+            return "out-head", 0.9
         return "unknown", 0.3
     if fam == "attention":
         for k in ("q_proj", "query"):
@@ -64,4 +73,6 @@ def classify_role(name: str, shape: tuple[int, ...], tied: bool = False) -> tupl
         if "up" in n or "fc1" in n or "fc_in" in n or ".wi" in n or "c_fc" in n or ".w3" in n:
             return "mlp.up", 0.9
         return "mlp.up", 0.5
+    if profile is not None and profile.is_output_head(name, shape) and fam not in ("attention", "mlp"):
+        return "out-head", 0.85
     return "unknown", 0.3
