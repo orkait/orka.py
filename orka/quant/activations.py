@@ -3,13 +3,71 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections import Counter
+from collections.abc import Mapping, Sequence, Set
 from pathlib import Path
+from typing import TypeVar
 
 from orka._runtime import _resolve_torch_device
 from orka._runtime.limits import _check_ram_cap
+from orka.core._checkpoint import _tensor_shapes
 from orka.core._features import ensure_awq_feature_enabled
 from orka.eval.prompts import _read_prompt_file
+
+_ActivationT = TypeVar("_ActivationT")
+
+_MIN_SHARED_SUFFIX_PARTS = 2
+
+NO_CHECKPOINT_MATCH_REASON = "no calibration activation matches a checkpoint tensor name"
+
+
+def _dotted_suffixes(name: str, first: int) -> list[str]:
+    parts = name.split(".")
+    return [".".join(parts[i:]) for i in range(first, len(parts) - _MIN_SHARED_SUFFIX_PARTS + 1)]
+
+
+def _prefix_rewrite(keys: Sequence[str], names: Set[str]) -> tuple[str, str] | None:
+    by_suffix: dict[str, list[str]] = {}
+    for name in names:
+        for suffix in _dotted_suffixes(name, 0):
+            by_suffix.setdefault(suffix, []).append(name)
+    votes: Counter[tuple[str, str]] = Counter()
+    for key in keys:
+        for suffix in _dotted_suffixes(key, 1):
+            hits = by_suffix.get(suffix)
+            if hits:
+                cut = len(suffix)
+                votes.update((key[:-cut], name[:-cut]) for name in hits)
+                break
+    return max(votes, key=lambda pair: (votes[pair], pair)) if votes else None
+
+
+def _align_activation_keys(
+    activations: Mapping[str, _ActivationT], names: Set[str]
+) -> dict[str, _ActivationT]:
+    """Key activations by checkpoint tensor name.
+
+    Calibration names modules after the class it loaded, which can differ from the
+    checkpoint by a wrapper prefix (a multimodal checkpoint loaded as its text model:
+    ``model.layers.*`` vs ``model.language_model.layers.*``). The pack looks activations
+    up by checkpoint name, so an unaligned key is silently never used.
+    """
+    aligned = {key: value for key, value in activations.items() if key in names}
+    rewrite = _prefix_rewrite([key for key in activations if key not in names], names)
+    if rewrite is not None:
+        source_prefix, checkpoint_prefix = rewrite
+        for key, value in activations.items():
+            target = checkpoint_prefix + key[len(source_prefix) :]
+            if key.startswith(source_prefix) and target in names:
+                aligned.setdefault(target, value)
+    return aligned
+
+
+def _align_to_checkpoint(
+    activations: Mapping[str, _ActivationT], source: Path
+) -> dict[str, _ActivationT]:
+    names = set(_tensor_shapes(source))
+    return _align_activation_keys(activations, names) if names else dict(activations)
 
 
 def _collect_activations_hf(
@@ -149,12 +207,15 @@ def _load_awq_activations(args: argparse.Namespace):
         model_dir = (
             Path(args.awq_model_dir) if args.awq_model_dir else Path(args.source).parent
         )
-        return _collect_activations_hf(
-            model_dir,
-            prompts,
-            max_length=args.calibration_max_length,
-            device=args.device if args.backend == "torch" else "cpu",
-            max_samples_per_layer=args.calibration_max_samples,
+        return _align_to_checkpoint(
+            _collect_activations_hf(
+                model_dir,
+                prompts,
+                max_length=args.calibration_max_length,
+                device=args.device if args.backend == "torch" else "cpu",
+                max_samples_per_layer=args.calibration_max_samples,
+            ),
+            Path(args.source),
         )
 
     # DEFAULT: Hessian-weighting via the bundled calibration corpus, so packs are
@@ -204,18 +265,23 @@ def _auto_hessian_activations(args: argparse.Namespace):
                 f"({len(prompts)} prompts) - pass --no-hessian to skip.",
                 flush=True,
             )
-            acts = _collect_activations_hf(
-                model_dir,
-                prompts,
-                max_length=getattr(args, "calibration_max_length", 256),
-                device=args.device,
-                max_samples_per_layer=getattr(args, "calibration_max_samples", 4096),
+            acts = _align_to_checkpoint(
+                _collect_activations_hf(
+                    model_dir,
+                    prompts,
+                    max_length=getattr(args, "calibration_max_length", 256),
+                    device=args.device,
+                    max_samples_per_layer=getattr(args, "calibration_max_samples", 4096),
+                ),
+                src,
             )
-            print(
-                f"Hessian-weighting: ENABLED (default) over {len(acts)} tensors.",
-                flush=True,
-            )
-            return acts
+            if acts:
+                print(
+                    f"Hessian-weighting: ENABLED (default) over {len(acts)} tensors.",
+                    flush=True,
+                )
+                return acts
+            reason = NO_CHECKPOINT_MATCH_REASON
         except Exception as exc:  # noqa: BLE001 - any failure must degrade gracefully
             reason = f"activation collection failed: {type(exc).__name__}: {exc}"
 
