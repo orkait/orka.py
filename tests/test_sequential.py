@@ -170,5 +170,63 @@ class SequentialPackIntegrationTest(unittest.TestCase):
             self.assertLess(verified["max_mse_delta"], 1e-6)
 
 
+WRAPPED_WEIGHT = "model.language_model.layers.0.weight"
+WRAPPED_NAMES = {WRAPPED_WEIGHT, "model.language_model.layers.0.bias", "model.language_model.embed.weight"}
+
+
+def _tiny_text_model():
+    import torch
+
+    class TinyText(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.embed = torch.nn.Embedding(8, 4)
+            self.model.layers = torch.nn.ModuleList([torch.nn.Linear(4, 4)])
+
+        def forward(self, input_ids, attention_mask):
+            return self.model.layers[0](self.model.embed(input_ids))
+
+    return TinyText()
+
+
+class _FixedTokenizer:
+    def __call__(self, prompt, return_tensors, truncation, max_length):
+        import torch
+
+        return {"input_ids": torch.tensor([[1, 2, 3]])}
+
+
+@unittest.skipUnless(HAS_HF, "torch + transformers required")
+class WrappedCheckpointNamesTest(unittest.TestCase):
+    def test_calibration_is_keyed_by_checkpoint_names(self) -> None:
+        from orka.pipeline.sequential import _checkpoint_param_names, _collect_block_activations
+
+        model = _tiny_text_model()
+        param_for = _checkpoint_param_names(model, WRAPPED_NAMES)
+        acts = _collect_block_activations(
+            model, _FixedTokenizer(), ["x"], param_for, "cpu", max_length=8, max_samples=64
+        )
+        self.assertEqual(set(acts), {WRAPPED_WEIGHT})
+
+    def test_packed_weights_patch_the_wrapped_parameter(self) -> None:
+        from unittest import mock
+
+        from orka.pipeline.sequential import _checkpoint_param_names, _load_packed_into_model
+
+        model = _tiny_text_model()
+        param_for = _checkpoint_param_names(model, WRAPPED_NAMES)
+        with tempfile.TemporaryDirectory() as tmp:
+            part = Path(tmp)
+            (part / "manifest.json").write_text(
+                json.dumps({"tensors": [{"name": WRAPPED_WEIGHT, "shape": [4, 4]}]})
+            )
+            with mock.patch(
+                "orka.pipeline.decode._decode_tensor", return_value=np.ones(16, dtype=np.float32)
+            ):
+                _load_packed_into_model(model, param_for, part)
+        self.assertTrue(bool((model.model.layers[0].weight == 1).all()))
+
+
 if __name__ == "__main__":
     unittest.main()

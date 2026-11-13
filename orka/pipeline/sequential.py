@@ -15,10 +15,12 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from collections.abc import Mapping, Set
 from pathlib import Path
 
 from orka.core._checkpoint import inspect_checkpoint
 from orka.core._util import _report_progress
+from orka.quant.activations import _align_activation_keys
 
 _LAYER_RE = re.compile(r"\.(\d+)\.")
 _FINAL_BLOCK = 1 << 30
@@ -46,24 +48,54 @@ def _group_tensors_by_block(names: list[str]) -> list[list[str]]:
     return [blocks[key] for key in sorted(blocks)]
 
 
+def _checkpoint_param_names(model, checkpoint_names: Set[str]) -> dict[str, str]:
+    """Checkpoint tensor name -> live model parameter name.
+
+    The calibration model can be a text-only class over a wrapped checkpoint, so its
+    parameter names differ from the checkpoint's by a prefix.
+    """
+    params = {name: name for name, _ in model.named_parameters()}
+    return _align_activation_keys(params, checkpoint_names)
+
+
+def _load_packed_into_model(model, param_for: Mapping[str, str], part_dir: Path) -> None:
+    """Overwrite the model's weights with one packed part's decoded tensors."""
+    import numpy as np
+    import torch
+
+    from orka.pipeline.decode import _decode_tensor
+
+    named_params = dict(model.named_parameters())
+    part_manifest = json.loads((part_dir / "manifest.json").read_text())
+    for tm in part_manifest.get("tensors", []):
+        param = named_params.get(param_for.get(tm["name"], ""))
+        if param is None:
+            continue
+        decoded = np.asarray(_decode_tensor(part_dir, tm), dtype=np.float32)
+        shaped = torch.from_numpy(decoded).reshape([int(x) for x in tm["shape"]])
+        with torch.no_grad():
+            param.data.copy_(shaped.to(param.device))
+
+
 def _collect_block_activations(
     model,
     tokenizer,
     prompts,
-    target_weight_names,
+    param_for: Mapping[str, str],
     device: str,
     max_length: int,
     max_samples: int,
 ) -> dict:
-    """Capture nn.Linear inputs for exactly the given weight names."""
+    """Capture nn.Linear inputs for the given checkpoint names, keyed by those names."""
     import torch
 
     activations: dict[str, list] = {}
     handles = []
-    targets = set(target_weight_names)
+    checkpoint_for = {param: name for name, param in param_for.items()}
     for mod_name, module in model.named_modules():
-        if isinstance(module, torch.nn.Linear) and (mod_name + ".weight") in targets:
-            captured = mod_name
+        checkpoint_name = checkpoint_for.get(mod_name + ".weight")
+        if isinstance(module, torch.nn.Linear) and checkpoint_name is not None:
+            captured = checkpoint_name
 
             def hook(_mod, inputs, _outputs, _name=captured):
                 x = inputs[0]
@@ -93,7 +125,7 @@ def _collect_block_activations(
         if full.shape[0] > max_samples:
             idx = torch.randperm(full.shape[0])[:max_samples]
             full = full[idx]
-        out[name + ".weight"] = full.to(dtype=torch.float32)
+        out[name] = full.to(dtype=torch.float32)
     return out
 
 
@@ -111,14 +143,12 @@ def pack_checkpoint_sequential(
     progress_file: Path | None = None,
     **pack_kwargs,
 ) -> dict:
-    import numpy as np
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from orka._runtime import _resolve_torch_device
     from orka.artifact.merge import merge_orka_artifacts
     from orka.eval.prompts import _read_prompt_file
-    from orka.pipeline.decode import _decode_tensor
     from orka.pipeline.pack import pack_checkpoint
 
     model_device = str(_resolve_torch_device(model_device))
@@ -146,13 +176,13 @@ def pack_checkpoint_sequential(
     )
     model.to(model_device)
     model.eval()
-    named_params = dict(model.named_parameters())
 
     report = inspect_checkpoint(Path(source))
     candidates = [t["name"] for t in report["tensors"] if t["candidate"]]
     if not candidates:
         raise RuntimeError("no quantizable tensors found in source")
     ordered_blocks = _group_tensors_by_block(candidates)
+    param_for = _checkpoint_param_names(model, set(candidates))
 
     part_dirs: list[Path] = []
     any_weighted = False
@@ -167,7 +197,7 @@ def pack_checkpoint_sequential(
                 model,
                 tokenizer,
                 prompts,
-                block_names,
+                {name: param_for[name] for name in block_names if name in param_for},
                 model_device,
                 calibration_max_length,
                 calibration_max_samples,
@@ -186,20 +216,7 @@ def pack_checkpoint_sequential(
                 **pack_kwargs,
             )
             part_dirs.append(part_dir)
-
-            # Patch the live model with the quantized weights so the next
-            # block calibrates against propagated (real) inputs.
-            part_manifest = json.loads((part_dir / "manifest.json").read_text())
-            for tm in part_manifest.get("tensors", []):
-                param = named_params.get(tm["name"])
-                if param is None:
-                    continue
-                decoded = np.asarray(_decode_tensor(part_dir, tm), dtype=np.float32)
-                shaped = torch.from_numpy(decoded).reshape(
-                    [int(x) for x in tm["shape"]]
-                )
-                with torch.no_grad():
-                    param.data.copy_(shaped.to(param.device))
+            _load_packed_into_model(model, param_for, part_dir)
     finally:
         try:
             model.to("cpu")
